@@ -34,3 +34,7 @@
 # Sphinx documentation
 /docs/_build/
 .eggs
+
+# Secrets
+doapi.txt
+web/.env
