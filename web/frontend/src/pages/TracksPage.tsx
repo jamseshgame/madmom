@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 interface Track {
   id: string
@@ -436,6 +436,22 @@ export default function TracksPage() {
   const [beatmapPanel, setBeatmapPanel] = useState<{ track: Track; stem: string } | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
 
+  // song.ini editor state for the detail view
+  const [songIni, setSongIni] = useState<Record<string, string>>({})
+  const [iniSaveState, setIniSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  const [iniError, setIniError] = useState('')
+  const [albumArtFile, setAlbumArtFile] = useState<File | null>(null)
+  const [albumPreview, setAlbumPreview] = useState<string | null>(null)
+  const albumInputRef = useRef<HTMLInputElement | null>(null)
+  const updateIni = (key: string, value: string) =>
+    setSongIni((prev) => ({ ...prev, [key]: value }))
+  const handleAlbumPick = (f: File | null) => {
+    if (!f) return
+    if (albumPreview && albumPreview.startsWith('blob:')) URL.revokeObjectURL(albumPreview)
+    setAlbumArtFile(f)
+    setAlbumPreview(URL.createObjectURL(f))
+  }
+
   const loadTracks = useCallback(() => {
     fetch('/api/tracks')
       .then((r) => r.json())
@@ -447,6 +463,75 @@ export default function TracksPage() {
   }, [])
 
   useEffect(() => { loadTracks() }, [loadTracks])
+
+  // Whenever the user selects a different track, hydrate the metadata panel
+  useEffect(() => {
+    if (!selectedId) {
+      if (albumPreview && albumPreview.startsWith('blob:')) URL.revokeObjectURL(albumPreview)
+      setSongIni({})
+      setAlbumArtFile(null)
+      setAlbumPreview(null)
+      setIniSaveState('idle')
+      setIniError('')
+      return
+    }
+    const track = tracks.find((t) => t.id === selectedId)
+    if (!track) return
+    fetch(`/api/tracks/${selectedId}/song-ini`)
+      .then((r) => (r.ok ? r.json() : {}))
+      .then((data: Record<string, unknown>) => {
+        const out: Record<string, string> = {}
+        for (const [k, v] of Object.entries(data)) out[k] = String(v ?? '')
+        // Fall back to track-level metadata when song.ini is missing fields
+        if (!out.name && track.name) out.name = track.name
+        if (!out.artist && track.artist) out.artist = track.artist
+        if (!out.album && track.album) out.album = track.album
+        if (!out.genre && track.genre) out.genre = track.genre
+        if (!out.year && track.year) out.year = track.year
+        setSongIni(out)
+      })
+      .catch(() => setSongIni({}))
+
+    if (track.stems.album_png) {
+      setAlbumPreview(`/api/tracks/${selectedId}/stems/album_png`)
+    } else {
+      setAlbumPreview(null)
+    }
+    setAlbumArtFile(null)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId, tracks])
+
+  const saveTrackSongIni = async () => {
+    if (!selectedId) return
+    setIniSaveState('saving')
+    setIniError('')
+    try {
+      const fd = new FormData()
+      fd.append('fields', JSON.stringify(songIni))
+      if (albumArtFile) fd.append('album_art', albumArtFile)
+      const res = await fetch(`/api/tracks/${selectedId}/song-ini`, { method: 'PATCH', body: fd })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || `Save failed: ${res.status}`)
+      }
+      const updated = await res.json()
+      const out: Record<string, string> = {}
+      for (const [k, v] of Object.entries(updated)) out[k] = String(v ?? '')
+      setSongIni(out)
+      if (albumArtFile) {
+        if (albumPreview && albumPreview.startsWith('blob:')) URL.revokeObjectURL(albumPreview)
+        setAlbumArtFile(null)
+        setAlbumPreview(`/api/tracks/${selectedId}/stems/album_png?t=${Date.now()}`)
+      }
+      setIniSaveState('saved')
+      setTimeout(() => setIniSaveState('idle'), 2000)
+      // Refresh track list so the row reflects new name/artist
+      loadTracks()
+    } catch (e) {
+      setIniError((e as Error).message)
+      setIniSaveState('error')
+    }
+  }
 
   const handleDelete = async (id: string) => {
     await fetch(`/api/tracks/${id}`, { method: 'DELETE' })
@@ -519,6 +604,152 @@ export default function TracksPage() {
                   </div>
                 </div>
               ))}
+          </div>
+
+          <div className="mt-6 bg-gray-950 border border-gray-800 rounded-xl p-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="text-yellow-400 text-xs font-mono">song.ini</span>
+                <span className="text-gray-600 text-xs">[song]</span>
+              </div>
+              <div className="flex items-center gap-3">
+                {iniSaveState === 'saved' && (
+                  <span className="text-xs text-emerald-400">Saved</span>
+                )}
+                {iniSaveState === 'error' && (
+                  <span className="text-xs text-red-400">{iniError}</span>
+                )}
+                <button
+                  onClick={saveTrackSongIni}
+                  disabled={iniSaveState === 'saving'}
+                  className="px-3 py-1.5 bg-jam-600 hover:bg-jam-500 disabled:opacity-40 text-white rounded-md text-xs font-medium"
+                >
+                  {iniSaveState === 'saving' ? 'Saving...' : 'Save metadata'}
+                </button>
+              </div>
+            </div>
+
+            {/* Album art */}
+            <div className="flex gap-4 items-start">
+              <button
+                type="button"
+                onClick={() => albumInputRef.current?.click()}
+                className="group relative w-24 h-24 shrink-0 rounded-lg overflow-hidden border border-gray-700 hover:border-jam-500 bg-gray-800"
+                title="Click to replace album.png"
+              >
+                {albumPreview ? (
+                  <>
+                    <img src={albumPreview} alt="album" className="w-full h-full object-cover" />
+                    <span className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-xs text-gray-200">
+                      Change
+                    </span>
+                  </>
+                ) : (
+                  <span className="w-full h-full flex items-center justify-center text-xs text-gray-500 px-2 text-center">
+                    Click to add<br />album.png
+                  </span>
+                )}
+              </button>
+              <input
+                ref={albumInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                className="hidden"
+                onChange={(e) => handleAlbumPick(e.target.files?.[0] ?? null)}
+              />
+              <div className="text-xs text-gray-500 mt-1">
+                <p>
+                  <span className="text-gray-400 font-mono">album.png</span> — included in the published game folder.
+                </p>
+                <p className="text-gray-600 mt-1">Any image is resized to 512×512 PNG on save.</p>
+              </div>
+            </div>
+
+            {/* Primary fields */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {([
+                ['name', 'name *'],
+                ['artist', 'artist *'],
+              ] as const).map(([key, label]) => (
+                <label key={key} className="block">
+                  <span className="text-xs text-gray-400">{label}</span>
+                  <input
+                    type="text"
+                    value={songIni[key] ?? ''}
+                    onChange={(e) => updateIni(key, e.target.value)}
+                    className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-jam-500"
+                  />
+                </label>
+              ))}
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {(['album', 'genre', 'year'] as const).map((key) => (
+                <label key={key} className="block">
+                  <span className="text-xs text-gray-400">{key}</span>
+                  <input
+                    type="text"
+                    value={songIni[key] ?? ''}
+                    onChange={(e) => updateIni(key, e.target.value)}
+                    className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-jam-500"
+                  />
+                </label>
+              ))}
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {(['charter', 'loading_phrase'] as const).map((key) => (
+                <label key={key} className="block">
+                  <span className="text-xs text-gray-400">{key}</span>
+                  <input
+                    type="text"
+                    value={songIni[key] ?? ''}
+                    onChange={(e) => updateIni(key, e.target.value)}
+                    className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-jam-500"
+                  />
+                </label>
+              ))}
+            </div>
+
+            {/* Timing */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {([
+                ['delay', 'delay (ms)'],
+                ['song_length', 'song_length (ms)'],
+                ['preview_start_time', 'preview_start_time (ms)'],
+              ] as const).map(([key, label]) => (
+                <label key={key} className="block">
+                  <span className="text-xs text-gray-400">{label}</span>
+                  <input
+                    type="number"
+                    value={songIni[key] ?? ''}
+                    onChange={(e) => updateIni(key, e.target.value)}
+                    className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-jam-500"
+                  />
+                </label>
+              ))}
+            </div>
+
+            {/* Difficulties */}
+            <div>
+              <span className="text-xs text-gray-500 block mb-2">Difficulties</span>
+              <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+                {(['diff_band', 'diff_guitar', 'diff_drums', 'diff_bass', 'diff_rhythm', 'diff_keys'] as const).map(
+                  (key) => (
+                    <label key={key} className="block">
+                      <span className="text-xs text-gray-600">{key.replace('diff_', '')}</span>
+                      <input
+                        type="number"
+                        min="-1"
+                        max="6"
+                        value={songIni[key] ?? ''}
+                        onChange={(e) => updateIni(key, e.target.value)}
+                        className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-200 text-center focus:outline-none focus:border-jam-500"
+                      />
+                    </label>
+                  ),
+                )}
+              </div>
+              <span className="text-xs text-gray-700 mt-1 block">-1 = uncharted, 0–6 = difficulty tier</span>
+            </div>
           </div>
 
           <InlinePublish track={selectedTrack} />

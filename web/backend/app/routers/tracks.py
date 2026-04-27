@@ -6,11 +6,15 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, Form, HTTPException
+from typing import Optional
+
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 
 from ..config import settings
+from ..services.audio import resize_to_square_png
 from ..services.chart_generator import generate_full_chart
+from ..services.game_songs import _parse_song_ini
 from ..services.github_publisher import publish_song_folder
 from ..services.jobs import JobStatus, create_job, get_job
 from ..services.stems import DEMUCS_TO_GAME, _convert_to_ogg, write_song_ini
@@ -74,6 +78,62 @@ async def remove_track(track_id: str):
     if not delete_track(track_id):
         raise HTTPException(404, 'Track not found')
     return {'deleted': True}
+
+
+@router.get('/{track_id}/song-ini')
+async def get_track_song_ini(track_id: str):
+    """Read the song.ini sitting in the track's stems folder. Returns {} if missing."""
+    track = get_track(track_id)
+    if not track:
+        raise HTTPException(404, 'Track not found')
+    path = track.stems_dir / 'song.ini'
+    if not path.exists():
+        return {}
+    return _parse_song_ini(path.read_text(encoding='utf-8'))
+
+
+@router.patch('/{track_id}/song-ini')
+async def update_track_song_ini(
+    track_id: str,
+    fields: str = Form(...),
+    album_art: Optional[UploadFile] = File(None),
+):
+    """Write song.ini for a track and (optionally) replace album.png."""
+    track = get_track(track_id)
+    if not track:
+        raise HTTPException(404, 'Track not found')
+    try:
+        ini_fields = json.loads(fields)
+    except json.JSONDecodeError:
+        raise HTTPException(400, 'fields must be JSON')
+    if not isinstance(ini_fields, dict):
+        raise HTTPException(400, 'fields must be a JSON object')
+
+    track.stems_dir.mkdir(parents=True, exist_ok=True)
+    write_song_ini(track.stems_dir, ini_fields)
+    track.stems['song_ini'] = 'song.ini'
+
+    if album_art is not None:
+        raw = await album_art.read()
+        if raw:
+            try:
+                png = resize_to_square_png(raw, size=512)
+                (track.stems_dir / 'album.png').write_bytes(png)
+                track.stems['album_png'] = 'album.png'
+            except Exception as ae:
+                print(f'[tracks] album.png replace failed: {ae}')
+
+    # Mirror name/artist/album/genre/year into the Track dataclass so the
+    # library list and publish logic stay in sync.
+    update_track_meta(
+        track_id,
+        name=ini_fields.get('name', track.name),
+        artist=ini_fields.get('artist', track.artist),
+        album=ini_fields.get('album', track.album),
+        genre=ini_fields.get('genre', track.genre),
+        year=ini_fields.get('year', track.year),
+    )
+    return ini_fields
 
 
 @router.get('/{track_id}/stems/{stem}')
