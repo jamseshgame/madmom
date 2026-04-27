@@ -318,12 +318,16 @@ async def generate_beatmap_from_track(
                     source_dir=output_dir,
                 )
                 await job.send_done(result)
+        except asyncio.CancelledError:
+            return
         except Exception as e:
+            if job.cancelled:
+                return
             import traceback
             print(f'[tracks] Job {job.id} failed: {traceback.format_exc()}')
             await job.send_error(str(e) or 'Unknown error')
 
-    asyncio.create_task(_run())
+    job.task = asyncio.create_task(_run())
 
     return {'job_id': job.id}
 

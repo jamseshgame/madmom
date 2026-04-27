@@ -149,6 +149,13 @@ function BeatmapPanel({
           evtSource.close()
           setError(data.message)
           setGenerating(false)
+        } else if (data.step === 'cancelled') {
+          evtSource.close()
+          setGenerating(false)
+          setProgress(0)
+          setMessage('')
+          setJobId('')
+          setBeatmapJobId('')
         }
       }
       evtSource.onerror = () => {
@@ -245,7 +252,21 @@ function BeatmapPanel({
               <div className="w-full bg-gray-800 rounded-full h-2 overflow-hidden">
                 <div className="bg-jam-500 h-full rounded-full transition-all duration-500" style={{ width: `${Math.max(progress, 2)}%` }} />
               </div>
-              <p className="text-xs text-gray-500">{message}</p>
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-xs text-gray-500 flex-1 truncate">{message}</p>
+                <button
+                  onClick={async () => {
+                    try {
+                      await fetch(`/api/beatmap/${jobId}/cancel`, { method: 'POST' })
+                    } catch {
+                      // best-effort
+                    }
+                  }}
+                  className="shrink-0 px-3 py-1.5 bg-red-900/40 hover:bg-red-800/60 border border-red-800 text-red-300 hover:text-red-200 rounded text-xs font-medium transition-colors"
+                >
+                  Kill task
+                </button>
+              </div>
             </div>
           )}
 

@@ -156,10 +156,14 @@ async def create_beatmap(
                 await job.send_error('No onsets detected in audio')
             else:
                 await job.send_done(result)
+        except asyncio.CancelledError:
+            return
         except Exception as e:
+            if job.cancelled:
+                return
             await job.send_error(str(e))
 
-    asyncio.create_task(_run())
+    job.task = asyncio.create_task(_run())
 
     return {'job_id': job.id}
 
@@ -235,14 +239,28 @@ async def create_beatmap_from_stem(
                     except Exception as be:
                         print(f'[beatmap] add_beatmap_record failed: {be}')
                 await job.send_done(job.metadata | result)
+        except asyncio.CancelledError:
+            return
         except Exception as e:
+            if job.cancelled:
+                return
             import traceback
             print(f'[beatmap] Job {job.id} failed: {traceback.format_exc()}')
             await job.send_error(str(e) or 'Unknown error')
 
-    asyncio.create_task(_run())
+    job.task = asyncio.create_task(_run())
 
     return {'job_id': job.id}
+
+
+@router.post('/{job_id}/cancel')
+async def cancel_beatmap(job_id: str):
+    """Cancel an in-flight beatmap generation."""
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(404, 'Job not found')
+    await job.cancel()
+    return {'ok': True}
 
 
 @router.get('/{job_id}/status')

@@ -34,15 +34,18 @@ function StemBeatmapTracker({
   beatmapJobId,
   onDone,
   onView,
+  onCancelled,
 }: {
   beatmapJobId: string
   onDone?: (jobId: string) => void
   onView?: (jobId: string) => void
+  onCancelled?: () => void
 }) {
   const [progress, setProgress] = useState(0)
   const [message, setMessage] = useState('Starting...')
   const [done, setDone] = useState(false)
   const [error, setError] = useState('')
+  const [cancelled, setCancelled] = useState(false)
 
   useEffect(() => {
     const evtSource = new EventSource(`/api/beatmap/${beatmapJobId}/status`)
@@ -59,6 +62,10 @@ function StemBeatmapTracker({
       } else if (data.step === 'error') {
         evtSource.close()
         setError(data.message)
+      } else if (data.step === 'cancelled') {
+        evtSource.close()
+        setCancelled(true)
+        if (onCancelled) onCancelled()
       }
     }
 
@@ -68,7 +75,11 @@ function StemBeatmapTracker({
     }
 
     return () => evtSource.close()
-  }, [beatmapJobId, onDone])
+  }, [beatmapJobId, onDone, onCancelled])
+
+  if (cancelled) {
+    return <div className="text-xs text-gray-500 mt-1">Cancelled</div>
+  }
 
   if (error) {
     return <div className="text-xs text-red-400 mt-1">{error}</div>
@@ -109,7 +120,21 @@ function StemBeatmapTracker({
           style={{ width: `${Math.max(progress, 2)}%` }}
         />
       </div>
-      <div className="text-xs text-gray-500 truncate">{message}</div>
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs text-gray-500 truncate flex-1">{message}</div>
+        <button
+          onClick={async () => {
+            try {
+              await fetch(`/api/beatmap/${beatmapJobId}/cancel`, { method: 'POST' })
+            } catch {
+              // best-effort
+            }
+          }}
+          className="shrink-0 px-2 py-0.5 bg-red-900/40 hover:bg-red-800/60 border border-red-800 text-red-300 hover:text-red-200 rounded text-[10px] font-medium transition-colors"
+        >
+          Kill
+        </button>
+      </div>
     </div>
   )
 }
@@ -267,6 +292,11 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                   <div className="w-full">
                     <StemBeatmapTracker
                       beatmapJobId={bm.jobId}
+                      onCancelled={() => setBeatmaps((prev) => {
+                        const next = { ...prev }
+                        delete next[stem]
+                        return next
+                      })}
                       onView={
                         trackId
                           ? (id) =>
