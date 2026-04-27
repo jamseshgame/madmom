@@ -10,6 +10,20 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.1',
+    date: '2026-04-27',
+    summary:
+      'Beatmap editor is now a full-page workspace with difficulty switching, drag-to-move with BPM snap, and drum-kit lane labels.',
+    entries: [
+      { kind: 'changed', text: 'Beatmap editor is now a dedicated full-page route at /edit/:trackId/:beatmapId — the runway maximises to fill the viewport on the left, with all controls collected into a sidebar on the right.' },
+      { kind: 'added', text: 'Difficulty dropdown in the editor sidebar — switch between every editable [*Single] / [*Drums] section in the chart. In-memory edits are kept while you switch and Save writes them all back.' },
+      { kind: 'added', text: 'Click-and-drag a note in the runway to move it to a new tick / lane. Drop position snaps to the chosen beat fraction (1/4, 1/8, 1/16, or 1/32 — selectable in the sidebar).' },
+      { kind: 'added', text: 'Beat grid lines drawn on the runway, with fainter sub-beat lines at the current snap divisor.' },
+      { kind: 'added', text: 'Lane labels show drum-kit names (Kick / Snare / Hi-hat / Tom / Cymbal) when editing a drum stem beatmap, with the underlying CH colour name shown next to it.' },
+      { kind: 'changed', text: 'Arrow-key tick nudge now steps by the chosen snap divisor, not a fixed 1/32.' },
+    ],
+  },
+  {
     version: '1.0',
     date: '2026-04-27',
     summary:

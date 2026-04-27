@@ -1,2 +1,2 @@
 // Bump this when shipping a new release. Surfaced in the header and footer.
-export const STUDIO_VERSION = '1.0'
+export const STUDIO_VERSION = '1.1'

@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useLocation, useSearchParams } from 'react-router-dom'
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import CreateSection from '../components/CreateSection.tsx'
 import StemPlayer from '../components/StemPlayer.tsx'
 import BeatmapStatsModal, { BeatmapRecord as BeatmapStatsRecord } from '../components/BeatmapStatsModal.tsx'
-import BeatmapEditor from '../components/BeatmapEditor.tsx'
 
 type BeatmapRecord = BeatmapStatsRecord
 
@@ -481,6 +480,7 @@ export default function TracksPage() {
   const [beatmapPanel, setBeatmapPanel] = useState<{ track: Track; stem: string } | null>(null)
   const [searchParams, setSearchParams] = useSearchParams()
   const location = useLocation()
+  const navigate = useNavigate()
   const createResetKey = (location.state as { resetAt?: number } | null)?.resetAt ?? 'default'
   const selectedId = searchParams.get('id')
   const setSelectedId = useCallback(
@@ -493,7 +493,6 @@ export default function TracksPage() {
   const [confirmDelete, setConfirmDelete] = useState<Track | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [statsBeatmap, setStatsBeatmap] = useState<BeatmapRecord | null>(null)
-  const [editBeatmap, setEditBeatmap] = useState<BeatmapRecord | null>(null)
 
   // song.ini editor state for the detail view
   const [songIni, setSongIni] = useState<Record<string, string>>({})
@@ -696,7 +695,7 @@ export default function TracksPage() {
                           <span className="text-green-500/80 shrink-0">›</span>
                         </button>
                         <button
-                          onClick={() => setEditBeatmap(bm)}
+                          onClick={() => navigate(`/edit/${selectedTrack.id}/${bm.id}`)}
                           className="shrink-0 px-2 py-1 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-600 rounded text-[11px] text-gray-300 hover:text-gray-100 transition-colors"
                           title="Edit beatmap"
                         >
@@ -875,15 +874,6 @@ export default function TracksPage() {
               setStatsBeatmap(null)
               loadTracks()
             }}
-          />
-        )}
-
-        {editBeatmap && selectedTrack && (
-          <BeatmapEditor
-            trackId={selectedTrack.id}
-            beatmapId={editBeatmap.id}
-            beatmapName={editBeatmap.song_name}
-            onClose={() => setEditBeatmap(null)}
           />
         )}
 

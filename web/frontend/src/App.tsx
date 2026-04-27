@@ -2,6 +2,7 @@ import { Link, NavLink, Route, Routes, useLocation, useNavigate } from 'react-ro
 import TracksPage from './pages/TracksPage.tsx'
 import GameSongsPage from './pages/GameSongsPage.tsx'
 import ChangelogPage from './pages/ChangelogPage.tsx'
+import BeatmapEditor from './components/BeatmapEditor.tsx'
 import { VersionBanner, VersionFooter } from './components/VersionStatus.tsx'
 import { logout } from './components/AuthGate.tsx'
 import { STUDIO_VERSION } from './version.ts'
@@ -14,6 +15,13 @@ const navItems = [
 export default function App() {
   const navigate = useNavigate()
   const location = useLocation()
+  if (location.pathname.startsWith('/edit/')) {
+    return (
+      <Routes>
+        <Route path="/edit/:trackId/:beatmapId" element={<BeatmapEditor />} />
+      </Routes>
+    )
+  }
   return (
     <div className="min-h-screen flex flex-col">
       <header className="border-b border-gray-800 bg-gray-900/80 backdrop-blur sticky top-0 z-50">
