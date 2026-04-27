@@ -831,19 +831,33 @@ export default function TracksPage() {
           const stemCount = Object.entries(track.stems).filter(
             ([k]) => !NON_AUDIO_KEYS.has(k),
           ).length
+          const hasArt = !!track.stems.album_png
           return (
             <button
               key={track.id}
               onClick={() => setSelectedId(track.id)}
-              className="w-full text-left bg-gray-900 border border-gray-800 hover:border-gray-700 hover:bg-gray-900/70 rounded-xl px-5 py-4 transition-colors"
+              className="w-full text-left bg-gray-900 border border-gray-800 hover:border-gray-700 hover:bg-gray-900/70 rounded-xl px-4 py-3 transition-colors"
             >
               <div className="flex items-center justify-between gap-4">
-                <div className="min-w-0">
-                  <h3 className="font-medium text-gray-100 truncate">{track.name}</h3>
-                  <p className="text-xs text-gray-600 mt-0.5">
-                    {formatDate(track.created_at)} &middot; {track.model} &middot;{' '}
-                    {track.output_format.toUpperCase()}
-                  </p>
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-12 h-12 shrink-0 rounded-md overflow-hidden bg-gray-800 border border-gray-700 flex items-center justify-center">
+                    {hasArt ? (
+                      <img
+                        src={`/api/tracks/${track.id}/stems/album_png`}
+                        alt=""
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <span className="text-gray-600 text-[10px] font-mono">no art</span>
+                    )}
+                  </div>
+                  <div className="min-w-0">
+                    <h3 className="font-medium text-gray-100 truncate">{track.name}</h3>
+                    <p className="text-xs text-gray-600 mt-0.5">
+                      {formatDate(track.created_at)} &middot; {track.model} &middot;{' '}
+                      {track.output_format.toUpperCase()}
+                    </p>
+                  </div>
                 </div>
                 <div className="flex items-center gap-3 shrink-0">
                   <span className="text-xs text-gray-500">{stemCount} stems</span>
