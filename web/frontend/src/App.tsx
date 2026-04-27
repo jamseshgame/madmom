@@ -3,6 +3,7 @@ import TracksPage from './pages/TracksPage.tsx'
 import GameSongsPage from './pages/GameSongsPage.tsx'
 import { VersionBanner, VersionFooter } from './components/VersionStatus.tsx'
 import { logout } from './components/AuthGate.tsx'
+import { STUDIO_VERSION } from './version.ts'
 
 const navItems = [
   { to: '/', label: 'Studio Library' },
@@ -19,6 +20,9 @@ export default function App() {
           <a href="/" className="flex items-center gap-2 text-xl font-bold tracking-tight">
             <img src="/jamsesh-logo.png" alt="Jamsesh" className="h-7 w-auto" />
             <span className="text-gray-400">Studio</span>
+            <span className="text-[11px] font-medium text-gray-600 px-1.5 py-0.5 rounded bg-gray-800/60 ml-1 tracking-normal">
+              v{STUDIO_VERSION}
+            </span>
           </a>
           <nav className="flex gap-1 items-center">
             {navItems.map(({ to, label }) => (
@@ -65,7 +69,7 @@ export default function App() {
         </Routes>
       </main>
       <footer className="border-t border-gray-800 py-4 text-center text-xs text-gray-600 space-x-2">
-        <span>Jamsesh Studio &middot; Powered by madmom</span>
+        <span>Jamsesh Studio v{STUDIO_VERSION} &middot; Powered by madmom</span>
         <span className="text-gray-700">·</span>
         <VersionFooter />
       </footer>
