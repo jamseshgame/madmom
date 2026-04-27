@@ -716,10 +716,14 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
         </div>
       )}
 
-      {phase === 'separating' && !jobId && file && (
-        <div className="flex items-center gap-3">
+      {phase === 'separating' && !jobId && (
+        <div className="flex items-center gap-3 bg-gray-900 border border-gray-800 rounded-xl p-5">
           <div className="animate-spin h-5 w-5 border-2 border-jam-400 border-t-transparent rounded-full" />
-          <span className="text-gray-300">Uploading {file.name}...</span>
+          <span className="text-gray-300">
+            {file
+              ? `Uploading ${file.name}...`
+              : `Uploading ${Object.values(manualStems).filter(Boolean).length} stems...`}
+          </span>
         </div>
       )}
 
