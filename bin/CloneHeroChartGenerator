@@ -1,0 +1,834 @@
+#!/usr/bin/env python
+"""
+CloneHeroChartGenerator -- generate Clone Hero .chart files from audio.
+
+This program analyzes an audio file to detect onsets, estimate tempo,
+and assign notes to 5 fret lanes based on spectral content. The output
+is a .chart file compatible with Clone Hero.
+
+=== FRET RULES (HARD ENFORCED) ===
+
+Only the following 10 note types are valid:
+
+  Single frets:        0, 1, 2, 3, 4
+  Adjacent pairs:      0+1, 1+2, 2+3, 3+4
+  Open note:           fret 7 — top ~5% highest spectral centroid
+
+Each type can be one of these variants:
+
+  Normal (tap)         - short press
+  Hold (sustain)       - sustained press (sustain > 0 ticks)
+  Slide                - E slide event
+
+  Exception: Open notes are TAP ONLY (no holds/slides — player
+  isn't pressing a fret so cannot sustain).
+
+Total: 9 types x 3 variants + 1 open tap = 28 possible note events.
+
+Any note combination not in this set is rejected and corrected
+before being written to the chart file.
+
+Dual-fret holds and slides must have identical duration for each
+fret. Enforced at every stage of note generation.
+
+Chord slides must stay parallel: the SAME adjacent pair at every
+position in the slide. E.g. all positions are 1+2, never shifting
+to 2+3. This prevents the two lanes from visually converging
+in-game. Achieved by rewriting all frets to one fixed pair.
+
+"""
+
+import argparse
+import os
+import warnings
+from collections import defaultdict
+from itertools import groupby
+
+import numpy as np
+
+from madmom.audio.spectrogram import Spectrogram
+from madmom.features.beats import RNNBeatProcessor
+from madmom.features.onsets import OnsetPeakPickingProcessor, RNNOnsetProcessor
+from madmom.features.tempo import TempoEstimationProcessor
+
+
+# --- Spectral centroid fret assignment ---
+
+
+def compute_spectral_centroids(spec, fps):
+    """
+    Compute the spectral centroid (Hz) and spectral spread for each frame.
+
+    Returns
+    -------
+    centroids : numpy array, shape (num_frames,)
+        Spectral centroid in Hz per frame.
+    spreads : numpy array, shape (num_frames,)
+        Spectral spread (standard deviation of frequency) per frame.
+
+    """
+    freqs = spec.bin_frequencies
+    power = np.array(spec) ** 2
+    total_power = np.sum(power, axis=1, keepdims=True)
+    total_power = np.maximum(total_power, 1e-10)  # avoid div by zero
+
+    centroids = np.sum(power * freqs[np.newaxis, :], axis=1) / total_power.squeeze()
+    # Spread = weighted std of frequency
+    spreads = np.sqrt(
+        np.sum(power * (freqs[np.newaxis, :] - centroids[:, np.newaxis]) ** 2, axis=1) / total_power.squeeze()
+    )
+    return centroids, spreads
+
+
+def compute_onset_centroids(onsets, centroids, spreads, fps):
+    """
+    Look up the spectral centroid and spread at each onset time.
+    Averages over a 3-frame window for robustness.
+
+    Returns
+    -------
+    onset_centroids : numpy array, shape (num_onsets,)
+    onset_spreads : numpy array, shape (num_onsets,)
+
+    """
+    oc = np.zeros(len(onsets))
+    os_ = np.zeros(len(onsets))
+    for i, t in enumerate(onsets):
+        frame = int(round(t * fps))
+        frame = np.clip(frame, 0, len(centroids) - 1)
+        start = max(0, frame - 1)
+        end = min(len(centroids), frame + 2)
+        oc[i] = np.mean(centroids[start:end])
+        os_[i] = np.mean(spreads[start:end])
+    return oc, os_
+
+
+def centroid_to_frets(onset_centroids, onset_spreads, chord_threshold, open_pct=5):
+    """
+    Map spectral centroids to frets 0-4 and open (7) using percentile binning.
+    Uses spectral spread to decide when to add a chord (adjacent fret).
+
+    The highest-centroid onsets (top open_pct%) are assigned as open notes
+    (fret 7). The remaining onsets are split into 5 equal percentile bins
+    for frets 0-4, guaranteeing ~equal distribution.
+
+    Parameters
+    ----------
+    onset_centroids : numpy array
+        Spectral centroid per onset.
+    onset_spreads : numpy array
+        Spectral spread per onset.
+    chord_threshold : float
+        Spread percentile above which a chord is generated (0-1).
+        Lower = more chords.
+    open_pct : float
+        Percentage of highest-centroid onsets to assign as open notes.
+
+    Returns
+    -------
+    frets_list : list of list of int
+        Fret assignment(s) per onset.
+
+    """
+    # Top open_pct% of centroids become open notes
+    open_cutoff = np.percentile(onset_centroids, 100 - open_pct)
+
+    # For the remaining onsets, compute 5 equal bins
+    non_open_mask = onset_centroids < open_cutoff
+    if np.any(non_open_mask):
+        non_open_centroids = onset_centroids[non_open_mask]
+        percentiles = np.percentile(non_open_centroids, [20, 40, 60, 80])
+    else:
+        percentiles = np.percentile(onset_centroids, [20, 40, 60, 80])
+
+    # Determine the spread threshold for chord generation
+    spread_cutoff = np.percentile(onset_spreads, chord_threshold * 100)
+
+    frets_list = []
+    for i in range(len(onset_centroids)):
+        # Open note: highest centroid onsets
+        if onset_centroids[i] >= open_cutoff:
+            frets_list.append([7])
+            continue
+
+        # Map to fret 0-4
+        fret = int(np.clip(np.digitize(onset_centroids[i], percentiles), 0, 4))
+        frets = [fret]
+
+        # Add adjacent fret for high-spread onsets (wide frequency content)
+        if onset_spreads[i] >= spread_cutoff:
+            centroid = onset_centroids[i]
+            if fret < 4:
+                upper_bound = percentiles[fret] if fret < len(percentiles) else np.inf
+                lower_bound = percentiles[fret - 1] if fret > 0 else -np.inf
+                mid = (lower_bound + upper_bound) / 2 if np.isfinite(lower_bound) and np.isfinite(upper_bound) else centroid
+                if centroid >= mid and fret < 4:
+                    frets.append(fret + 1)
+                elif centroid < mid and fret > 0:
+                    frets.append(fret - 1)
+                elif fret < 4:
+                    frets.append(fret + 1)
+                else:
+                    frets.append(fret - 1)
+            else:
+                frets.append(fret - 1)
+
+        frets_list.append(sorted(set(frets)))
+    return frets_list
+
+
+# --- Allowed fret combinations (hard rule) ---
+
+ALLOWED_FRETS = {
+    (0,), (1,), (2,), (3,), (4,),       # singles
+    (0, 1), (1, 2), (2, 3), (3, 4),     # adjacent pairs
+    (7,),                                 # open note
+}
+
+VALID_PAIRS = [(0, 1), (1, 2), (2, 3), (3, 4)]
+
+
+def fix_chord_adjacency(frets):
+    """
+    Reduce a set of frets to at most 2 adjacent frets.
+
+    Only adjacent pairs are allowed: 0+1, 1+2, 2+3, 3+4.
+    If a chord has non-adjacent frets, pick the best adjacent pair.
+    If it's a single fret, return as-is.
+
+    """
+    if len(frets) <= 1:
+        return frets
+
+    frets_sorted = sorted(set(frets))
+
+    # Check if any valid adjacent pair exists in the fret set
+    best_pair = None
+    for a, b in VALID_PAIRS:
+        if a in frets_sorted and b in frets_sorted:
+            best_pair = [a, b]
+            # Prefer a pair that includes the strongest fret (first in list)
+            if frets[0] in (a, b):
+                return [a, b]
+
+    if best_pair is not None:
+        return best_pair
+
+    # No valid pair exists — return single strongest fret
+    return [frets[0]]
+
+
+def validate_frets(frets):
+    """
+    Hard-validate frets against ALLOWED_FRETS.
+
+    Returns a corrected fret list that is guaranteed to be in the allowed set.
+    If the input is already valid, returns it unchanged.
+    If not, applies fix_chord_adjacency then falls back to the primary fret.
+
+    """
+    key = tuple(sorted(frets))
+    if key in ALLOWED_FRETS:
+        return list(key)
+
+    # Try adjacency fix first
+    fixed = fix_chord_adjacency(frets)
+    key = tuple(sorted(fixed))
+    if key in ALLOWED_FRETS:
+        return list(key)
+
+    # Last resort: keep only the first fret as a single
+    return [frets[0]]
+
+
+# --- Sustain uniformity for chords ---
+
+
+def unify_chord_sustains(notes):
+    """
+    HARD RULE: Dual-fret holds and slides must have the same duration
+    for each fret. Ensures all notes at the same tick share the maximum
+    sustain among them.
+
+    """
+    # Group by tick
+    tick_groups = defaultdict(list)
+    for i, (tick, fret, sustain) in enumerate(notes):
+        tick_groups[tick].append(i)
+
+    result = list(notes)
+    for tick, indices in tick_groups.items():
+        if len(indices) > 1:
+            max_sustain = max(result[i][2] for i in indices)
+            for i in indices:
+                t, f, _ = result[i]
+                result[i] = (t, f, max_sustain)
+    return result
+
+
+# --- Slide detection ---
+
+
+def ticks_to_seconds(tick, bpm, resolution):
+    """Convert chart ticks back to seconds."""
+    if bpm <= 0:
+        return 0.0
+    beats = tick / resolution
+    return beats * 60.0 / bpm
+
+
+def detect_slide_sequences(notes, bpm, resolution, min_length=3, max_gap_sec=1.5):
+    """
+    Detect slide sequences on SINGLE-FRET notes only.
+
+    Finds runs of >=min_length notes stepping +-1 fret in a consistent
+    direction (e.g. 0 -> 1 -> 2 -> 3).
+
+    HARD RULE: Chord slides are NOT detected here. They are created
+    exclusively by promote_chord_slides() which keeps the same adjacent
+    pair at every position (parallel). Detecting slides on chords
+    produces shifting pairs that converge visually in-game.
+
+    Parameters
+    ----------
+    notes : list of (tick, fret, sustain)
+        Sorted by tick.
+    bpm : float
+        Tempo.
+    resolution : int
+        Ticks per quarter note.
+    min_length : int
+        Minimum events to form a slide.
+    max_gap_sec : float
+        Maximum gap in seconds between consecutive slide events.
+
+    Returns
+    -------
+    sequences : list of dict
+        Each dict has:
+          'indices': list of list of int — indices into `notes` per tick
+          'type': 'single' or 'chord'
+
+    """
+    # Group notes by tick
+    tick_map = defaultdict(list)
+    for i, (tick, fret, sustain) in enumerate(notes):
+        if 0 <= fret <= 4:
+            tick_map[tick].append(i)
+
+    # Build ordered tick events: each is (tick, [indices], lowest_fret, is_chord)
+    tick_events = []
+    for tick in sorted(tick_map.keys()):
+        indices = tick_map[tick]
+        frets = sorted(set(notes[i][1] for i in indices))
+        if len(frets) == 1:
+            tick_events.append((tick, indices, frets[0], False))
+        elif len(frets) == 2 and frets[1] - frets[0] == 1:
+            tick_events.append((tick, indices, frets[0], True))
+        # 3+ frets or non-adjacent: skip
+
+    if len(tick_events) < min_length:
+        return []
+
+    def _find_slides(events, is_chord):
+        """Find slide runs within events of the same type (single or chord)."""
+        if len(events) < min_length:
+            return []
+        seqs = []
+        current = [events[0]]
+        current_dir = 0
+
+        for j in range(1, len(events)):
+            prev_tick, prev_idx, prev_fret, _ = current[-1]
+            curr_tick, curr_idx, curr_fret, _ = events[j]
+
+            step = curr_fret - prev_fret
+            gap_sec = ticks_to_seconds(curr_tick - prev_tick, bpm, resolution)
+
+            if abs(step) == 1 and gap_sec <= max_gap_sec:
+                direction = 1 if step > 0 else -1
+                if current_dir == 0 or direction == current_dir:
+                    current_dir = direction
+                    current.append(events[j])
+                else:
+                    if len(current) >= min_length:
+                        seqs.append({
+                            'indices': [e[1] for e in current],
+                            'type': 'chord' if is_chord else 'single',
+                        })
+                    current = [current[-1], events[j]]
+                    current_dir = direction
+            else:
+                if len(current) >= min_length:
+                    seqs.append({
+                        'indices': [e[1] for e in current],
+                        'type': 'chord' if is_chord else 'single',
+                    })
+                current = [events[j]]
+                current_dir = 0
+
+        if len(current) >= min_length:
+            seqs.append({
+                'indices': [e[1] for e in current],
+                'type': 'chord' if is_chord else 'single',
+            })
+        return seqs
+
+    # HARD RULE: Only detect slides on single-fret events.
+    # Chord slides are created exclusively via promote_chord_slides()
+    # which keeps the same adjacent pair at every position (parallel).
+    # Detecting slides on naturally-occurring chords produces shifting
+    # pairs (0+1 → 1+2 → 2+3) that converge visually in-game.
+    singles = [e for e in tick_events if not e[3]]
+
+    sequences = _find_slides(singles, False)
+    return sequences
+
+
+def promote_chord_slides(sequences, notes, ratio=0.3):
+    """
+    Promote a portion of single-fret slide sequences to chord slides
+    using ONE FIXED adjacent pair at every position.
+
+    HARD RULE: Chord slides stay parallel — the SAME two frets appear
+    at every position in the slide. The original single frets are
+    rewritten to the chosen pair.
+
+    The pair is chosen from the median fret of the sequence:
+      median fret 2 → pair 2+3 (or 1+2 if 2+3 unavailable)
+
+    E.g. a single slide 0→1→2→3 promoted with pair 1+2 becomes:
+      1+2 → 1+2 → 1+2 → 1+2  (all positions identical, truly parallel)
+
+    Parameters
+    ----------
+    sequences : list of dict
+        Slide sequences from detect_slide_sequences.
+    notes : list of (tick, fret, sustain)
+        The note list (will be modified in place).
+    ratio : float
+        Fraction of eligible single slides to promote (0-1).
+
+    Returns
+    -------
+    sequences : list of dict
+        Updated sequences with promoted ones marked as 'chord'.
+    notes : list of (tick, fret, sustain)
+        Updated note list with rewritten frets and added companion notes.
+
+    """
+    single_seqs = [i for i, s in enumerate(sequences) if s['type'] == 'single']
+    if not single_seqs:
+        return sequences, notes
+
+    # Pick which sequences to promote (evenly spaced)
+    n_promote = max(1, int(len(single_seqs) * ratio))
+    step = max(1, len(single_seqs) // n_promote)
+    promote_indices = set(single_seqs[j] for j in range(0, len(single_seqs), step))
+
+    notes = list(notes)
+    for si in promote_indices:
+        seq = sequences[si]
+        idx_groups = seq['indices']
+
+        # Pick a fixed pair based on the median fret of the sequence
+        all_frets = [notes[idx_group[0]][1] for idx_group in idx_groups]
+        median_fret = int(np.median(all_frets))
+        median_fret = np.clip(median_fret, 0, 3)  # ensure room for +1
+
+        pair = (median_fret, median_fret + 1)
+
+        # Rewrite every position: change the original note's fret to pair[0],
+        # add a new note at pair[1]
+        new_idx_groups = []
+        for idx_group in idx_groups:
+            idx = idx_group[0]
+            tick, _, sustain = notes[idx]
+            # Rewrite the original note to the fixed lower fret
+            notes[idx] = (tick, pair[0], sustain)
+            # Add the companion upper fret
+            new_idx = len(notes)
+            notes.append((tick, pair[1], sustain))
+            new_idx_groups.append(sorted([idx, new_idx]))
+
+        seq['indices'] = new_idx_groups
+        seq['type'] = 'chord'
+
+    return sequences, notes
+
+
+def validate_chord_slide_parallel(sequences, notes):
+    """
+    HARD RULE: Chord slides must stay parallel — the gap between the
+    two frets must be identical at every position in the slide.
+
+    Any chord slide that violates this is demoted back to a single
+    slide (companion frets are dropped).
+
+    """
+    for seq in sequences:
+        if seq['type'] != 'chord':
+            continue
+
+        # Check that every position has the same fret gap
+        gaps = []
+        for idx_group in seq['indices']:
+            frets = sorted(set(notes[i][1] for i in idx_group))
+            if len(frets) == 2:
+                gaps.append(frets[1] - frets[0])
+            else:
+                gaps.append(0)  # degenerate — not a pair
+
+        if not gaps or not all(g == gaps[0] and g == 1 for g in gaps):
+            # Demote: strip to single frets (keep only the first index per group)
+            seq['type'] = 'single'
+            seq['indices'] = [[idx_group[0]] for idx_group in seq['indices']]
+
+    return sequences
+
+
+def apply_slide_conversion(notes, sequences):
+    """
+    Replace slide sequence notes with slide events.
+
+    For singles:
+      First note  -> E slide <fret> only
+      Middle notes -> N <fret> 0 + E slide <fret>
+      Last note   -> N <fret> 0 only
+
+    For chords (adjacent pairs):
+      Same pattern but applied to both frets of each pair.
+
+    Returns (new_notes, slide_events) where:
+    - new_notes is the note list with sequence notes removed
+    - slide_events is a list of (tick, event_string) to write
+
+    """
+    # Enforce parallel chord slides before conversion
+    sequences = validate_chord_slide_parallel(sequences, notes)
+
+    # Collect all note indices that belong to slides
+    slide_indices = set()
+    for seq in sequences:
+        for idx_group in seq['indices']:
+            slide_indices.update(idx_group)
+
+    # Build the new notes (without slide notes)
+    new_notes = [(t, f, s) for i, (t, f, s) in enumerate(notes) if i not in slide_indices]
+
+    # Build slide events
+    slide_events = []
+    for seq in sequences:
+        idx_groups = seq['indices']
+        for pos, idx_group in enumerate(idx_groups):
+            frets = sorted(set(notes[i][1] for i in idx_group))
+            tick = notes[idx_group[0]][0]
+
+            if pos == 0:
+                # First: E slide only (for each fret)
+                for fret in frets:
+                    slide_events.append((tick, f'E slide {fret}'))
+            elif pos == len(idx_groups) - 1:
+                # Last: N fret 0 only (for each fret)
+                for fret in frets:
+                    slide_events.append((tick, f'N {fret} 0'))
+            else:
+                # Middle: N fret 0 + E slide fret (for each fret)
+                for fret in frets:
+                    slide_events.append((tick, f'N {fret} 0'))
+                    slide_events.append((tick, f'E slide {fret}'))
+
+    slide_events.sort(key=lambda x: x[0])
+    return new_notes, slide_events
+
+
+# --- Timing utilities ---
+
+
+def seconds_to_ticks(time_sec, bpm, resolution):
+    """Convert time in seconds to chart ticks."""
+    beats = time_sec * bpm / 60.0
+    return int(round(beats * resolution))
+
+
+def quantize_tick(tick, resolution, quantize_division):
+    """Quantize a tick to the nearest grid position."""
+    ticks_per_grid = resolution * 4 // quantize_division
+    if ticks_per_grid <= 0:
+        ticks_per_grid = 1
+    return int(round(tick / ticks_per_grid)) * ticks_per_grid
+
+
+def compute_sustain_ticks(onset_idx, onsets, bpm, resolution, sustain_threshold):
+    """
+    Compute sustain duration in ticks for a note.
+
+    If the gap to the next onset exceeds sustain_threshold seconds,
+    the sustain covers 80% of the gap. Otherwise returns 0 (tap note).
+
+    """
+    if onset_idx < len(onsets) - 1:
+        gap = onsets[onset_idx + 1] - onsets[onset_idx]
+    else:
+        gap = 0.5
+
+    if gap >= sustain_threshold:
+        sustain_sec = gap * 0.8
+        sustain_ticks = seconds_to_ticks(sustain_sec, bpm, resolution)
+        return max(sustain_ticks, 1)
+    return 0
+
+
+# --- Chart writing ---
+
+
+def write_chart(outfile, song_name, bpm, resolution, difficulty, notes, slide_events):
+    """
+    Write a Clone Hero .chart file with notes and slide events.
+
+    """
+    bpm_value = int(round(bpm * 1000))
+
+    with open(outfile, 'w') as f:
+        f.write('[Song]\n{\n')
+        f.write(f'  Name = "{song_name}"\n')
+        f.write(f'  Resolution = {resolution}\n')
+        f.write('  Offset = 0\n')
+        f.write('}\n')
+
+        f.write('[SyncTrack]\n{\n')
+        f.write('  0 = TS 4\n')
+        f.write(f'  0 = B {bpm_value}\n')
+        f.write('}\n')
+
+        f.write('[Events]\n{\n}\n')
+
+        f.write(f'[{difficulty}]\n{{\n')
+
+        # Merge notes and slide events, sorted by tick
+        all_lines = []
+        for tick, fret, sustain in notes:
+            all_lines.append((tick, f'N {fret} {sustain}'))
+        for tick, event_str in slide_events:
+            all_lines.append((tick, event_str))
+        all_lines.sort(key=lambda x: x[0])
+
+        for tick, line in all_lines:
+            f.write(f'  {tick} = {line}\n')
+        f.write('}\n')
+
+
+def main():
+    """CloneHeroChartGenerator"""
+
+    p = argparse.ArgumentParser(
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description='''
+    Generate Clone Hero .chart files from audio.
+
+    This program analyzes an audio file to detect onsets, estimate tempo,
+    and assign frets based on spectral content. The output is a .chart
+    file compatible with Clone Hero.
+
+      $ CloneHeroChartGenerator input.wav -o output.chart
+
+    ''',
+    )
+    p.add_argument('infile', help='input audio file')
+    p.add_argument('-o', '--output', dest='outfile', default=None, help='output .chart file [default: <infile>.chart]')
+    p.add_argument('--name', default=None, help='song name [default: input filename]')
+    p.add_argument('--threshold', type=float, default=0.35, help='onset detection threshold [default: %(default)s]')
+    p.add_argument('--resolution', type=int, default=192, help='ticks per quarter note [default: %(default)s]')
+    p.add_argument(
+        '--difficulty',
+        default='ExpertSingle',
+        choices=['ExpertSingle', 'HardSingle', 'MediumSingle', 'EasySingle'],
+        help='difficulty section name [default: %(default)s]',
+    )
+    p.add_argument(
+        '--chord-threshold',
+        type=float,
+        default=0.6,
+        help='relative energy threshold for chord detection [default: %(default)s]',
+    )
+    p.add_argument(
+        '--sustain-threshold',
+        type=float,
+        default=0.15,
+        help='minimum gap in seconds to generate sustain [default: %(default)s]',
+    )
+    p.add_argument(
+        '--quantize',
+        type=int,
+        default=16,
+        help='quantize to 1/N note grid (e.g. 16 for 16th notes) [default: %(default)s]',
+    )
+    p.add_argument(
+        '--no-slides',
+        action='store_true',
+        default=False,
+        help='disable slide sequence detection',
+    )
+    p.add_argument(
+        '--cache-out',
+        default=None,
+        help='save analysis results (onsets/tempo/spectra) to this file for reuse',
+    )
+    p.add_argument(
+        '--cache-in',
+        default=None,
+        help='load analysis results from a previous --cache-out run (skips steps 1-3)',
+    )
+    p.add_argument('-v', '--verbose', action='count', default=0, help='increase verbosity')
+
+    args = p.parse_args()
+
+    if args.outfile is None:
+        base = os.path.splitext(args.infile)[0]
+        args.outfile = base + '.chart'
+    if args.name is None:
+        args.name = os.path.splitext(os.path.basename(args.infile))[0]
+
+    # --- Steps 1-3: Audio Analysis (or load from cache) ---
+    if args.cache_in and os.path.isfile(args.cache_in):
+        if args.verbose:
+            print('  [1/4] Loading cached analysis...')
+        cache = np.load(args.cache_in, allow_pickle=True)
+        onsets = cache['onsets']
+        bpm = float(cache['bpm'])
+        onset_centroids = cache['onset_centroids']
+        onset_spreads = cache['onset_spreads']
+        if args.verbose:
+            print(f'         {len(onsets)} onsets, {bpm:.1f} BPM')
+    else:
+        # --- Step 1: Onset Detection ---
+        if args.verbose:
+            print('  [1/6] Detecting onsets...')
+        onset_proc = RNNOnsetProcessor()
+        onset_activations = onset_proc(args.infile)
+
+        peak_picker = OnsetPeakPickingProcessor(
+            threshold=args.threshold, fps=100, smooth=0.07, pre_max=0.01, post_max=0.01,
+        )
+        onsets = peak_picker(onset_activations)
+
+        if args.verbose:
+            print(f'         Found {len(onsets)} onsets')
+
+        if len(onsets) == 0:
+            print('Warning: No onsets detected. Generating empty chart.')
+            write_chart(args.outfile, args.name, 120.0, args.resolution, args.difficulty, [], [])
+            return
+
+        # --- Step 2: Tempo Estimation ---
+        if args.verbose:
+            print('  [2/6] Estimating tempo...')
+        beat_proc = RNNBeatProcessor()
+        beat_activations = beat_proc(args.infile)
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', message='Usage of `method`')
+            tempo_proc = TempoEstimationProcessor(
+                method='comb', min_bpm=40.0, max_bpm=250.0,
+                act_smooth=0.14, hist_smooth=9, alpha=0.79, fps=100,
+            )
+        tempi = tempo_proc(beat_activations)
+        bpm = float(tempi[0][0])
+
+        if args.verbose:
+            print(f'         Tempo: {bpm:.1f} BPM')
+
+        # --- Step 3: Spectral Analysis ---
+        if args.verbose:
+            print('  [3/6] Analysing spectral content...')
+
+        spec = Spectrogram(args.infile, frame_size=4096, fps=100, num_channels=1, sample_rate=44100)
+        centroids, spreads = compute_spectral_centroids(spec, 100)
+        onset_centroids, onset_spreads = compute_onset_centroids(onsets, centroids, spreads, 100)
+
+        # Save cache if requested
+        if args.cache_out:
+            np.savez(
+                args.cache_out,
+                onsets=onsets, bpm=np.array(bpm),
+                onset_centroids=onset_centroids, onset_spreads=onset_spreads,
+            )
+            if args.verbose:
+                print(f'         Cached analysis to {args.cache_out}')
+
+    if len(onsets) == 0:
+        print('Warning: No onsets in cache. Generating empty chart.')
+        write_chart(args.outfile, args.name, 120.0, args.resolution, args.difficulty, [], [])
+        return
+
+    # --- Step 4: Fret Assignment ---
+    step_base = 2 if args.cache_in else 4
+    step_total = 4 if args.cache_in else 6
+    if args.verbose:
+        print(f'  [{step_base}/{step_total}] Assigning frets...')
+
+    frets_per_onset = centroid_to_frets(onset_centroids, onset_spreads, args.chord_threshold)
+
+    notes = []
+    for i, onset_time in enumerate(onsets):
+        frets = validate_frets(frets_per_onset[i])
+        tick = seconds_to_ticks(onset_time, bpm, args.resolution)
+        tick = quantize_tick(tick, args.resolution, args.quantize)
+        sustain = compute_sustain_ticks(i, onsets, bpm, args.resolution, args.sustain_threshold)
+        for fret in frets:
+            # Open notes (fret 7) cannot be holds — player isn't pressing anything
+            notes.append((tick, fret, 0 if fret == 7 else sustain))
+
+    # Deduplicate: keep unique (tick, fret) pairs
+    seen = set()
+    deduped_notes = []
+    for tick, fret, sustain in notes:
+        key = (tick, fret)
+        if key not in seen:
+            seen.add(key)
+            deduped_notes.append((tick, fret, sustain))
+
+    # Unify sustain durations within chords
+    deduped_notes = unify_chord_sustains(deduped_notes)
+    deduped_notes.sort(key=lambda n: (n[0], n[1]))
+
+    # Final fret validation pass
+    validated_notes = []
+    for tick, group in groupby(deduped_notes, key=lambda n: n[0]):
+        tick_notes = list(group)
+        frets_at_tick = [f for _, f, _ in tick_notes]
+        valid = validate_frets(frets_at_tick)
+        sustain = max(s for _, _, s in tick_notes)
+        for fret in valid:
+            validated_notes.append((tick, fret, sustain))
+    deduped_notes = validated_notes
+
+    # --- Step 5: Slide Detection ---
+    slide_events = []
+    if not args.no_slides:
+        if args.verbose:
+            print(f'  [{step_base + 1}/{step_total}] Detecting slides...')
+        sequences = detect_slide_sequences(deduped_notes, bpm, args.resolution)
+        if sequences:
+            # Promote ~30% of single slides to chord slides (fixed parallel pair)
+            sequences, deduped_notes = promote_chord_slides(sequences, deduped_notes, ratio=0.3)
+            deduped_notes, slide_events = apply_slide_conversion(deduped_notes, sequences)
+            if args.verbose:
+                n_single = sum(1 for s in sequences if s['type'] == 'single')
+                n_chord = sum(1 for s in sequences if s['type'] == 'chord')
+                print(f'         Found {len(sequences)} slides ({n_single} single, {n_chord} chord)')
+    elif args.verbose:
+        print(f'  [{step_base + 1}/{step_total}] Slides disabled, skipping.')
+
+    # Final sustain unification (hard rule: dual-fret must match duration)
+    deduped_notes = unify_chord_sustains(deduped_notes)
+
+    # --- Step 6: Write Chart ---
+    total = len(deduped_notes) + sum(1 for _, e in slide_events if e.startswith('N '))
+    if args.verbose:
+        print(f'  [{step_base + 2}/{step_total}] Writing chart ({total} notes, {len(slide_events)} slide events)')
+    write_chart(args.outfile, args.name, bpm, args.resolution, args.difficulty, deduped_notes, slide_events)
+
+
+if __name__ == '__main__':
+    main()
