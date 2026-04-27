@@ -496,7 +496,7 @@ export default function TracksPage() {
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
-              {Object.entries(track.stems).map(([stem, filename]) => (
+              {Object.entries(track.stems).map(([stem]) => (
                 <div
                   key={stem}
                   className="bg-gray-800 border border-gray-700 rounded-lg p-3 flex flex-col items-center gap-2"

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 
 interface StemResultProps {
   jobId: string
@@ -26,15 +26,7 @@ const STEM_LABELS: Record<string, { label: string; color: string }> = {
 
 type BeatmapState = 'idle' | 'generating' | 'done' | 'error'
 
-interface StemBeatmap {
-  state: BeatmapState
-  beatmapJobId: string
-  progress: number
-  message: string
-  error: string
-}
-
-function StemBeatmapTracker({ stemJobId, stem, beatmapJobId }: { stemJobId: string; stem: string; beatmapJobId: string }) {
+function StemBeatmapTracker({ beatmapJobId }: { beatmapJobId: string }) {
   const [progress, setProgress] = useState(0)
   const [message, setMessage] = useState('Starting...')
   const [done, setDone] = useState(false)
@@ -174,7 +166,7 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
         <p className="text-sm text-gray-500 mb-5">{trackName}</p>
 
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-          {Object.entries(stems).map(([stem, filename]) => {
+          {Object.entries(stems).map(([stem]) => {
             const info = STEM_LABELS[stem] || { label: stem, color: 'text-gray-300' }
             const isPlaying = playing === stem
             const bm = beatmaps[stem]
@@ -222,7 +214,7 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
 
                 {bm?.state === 'generating' && bm.jobId && (
                   <div className="w-full">
-                    <StemBeatmapTracker stemJobId={jobId} stem={stem} beatmapJobId={bm.jobId} />
+                    <StemBeatmapTracker beatmapJobId={bm.jobId} />
                   </div>
                 )}
 
