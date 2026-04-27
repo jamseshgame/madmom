@@ -414,6 +414,34 @@ async def download_beatmap_file(track_id: str, beatmap_id: str, filename: str):
     return FileResponse(str(fp), filename=filename)
 
 
+@router.get('/{track_id}/beatmaps/{beatmap_id}/chart')
+async def get_beatmap_chart(track_id: str, beatmap_id: str):
+    """Return notes.chart as raw text for the editor."""
+    bm_dir = get_beatmap_dir(track_id, beatmap_id)
+    if not bm_dir:
+        raise HTTPException(404, 'Beatmap not found')
+    chart_path = bm_dir / 'notes.chart'
+    if not chart_path.exists():
+        raise HTTPException(404, 'notes.chart missing')
+    return {'chart': chart_path.read_text(encoding='utf-8', errors='replace')}
+
+
+@router.put('/{track_id}/beatmaps/{beatmap_id}/chart')
+async def put_beatmap_chart(track_id: str, beatmap_id: str, body: dict):
+    """Overwrite notes.chart with edited text from the editor."""
+    bm_dir = get_beatmap_dir(track_id, beatmap_id)
+    if not bm_dir:
+        raise HTTPException(404, 'Beatmap not found')
+    text = body.get('chart')
+    if not isinstance(text, str) or not text.strip():
+        raise HTTPException(400, 'body.chart must be a non-empty string')
+    if len(text) > 5_000_000:
+        raise HTTPException(413, 'Chart too large')
+    chart_path = bm_dir / 'notes.chart'
+    chart_path.write_text(text, encoding='utf-8')
+    return {'ok': True, 'bytes': len(text)}
+
+
 @router.delete('/{track_id}/beatmaps/{beatmap_id}')
 async def remove_beatmap(track_id: str, beatmap_id: str):
     """Delete a beatmap record and its files."""

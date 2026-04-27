@@ -3,6 +3,7 @@ import { useLocation, useSearchParams } from 'react-router-dom'
 import CreateSection from '../components/CreateSection.tsx'
 import StemPlayer from '../components/StemPlayer.tsx'
 import BeatmapStatsModal, { BeatmapRecord as BeatmapStatsRecord } from '../components/BeatmapStatsModal.tsx'
+import BeatmapEditor from '../components/BeatmapEditor.tsx'
 
 type BeatmapRecord = BeatmapStatsRecord
 
@@ -492,6 +493,7 @@ export default function TracksPage() {
   const [confirmDelete, setConfirmDelete] = useState<Track | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [statsBeatmap, setStatsBeatmap] = useState<BeatmapRecord | null>(null)
+  const [editBeatmap, setEditBeatmap] = useState<BeatmapRecord | null>(null)
 
   // song.ini editor state for the detail view
   const [songIni, setSongIni] = useState<Record<string, string>>({})
@@ -681,15 +683,26 @@ export default function TracksPage() {
                     .filter((bm) => bm.stem === stem)
                     .sort((a, b) => b.generated_at - a.generated_at)
                     .map((bm) => (
-                      <button
+                      <div
                         key={bm.id}
-                        onClick={() => setStatsBeatmap(bm)}
-                        className="w-full mt-1 px-2 py-1 bg-green-900/30 hover:bg-green-800/50 border border-green-800/40 hover:border-green-700 rounded text-[11px] text-green-300 hover:text-green-200 flex items-center justify-between gap-2 transition-colors"
-                        title="View beatmap details"
+                        className="w-full mt-1 flex items-stretch gap-1"
                       >
-                        <span className="truncate">⏺ {formatDate(bm.generated_at)}</span>
-                        <span className="text-green-500/80 shrink-0">›</span>
-                      </button>
+                        <button
+                          onClick={() => setStatsBeatmap(bm)}
+                          className="flex-1 min-w-0 px-2 py-1 bg-green-900/30 hover:bg-green-800/50 border border-green-800/40 hover:border-green-700 rounded text-[11px] text-green-300 hover:text-green-200 flex items-center justify-between gap-2 transition-colors"
+                          title="View beatmap details"
+                        >
+                          <span className="truncate">⏺ {formatDate(bm.generated_at)}</span>
+                          <span className="text-green-500/80 shrink-0">›</span>
+                        </button>
+                        <button
+                          onClick={() => setEditBeatmap(bm)}
+                          className="shrink-0 px-2 py-1 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-600 rounded text-[11px] text-gray-300 hover:text-gray-100 transition-colors"
+                          title="Edit beatmap"
+                        >
+                          Edit
+                        </button>
+                      </div>
                     ))}
                 </div>
               ))}
@@ -862,6 +875,15 @@ export default function TracksPage() {
               setStatsBeatmap(null)
               loadTracks()
             }}
+          />
+        )}
+
+        {editBeatmap && selectedTrack && (
+          <BeatmapEditor
+            trackId={selectedTrack.id}
+            beatmapId={editBeatmap.id}
+            beatmapName={editBeatmap.song_name}
+            onClose={() => setEditBeatmap(null)}
           />
         )}
 
