@@ -6,11 +6,11 @@ import json
 import zipfile
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, UploadFile
+from fastapi import APIRouter, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 
 from ..config import settings
-from ..services.audio import read_audio_metadata
+from ..services.audio import extract_cover_art, fetch_cover_from_web, read_audio_metadata, resize_to_square_png
 from ..services.chart_generator import generate_full_chart
 from ..services.github_publisher import publish_song_folder
 from ..services.jobs import JobStatus, create_job, get_job
@@ -47,7 +47,49 @@ async def extract_metadata(file: UploadFile):
         'album': meta.get('album') or '',
         'year': meta.get('year') or '',
         'genre': meta.get('genre') or '',
+        'duration': meta.get('duration', 0),
     }
+
+
+@router.post('/cover-art')
+async def extract_cover(file: UploadFile):
+    """Return a 512×512 PNG cover for the audio. Tries embedded art, then web search by tags."""
+    from fastapi.responses import Response
+
+    ext = Path(file.filename or '').suffix.lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(400, f'Unsupported format: {ext}')
+
+    upload_dir = Path(settings.upload_dir)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    tmp = upload_dir / f'_cover_probe{ext}'
+    tmp.write_bytes(await file.read())
+    source = 'none'
+    try:
+        raw = extract_cover_art(str(tmp))
+        if raw:
+            source = 'embedded'
+        else:
+            meta_snapshot = read_audio_metadata(str(tmp))
+            raw = await fetch_cover_from_web(
+                artist=meta_snapshot.get('artist', ''),
+                album=meta_snapshot.get('album', ''),
+                title=meta_snapshot.get('title', ''),
+            )
+            if raw:
+                source = 'web'
+    finally:
+        tmp.unlink(missing_ok=True)
+
+    if not raw:
+        raise HTTPException(404, 'No cover art found')
+
+    try:
+        png = resize_to_square_png(raw, size=512)
+    except Exception as e:
+        raise HTTPException(500, f'Image resize failed: {e}')
+
+    return Response(content=png, media_type='image/png', headers={'X-Cover-Source': source})
 
 
 @router.post('/create')
@@ -115,6 +157,71 @@ async def create_beatmap(
                 await job.send_done(result)
         except Exception as e:
             await job.send_error(str(e))
+
+    asyncio.create_task(_run())
+
+    return {'job_id': job.id}
+
+
+@router.post('/from-stem')
+async def create_beatmap_from_stem(
+    stem_job_id: str = Form(...),
+    stem: str = Form(...),
+    title: str = Form(''),
+    artist: str = Form(''),
+):
+    """Create a beatmap from a previously separated stem. References a stem job + stem name."""
+    source_job = get_job(stem_job_id)
+    if not source_job or source_job.status != JobStatus.DONE:
+        raise HTTPException(404, 'Stem job not found or not complete')
+
+    stem_files = source_job.metadata.get('stems', {})
+    filename = stem_files.get(stem)
+    if not filename:
+        raise HTTPException(404, f'Stem not found: {stem}. Available: {", ".join(stem_files.keys())}')
+
+    stem_path = source_job.output_dir / 'stems' / filename
+    if not stem_path.exists():
+        raise HTTPException(404, 'Stem file not found on disk')
+
+    original_name = source_job.metadata.get('original_name', 'track')
+    song_name = title or f'{original_name} ({stem})'
+    song_artist = artist or 'Unknown'
+
+    upload_dir = Path(settings.upload_dir)
+    job = create_job()
+    job_dir = upload_dir / job.id
+    job_dir.mkdir(parents=True)
+    job.output_dir = job_dir
+
+    safe_artist = song_artist.replace('/', '-').replace('\\', '-').replace(':', '-').strip()
+    safe_title = song_name.replace('/', '-').replace('\\', '-').replace(':', '-').strip()
+    folder_name = f'{safe_artist} - {safe_title}'
+    job.metadata['folder_name'] = folder_name
+
+    output_dir = job_dir / folder_name
+
+    async def _run():
+        job.status = JobStatus.RUNNING
+        try:
+            result = await generate_full_chart(
+                audio_path=str(stem_path),
+                output_dir=str(output_dir),
+                song_name=song_name,
+                artist=song_artist,
+                album='',
+                year='',
+                genre='',
+                progress_callback=job.send,
+            )
+            if result is None:
+                await job.send_error('No onsets detected in stem audio')
+            else:
+                await job.send_done(result)
+        except Exception as e:
+            import traceback
+            print(f'[beatmap] Job {job.id} failed: {traceback.format_exc()}')
+            await job.send_error(str(e) or 'Unknown error')
 
     asyncio.create_task(_run())
 

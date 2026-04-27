@@ -80,6 +80,39 @@ The package registers custom doctest flags (`NORMALIZE_ARRAYS`, `NORMALIZE_FFT`)
 - **Optional**: pyfftw (faster FFT), pyaudio (live audio input)
 - **System**: ffmpeg (audio decoding), libfftw3-dev (FFTW bindings)
 
+## Web Application (beatmap.jamsesh.co)
+
+The `web/` directory contains a separate web application built on top of madmom for audio analysis, beatmap generation, stem separation, and track management.
+
+### Web Architecture
+
+- **Backend** (`web/backend/`): FastAPI app with pydantic-settings config. Routers: `analyse`, `beatmap`, `stems`, `tracks`. Services handle audio processing (calling madmom CLI tools from `bin/`), chart generation, stem separation (via Demucs), and GitHub publishing. Config in `web/backend/app/config.py` reads from `.env` (see `web/.env.example`).
+- **Frontend** (`web/frontend/`): React 18 + TypeScript + Vite + Tailwind CSS. Pages: Analyse, Create, Remix, Tracks. SPA with react-router-dom.
+- **Deployment**: DigitalOcean droplet with nginx + systemd. `web/deploy.sh` provisions a fresh Ubuntu instance. nginx config in `web/nginx/`, systemd unit in `web/systemd/`.
+
+### Web Development Commands
+
+```bash
+# Backend — from web/backend/
+cp ../env.example ../.env  # first time: configure env vars
+python -m venv venv && source venv/bin/activate  # or venv\Scripts\activate on Windows
+pip install -e ../../ && pip install -r requirements.txt  # installs madmom + web deps
+uvicorn app.main:app --reload  # runs on :8000
+
+# Frontend — from web/frontend/
+npm install
+npm run dev   # Vite dev server on :5173
+npm run build # production build (tsc + vite build)
+```
+
+### Web Environment Variables
+
+The backend reads from `web/.env` (path overridable via `BEATMAP_ENV`). Key variables: `ALLOWED_ORIGINS`, `UPLOAD_DIR`, `MAX_UPLOAD_MB`, `GITHUB_TOKEN`, `MADMOM_ROOT`. See `web/.env.example` for the full list.
+
+## Licensing
+
+Dual license: BSD for source code, CC BY-NC-SA 4.0 for model/data files. Commercial use of models requires contacting the original authors.
+
 ## CI
 
-GitHub Actions runs pytest on Python 3.9–3.12 (Ubuntu). Tests require the models submodule to be initialized.
+GitHub Actions (`.github/workflows/ci.yml`) runs pytest on Python 3.9–3.12 (Ubuntu). Tests require the models submodule to be initialized.

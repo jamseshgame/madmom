@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 interface ProgressEvent {
   step: string
@@ -9,16 +9,26 @@ interface ProgressEvent {
 
 interface ProgressTrackerProps {
   jobId: string
+  statusUrl?: string
   onDone: (metadata: Record<string, unknown>) => void
   onError: (message: string) => void
 }
 
-export default function ProgressTracker({ jobId, onDone, onError }: ProgressTrackerProps) {
+const STEP_COLORS: Record<string, string> = {
+  init: 'text-blue-400',
+  demucs: 'text-jam-400',
+  log: 'text-gray-500',
+  done: 'text-green-400',
+  error: 'text-red-400',
+}
+
+export default function ProgressTracker({ jobId, statusUrl, onDone, onError }: ProgressTrackerProps) {
   const [events, setEvents] = useState<ProgressEvent[]>([])
   const [progress, setProgress] = useState(0)
+  const logRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    const evtSource = new EventSource(`/api/beatmap/${jobId}/status`)
+    const evtSource = new EventSource(statusUrl || `/api/beatmap/${jobId}/status`)
 
     evtSource.onmessage = (e) => {
       const data: ProgressEvent = JSON.parse(e.data)
@@ -42,6 +52,13 @@ export default function ProgressTracker({ jobId, onDone, onError }: ProgressTrac
     return () => evtSource.close()
   }, [jobId, onDone, onError])
 
+  // Auto-scroll log to bottom
+  useEffect(() => {
+    if (logRef.current) {
+      logRef.current.scrollTop = logRef.current.scrollHeight
+    }
+  }, [events])
+
   const currentMessage = events.length > 0 ? events[events.length - 1].message : 'Starting...'
 
   return (
@@ -56,10 +73,20 @@ export default function ProgressTracker({ jobId, onDone, onError }: ProgressTrac
           style={{ width: `${Math.max(progress, 2)}%` }}
         />
       </div>
-      <div className="text-xs text-gray-500 max-h-32 overflow-y-auto space-y-0.5">
+      {progress > 0 && (
+        <div className="text-xs text-gray-500 text-right">{progress}%</div>
+      )}
+      <div
+        ref={logRef}
+        className="bg-gray-950 border border-gray-800 rounded-lg p-3 font-mono text-xs max-h-64 overflow-y-auto space-y-0.5"
+      >
+        {events.length === 0 && (
+          <div className="text-gray-600">Waiting for logs...</div>
+        )}
         {events.map((ev, i) => (
-          <div key={i}>
-            [{ev.step}] {ev.message}
+          <div key={i} className={STEP_COLORS[ev.step] || 'text-gray-500'}>
+            <span className="text-gray-700 select-none">{String(i + 1).padStart(3, ' ')} </span>
+            <span className="text-gray-600">[{ev.step}]</span> {ev.message}
           </div>
         ))}
       </div>

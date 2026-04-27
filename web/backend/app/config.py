@@ -21,7 +21,10 @@ class Settings(BaseSettings):
 
     madmom_root: str = str(Path(__file__).resolve().parents[4])
 
-    model_config = {'env_file': os.getenv('BEATMAP_ENV', '.env'), 'extra': 'ignore'}
+    model_config = {
+        'env_file': os.getenv('BEATMAP_ENV', str(Path(__file__).resolve().parents[2] / '.env')),
+        'extra': 'ignore',
+    }
 
     @property
     def origins_list(self) -> list[str]:

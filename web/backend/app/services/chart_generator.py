@@ -81,6 +81,7 @@ async def generate_full_chart(
     album: str = 'Unknown',
     year: str = 'Unknown',
     genre: str = 'Unknown',
+    ini_overrides: dict | None = None,
     progress_callback=None,
 ):
     """
@@ -232,6 +233,7 @@ async def generate_full_chart(
 
     pair_names = ['0+1', '1+2', '2+3', '3+4']
     ini_path = str(out_dir / 'song.ini')
+    ov = ini_overrides or {}
     with open(ini_path, 'w') as f:
         f.write('[song]\n')
         f.write(f'name = {song_name}\n')
@@ -239,11 +241,35 @@ async def generate_full_chart(
         f.write(f'album = {album}\n')
         f.write(f'genre = {genre}\n')
         f.write(f'year = {year}\n')
-        f.write('charter = Jamsesh\n')
-        f.write('diff_guitar = -1\n')
-        f.write('preview_start_time = 0\n')
-        f.write('delay = 0\n')
-        f.write('loading_phrase =\n')
+        f.write(f'charter = {ov.get("charter", "Jamsesh")}\n')
+        f.write(f'loading_phrase = {ov.get("loading_phrase", "")}\n')
+        if ov.get('icon'):
+            f.write(f'icon = {ov["icon"]}\n')
+        f.write(f'album_track = {ov.get("album_track", 0)}\n')
+        f.write(f'playlist_track = {ov.get("playlist_track", 0)}\n')
+        f.write(f'delay = {ov.get("delay", 0)}\n')
+        f.write(f'preview_start_time = {ov.get("preview_start_time", 0)}\n')
+        if ov.get('video_start_time'):
+            f.write(f'video_start_time = {ov["video_start_time"]}\n')
+        if ov.get('song_length'):
+            f.write(f'song_length = {ov["song_length"]}\n')
+        # Difficulty ratings
+        for diff_key in [
+            'diff_guitar', 'diff_rhythm', 'diff_bass', 'diff_guitar_coop',
+            'diff_drums', 'diff_drums_real', 'diff_keys',
+            'diff_guitarghl', 'diff_bassghl',
+        ]:
+            val = ov.get(diff_key, -1)
+            f.write(f'{diff_key} = {val}\n')
+        # Gameplay
+        if ov.get('hopo_frequency'):
+            f.write(f'hopo_frequency = {ov["hopo_frequency"]}\n')
+        if ov.get('sustain_cutoff_threshold'):
+            f.write(f'sustain_cutoff_threshold = {ov["sustain_cutoff_threshold"]}\n')
+        if ov.get('five_lane_drums'):
+            f.write('five_lane_drums = True\n')
+        if ov.get('modchart'):
+            f.write('modchart = True\n')
 
         for section_name, stats in analysis.get('difficulties', {}).items():
             prefix = section_name.replace('Single', '').lower()

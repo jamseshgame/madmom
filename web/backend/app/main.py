@@ -1,13 +1,18 @@
 """FastAPI application for beatmap.jamsesh.co."""
 
 import asyncio
+import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+# Windows requires the Proactor event loop for subprocess support (Demucs, ffmpeg)
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 from .config import settings
-from .routers import analyse, beatmap
+from .routers import beatmap, game_songs, stems, tracks, versions
 from .services.jobs import cleanup_old_jobs
 
 
@@ -39,7 +44,10 @@ app.add_middleware(
 )
 
 app.include_router(beatmap.router)
-app.include_router(analyse.router)
+app.include_router(stems.router)
+app.include_router(tracks.router)
+app.include_router(versions.router)
+app.include_router(game_songs.router)
 
 
 @app.get('/api/health')

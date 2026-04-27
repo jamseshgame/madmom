@@ -1,65 +1,176 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import FileUpload from '../components/FileUpload.tsx'
 import ProgressTracker from '../components/ProgressTracker.tsx'
-import BeatmapResult from '../components/BeatmapResult.tsx'
+import StemResult from '../components/StemResult.tsx'
 
-type Phase = 'upload' | 'metadata' | 'generating' | 'done' | 'error'
+type Phase = 'upload' | 'settings' | 'separating' | 'done' | 'error'
+
+const MODELS: Record<string, { label: string; description: string; stems: string[] }> = {
+  htdemucs_6s: {
+    label: 'Extended (6 stems)',
+    description: 'Vocals, drums, bass, guitar, piano, other',
+    stems: ['vocals', 'drums', 'bass', 'guitar', 'piano', 'other'],
+  },
+  htdemucs_ft: {
+    label: 'Fine-tuned (4 stems)',
+    description: 'Higher quality — vocals, drums, bass, other',
+    stems: ['vocals', 'drums', 'bass', 'other'],
+  },
+  htdemucs: {
+    label: 'Standard (4 stems)',
+    description: 'Vocals, drums, bass, other',
+    stems: ['vocals', 'drums', 'bass', 'other'],
+  },
+}
+
+const STEM_META: Record<string, { label: string; color: string }> = {
+  vocals: { label: 'Vocals', color: 'text-pink-400' },
+  drums: { label: 'Drums', color: 'text-amber-400' },
+  bass: { label: 'Bass', color: 'text-green-400' },
+  guitar: { label: 'Guitar', color: 'text-orange-400' },
+  piano: { label: 'Piano', color: 'text-violet-400' },
+  other: { label: 'Other', color: 'text-blue-400' },
+}
 
 export default function CreatePage() {
   const [phase, setPhase] = useState<Phase>('upload')
   const [file, setFile] = useState<File | null>(null)
-  const [title, setTitle] = useState('')
-  const [artist, setArtist] = useState('')
-  const [album, setAlbum] = useState('')
-  const [year, setYear] = useState('')
-  const [genre, setGenre] = useState('')
   const [jobId, setJobId] = useState('')
   const [metadata, setMetadata] = useState<Record<string, unknown>>({})
   const [error, setError] = useState('')
+
+  // Settings
+  const [model, setModel] = useState('htdemucs_6s')
+  const [selectedStems, setSelectedStems] = useState<Set<string>>(new Set(MODELS.htdemucs_6s.stems))
+  const [shifts, setShifts] = useState(10)
+  const [overlap, setOverlap] = useState(0.5)
+  const [clipMode, setClipMode] = useState('rescale')
   const [loadingMeta, setLoadingMeta] = useState(false)
+  const [albumArt, setAlbumArt] = useState<File | null>(null)
+  const [albumPreview, setAlbumPreview] = useState<string | null>(null)
+  const albumInputRef = useRef<HTMLInputElement | null>(null)
+  const [songIni, setSongIni] = useState({
+    name: '',
+    artist: '',
+    album: '',
+    genre: '',
+    year: '',
+    charter: '',
+    song_length: '',
+    delay: '0',
+    preview_start_time: '0',
+    diff_band: '0',
+    diff_guitar: '0',
+    diff_drums: '0',
+    diff_bass: '0',
+    diff_rhythm: '0',
+    diff_keys: '0',
+    loading_phrase: '',
+  })
+
+  const updateIni = (key: string, value: string) => {
+    setSongIni((prev) => ({ ...prev, [key]: value }))
+  }
 
   const handleFile = async (f: File) => {
+    // Filename fallback for name/artist
+    const stem = f.name.replace(/\.[^.]+$/, '')
+    const parts = stem.split(/\s*-\s*/)
+    const fallback: Partial<typeof songIni> =
+      parts.length >= 2
+        ? { artist: parts[0].trim(), name: parts.slice(1).join(' - ').trim() }
+        : { name: stem }
+    setSongIni((prev) => ({ ...prev, ...fallback }))
     setFile(f)
-    const fallbackName = f.name.replace(/\.[^.]+$/, '').replace(/[._]/g, ' ')
-    setTitle(fallbackName)
-    setPhase('metadata')
-    setLoadingMeta(true)
+    setPhase('settings')
 
-    // Fetch real metadata from server via ffprobe
+    // Fetch real tags from the file via ffprobe, plus embedded cover art
+    setLoadingMeta(true)
+    const fd = new FormData()
+    fd.append('file', f)
     try {
-      const fd = new FormData()
-      fd.append('file', f)
-      const res = await fetch('/api/beatmap/metadata', { method: 'POST', body: fd })
-      if (res.ok) {
-        const meta = await res.json()
-        if (meta.title) setTitle(meta.title)
-        if (meta.artist) setArtist(meta.artist)
-        if (meta.album) setAlbum(meta.album)
-        if (meta.year) setYear(meta.year)
-        if (meta.genre) setGenre(meta.genre)
+      const [metaRes, artRes] = await Promise.all([
+        fetch('/api/beatmap/metadata', { method: 'POST', body: fd }),
+        fetch('/api/beatmap/cover-art', { method: 'POST', body: (() => {
+          const a = new FormData()
+          a.append('file', f)
+          return a
+        })() }),
+      ])
+      if (metaRes.ok) {
+        const m = (await metaRes.json()) as {
+          title?: string
+          artist?: string
+          album?: string
+          year?: string
+          genre?: string
+          duration?: number
+        }
+        setSongIni((prev) => ({
+          ...prev,
+          name: m.title || prev.name,
+          artist: m.artist || prev.artist,
+          album: m.album || prev.album,
+          year: m.year || prev.year,
+          genre: m.genre || prev.genre,
+          song_length: m.duration ? String(Math.round(m.duration * 1000)) : prev.song_length,
+        }))
+      }
+      if (artRes.ok) {
+        const blob = await artRes.blob()
+        const artFile = new File([blob], 'album.png', { type: 'image/png' })
+        setAlbumArt(artFile)
+        setAlbumPreview(URL.createObjectURL(blob))
       }
     } catch {
-      // Metadata extraction failed — keep filename fallback, not a blocker
+      // Non-fatal — keep filename fallback, no cover art
     } finally {
       setLoadingMeta(false)
     }
   }
 
-  const handleGenerate = async () => {
+  const handleAlbumArtSelect = (f: File | null) => {
+    if (!f) return
+    setAlbumArt(f)
+    if (albumPreview) URL.revokeObjectURL(albumPreview)
+    setAlbumPreview(URL.createObjectURL(f))
+  }
+
+  const handleModelChange = (m: string) => {
+    setModel(m)
+    setSelectedStems(new Set(MODELS[m].stems))
+  }
+
+  const toggleStem = (stem: string) => {
+    setSelectedStems((prev) => {
+      const next = new Set(prev)
+      if (next.has(stem)) {
+        if (next.size > 1) next.delete(stem)
+      } else {
+        next.add(stem)
+      }
+      return next
+    })
+  }
+
+  const handleSeparate = async () => {
     if (!file) return
-    setPhase('generating')
+    setPhase('separating')
     setError('')
 
     const formData = new FormData()
     formData.append('file', file)
-    if (title) formData.append('title', title)
-    if (artist) formData.append('artist', artist)
-    if (album) formData.append('album', album)
-    if (year) formData.append('year', year)
-    if (genre) formData.append('genre', genre)
+    formData.append('model', model)
+    formData.append('stems', Array.from(selectedStems).join(','))
+    formData.append('shifts', String(shifts))
+    formData.append('overlap', String(overlap))
+    formData.append('clip_mode', clipMode)
+    formData.append('game_ready', 'true')
+    formData.append('song_ini', JSON.stringify(songIni))
+    if (albumArt) formData.append('album_art', albumArt)
 
     try {
-      const res = await fetch('/api/beatmap/create', { method: 'POST', body: formData })
+      const res = await fetch('/api/stems/separate', { method: 'POST', body: formData })
       if (!res.ok) {
         const err = await res.json()
         throw new Error(err.detail || 'Upload failed')
@@ -85,68 +196,327 @@ export default function CreatePage() {
   const reset = () => {
     setPhase('upload')
     setFile(null)
-    setTitle('')
-    setArtist('')
-    setAlbum('')
-    setYear('')
-    setGenre('')
     setJobId('')
     setMetadata({})
     setError('')
+    setModel('htdemucs_6s')
+    setSelectedStems(new Set(MODELS.htdemucs_6s.stems))
+    setShifts(10)
+    setOverlap(0.5)
+    setClipMode('rescale')
+    if (albumPreview) URL.revokeObjectURL(albumPreview)
+    setAlbumArt(null)
+    setAlbumPreview(null)
   }
+
+  const currentModelStems = MODELS[model]?.stems || []
 
   return (
     <div className="space-y-8">
-      <div>
-        <h1 className="text-2xl font-bold">Create Beatmap</h1>
-        <p className="text-gray-500 mt-1">Upload audio to generate a Clone Hero chart with 4 difficulty levels.</p>
-      </div>
-
       {phase === 'upload' && (
-        <FileUpload accept=".flac,.mp3,.ogg,.wav" label="Drop your audio file here" onFile={handleFile} />
+        <FileUpload accept=".flac,.mp3,.ogg,.wav,.m4a,.aac,.wma" label="Drop your audio file here" onFile={handleFile} />
       )}
 
-      {phase === 'metadata' && file && (
-        <div className="space-y-4">
-          <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">
+      {phase === 'settings' && file && (
+        <div className="space-y-6">
+          {/* File info */}
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 flex items-center justify-between gap-4">
             <p className="text-sm text-gray-400">
               File: <span className="text-gray-200">{file.name}</span>{' '}
               <span className="text-gray-600">({(file.size / 1024 / 1024).toFixed(1)} MB)</span>
             </p>
-            <div className="grid grid-cols-2 gap-4">
-              {[
-                { label: 'Title', value: title, set: setTitle },
-                { label: 'Artist', value: artist, set: setArtist },
-                { label: 'Album', value: album, set: setAlbum },
-                { label: 'Year', value: year, set: setYear },
-                { label: 'Genre', value: genre, set: setGenre },
-              ].map(({ label, value, set }) => (
-                <label key={label} className="block">
-                  <span className="text-xs text-gray-500 uppercase tracking-wider">{label}</span>
-                  <input
-                    type="text"
-                    value={value}
-                    onChange={(e) => set(e.target.value)}
-                    className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-jam-500"
-                    placeholder={label}
-                  />
-                </label>
+            {loadingMeta && (
+              <span className="flex items-center gap-2 text-xs text-gray-500">
+                <span className="animate-spin h-3.5 w-3.5 border-2 border-jam-400 border-t-transparent rounded-full" />
+                Reading metadata...
+              </span>
+            )}
+          </div>
+
+          {/* Model selection */}
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">
+            <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Model</h3>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {Object.entries(MODELS).map(([key, { label, description }]) => (
+                <button
+                  key={key}
+                  onClick={() => handleModelChange(key)}
+                  className={`text-left p-3 rounded-lg border transition-colors ${
+                    model === key
+                      ? 'border-jam-500 bg-jam-600/10'
+                      : 'border-gray-700 hover:border-gray-500'
+                  }`}
+                >
+                  <div className="text-sm font-medium text-gray-200">{label}</div>
+                  <div className="text-xs text-gray-500 mt-0.5">{description}</div>
+                </button>
               ))}
             </div>
           </div>
-          {loadingMeta && (
-            <div className="flex items-center gap-2 text-sm text-gray-400">
-              <div className="animate-spin h-4 w-4 border-2 border-jam-400 border-t-transparent rounded-full" />
-              Reading metadata...
+
+          {/* Stem toggles */}
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">
+            <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Stems to extract</h3>
+            <div className="flex flex-wrap gap-2">
+              {currentModelStems.map((stem) => {
+                const meta = STEM_META[stem] || { label: stem, color: 'text-gray-300' }
+                const active = selectedStems.has(stem)
+                return (
+                  <button
+                    key={stem}
+                    onClick={() => toggleStem(stem)}
+                    className={`px-4 py-2 rounded-lg border text-sm font-medium transition-colors ${
+                      active
+                        ? `border-gray-600 bg-gray-800 ${meta.color}`
+                        : 'border-gray-700 text-gray-600 hover:text-gray-400'
+                    }`}
+                  >
+                    {meta.label}
+                  </button>
+                )
+              })}
             </div>
-          )}
+          </div>
+
+          {/* Output settings */}
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-5">
+            <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Output settings</h3>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {/* Quality (shifts) */}
+              <label className="block">
+                <span className="text-xs text-gray-500">Quality (shifts)</span>
+                <div className="flex items-center gap-2 mt-1">
+                  <input
+                    type="range"
+                    min="1"
+                    max="10"
+                    value={shifts}
+                    onChange={(e) => setShifts(Number(e.target.value))}
+                    className="flex-1"
+                  />
+                  <span className="text-sm text-gray-400 w-6 text-right">{shifts}</span>
+                </div>
+                <span className="text-xs text-gray-600">{shifts === 1 ? 'Fast' : shifts >= 8 ? 'Best' : 'Balanced'}</span>
+              </label>
+
+              {/* Clip mode */}
+              <label className="block">
+                <span className="text-xs text-gray-500">Clip mode</span>
+                <select
+                  value={clipMode}
+                  onChange={(e) => setClipMode(e.target.value)}
+                  className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-jam-500"
+                >
+                  <option value="rescale">Rescale</option>
+                  <option value="clamp">Clamp</option>
+                </select>
+              </label>
+            </div>
+
+            {/* Overlap */}
+            <label className="block max-w-xs">
+              <span className="text-xs text-gray-500">Overlap</span>
+              <div className="flex items-center gap-2 mt-1">
+                <input
+                  type="range"
+                  min="0"
+                  max="0.99"
+                  step="0.05"
+                  value={overlap}
+                  onChange={(e) => setOverlap(Number(e.target.value))}
+                  className="flex-1"
+                />
+                <span className="text-sm text-gray-400 w-10 text-right">{overlap.toFixed(2)}</span>
+              </div>
+            </label>
+          </div>
+
+          {/* song.ini editor */}
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">
+            <div className="space-y-4">
+                <div className="border border-gray-700 rounded-lg overflow-hidden">
+                  <div className="bg-gray-800/50 px-4 py-2 border-b border-gray-700 flex items-center gap-2">
+                    <span className="text-yellow-400 text-xs font-mono">song.ini</span>
+                    <span className="text-gray-600 text-xs">[song]</span>
+                  </div>
+                  <div className="p-4 space-y-3">
+                    {/* Album art */}
+                    <div className="flex gap-4 items-start">
+                      <button
+                        type="button"
+                        onClick={() => albumInputRef.current?.click()}
+                        className="group relative w-24 h-24 shrink-0 rounded-lg overflow-hidden border border-gray-700 hover:border-jam-500 bg-gray-800 focus:outline-none focus:border-jam-500"
+                        title="Click to upload album art"
+                      >
+                        {albumPreview ? (
+                          <>
+                            <img src={albumPreview} alt="album" className="w-full h-full object-cover" />
+                            <span className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-xs text-gray-200">
+                              Change
+                            </span>
+                          </>
+                        ) : (
+                          <span className="w-full h-full flex items-center justify-center text-xs text-gray-500 px-2 text-center">
+                            Click to add<br />album.png
+                          </span>
+                        )}
+                      </button>
+                      <input
+                        ref={albumInputRef}
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp"
+                        className="hidden"
+                        onChange={(e) => handleAlbumArtSelect(e.target.files?.[0] ?? null)}
+                      />
+                      <div className="text-xs text-gray-500 mt-1">
+                        <p>
+                          <span className="text-gray-400 font-mono">album.png</span> — embedded in the game folder. Auto-pulled from the audio file when present.
+                        </p>
+                        <p className="text-gray-600 mt-1">Any image is resized to 512×512 PNG.</p>
+                      </div>
+                    </div>
+
+                    {/* Primary fields */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <label className="block">
+                        <span className="text-xs text-gray-400">name <span className="text-red-500">*</span></span>
+                        <input
+                          type="text"
+                          value={songIni.name}
+                          onChange={(e) => updateIni('name', e.target.value)}
+                          placeholder="Song Title"
+                          className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-jam-500"
+                        />
+                      </label>
+                      <label className="block">
+                        <span className="text-xs text-gray-400">artist <span className="text-red-500">*</span></span>
+                        <input
+                          type="text"
+                          value={songIni.artist}
+                          onChange={(e) => updateIni('artist', e.target.value)}
+                          placeholder="Artist Name"
+                          className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-jam-500"
+                        />
+                      </label>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <label className="block">
+                        <span className="text-xs text-gray-400">album</span>
+                        <input
+                          type="text"
+                          value={songIni.album}
+                          onChange={(e) => updateIni('album', e.target.value)}
+                          className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-jam-500"
+                        />
+                      </label>
+                      <label className="block">
+                        <span className="text-xs text-gray-400">genre</span>
+                        <input
+                          type="text"
+                          value={songIni.genre}
+                          onChange={(e) => updateIni('genre', e.target.value)}
+                          placeholder="rock"
+                          className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-jam-500"
+                        />
+                      </label>
+                      <label className="block">
+                        <span className="text-xs text-gray-400">year</span>
+                        <input
+                          type="text"
+                          value={songIni.year}
+                          onChange={(e) => updateIni('year', e.target.value)}
+                          placeholder="2024"
+                          className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-jam-500"
+                        />
+                      </label>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <label className="block">
+                        <span className="text-xs text-gray-400">charter</span>
+                        <input
+                          type="text"
+                          value={songIni.charter}
+                          onChange={(e) => updateIni('charter', e.target.value)}
+                          className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-jam-500"
+                        />
+                      </label>
+                      <label className="block">
+                        <span className="text-xs text-gray-400">loading_phrase</span>
+                        <input
+                          type="text"
+                          value={songIni.loading_phrase}
+                          onChange={(e) => updateIni('loading_phrase', e.target.value)}
+                          className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-jam-500"
+                        />
+                      </label>
+                    </div>
+
+                    {/* Timing */}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      <label className="block">
+                        <span className="text-xs text-gray-400">delay <span className="text-gray-600">(ms)</span></span>
+                        <input
+                          type="number"
+                          value={songIni.delay}
+                          onChange={(e) => updateIni('delay', e.target.value)}
+                          className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-jam-500"
+                        />
+                      </label>
+                      <label className="block">
+                        <span className="text-xs text-gray-400">song_length <span className="text-gray-600">(ms)</span></span>
+                        <input
+                          type="number"
+                          value={songIni.song_length}
+                          onChange={(e) => updateIni('song_length', e.target.value)}
+                          className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-jam-500"
+                        />
+                      </label>
+                      <label className="block sm:col-span-2">
+                        <span className="text-xs text-gray-400">preview_start_time <span className="text-gray-600">(ms)</span></span>
+                        <input
+                          type="number"
+                          value={songIni.preview_start_time}
+                          onChange={(e) => updateIni('preview_start_time', e.target.value)}
+                          className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-jam-500"
+                        />
+                      </label>
+                    </div>
+
+                    {/* Difficulties */}
+                    <div>
+                      <span className="text-xs text-gray-500 block mb-2">Difficulties</span>
+                      <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+                        {(['diff_band', 'diff_guitar', 'diff_drums', 'diff_bass', 'diff_rhythm', 'diff_keys'] as const).map(
+                          (key) => (
+                            <label key={key} className="block">
+                              <span className="text-xs text-gray-600">{key.replace('diff_', '')}</span>
+                              <input
+                                type="number"
+                                min="-1"
+                                max="6"
+                                value={songIni[key]}
+                                onChange={(e) => updateIni(key, e.target.value)}
+                                className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-200 text-center focus:outline-none focus:border-jam-500"
+                              />
+                            </label>
+                          ),
+                        )}
+                      </div>
+                      <span className="text-xs text-gray-700 mt-1 block">-1 = uncharted, 0-6 = difficulty tier</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+          </div>
+
+          {/* Actions */}
           <div className="flex gap-3">
             <button
-              onClick={handleGenerate}
-              disabled={loadingMeta}
-              className="px-6 py-2.5 bg-jam-600 hover:bg-jam-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg font-medium transition-colors"
+              onClick={handleSeparate}
+              className="px-6 py-2.5 bg-jam-600 hover:bg-jam-500 text-white rounded-lg font-medium transition-colors"
             >
-              {loadingMeta ? 'Reading metadata...' : 'Generate Beatmap'}
+              Separate for Game
             </button>
             <button onClick={reset} className="px-4 py-2.5 text-gray-400 hover:text-gray-200 transition-colors">
               Cancel
@@ -155,11 +525,18 @@ export default function CreatePage() {
         </div>
       )}
 
-      {phase === 'generating' && jobId && (
-        <ProgressTracker jobId={jobId} onDone={handleDone} onError={handleError} />
+      {phase === 'separating' && !jobId && file && (
+        <div className="flex items-center gap-3">
+          <div className="animate-spin h-5 w-5 border-2 border-jam-400 border-t-transparent rounded-full" />
+          <span className="text-gray-300">Uploading {file.name}...</span>
+        </div>
       )}
 
-      {phase === 'done' && <BeatmapResult jobId={jobId} metadata={metadata} />}
+      {phase === 'separating' && jobId && (
+        <ProgressTracker jobId={jobId} statusUrl={`/api/stems/${jobId}/status`} onDone={handleDone} onError={handleError} />
+      )}
+
+      {phase === 'done' && <StemResult jobId={jobId} metadata={metadata} />}
 
       {phase === 'error' && (
         <div className="space-y-4">
@@ -175,7 +552,7 @@ export default function CreatePage() {
           onClick={reset}
           className="px-4 py-2 text-sm text-gray-500 hover:text-gray-300 transition-colors"
         >
-          Create another
+          Separate another
         </button>
       )}
     </div>
