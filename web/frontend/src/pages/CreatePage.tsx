@@ -125,11 +125,13 @@ export default function CreatePage() {
           song_length: m.duration ? String(Math.round(m.duration * 1000)) : prev.song_length,
         }))
       }
-      if (artRes.ok) {
+      if (artRes.ok && artRes.status !== 204) {
         const blob = await artRes.blob()
-        const artFile = new File([blob], 'album.png', { type: 'image/png' })
-        setAlbumArt(artFile)
-        setAlbumPreview(URL.createObjectURL(blob))
+        if (blob.size > 0) {
+          const artFile = new File([blob], 'album.png', { type: 'image/png' })
+          setAlbumArt(artFile)
+          setAlbumPreview(URL.createObjectURL(blob))
+        }
       }
     } catch {
       // Non-fatal — keep filename fallback, no cover art

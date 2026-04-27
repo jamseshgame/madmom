@@ -82,7 +82,8 @@ async def extract_cover(file: UploadFile):
         tmp.unlink(missing_ok=True)
 
     if not raw:
-        raise HTTPException(404, 'No cover art found')
+        # No art from any source — 204 keeps it out of the browser console as an error
+        return Response(status_code=204, headers={'X-Cover-Source': 'none'})
 
     try:
         png = resize_to_square_png(raw, size=512)
