@@ -736,7 +736,7 @@ function InlinePublish({ track }: { track: Track }) {
         {publishing && (
           <div className="flex items-center gap-2">
             <div className="animate-spin h-4 w-4 border-2 border-green-400 border-t-transparent rounded-full" />
-            <span className="text-sm text-gray-400">Converting stems and pushing to GitHub...</span>
+            <span className="text-sm text-gray-400">Packaging stems and pushing to GitHub...</span>
           </div>
         )}
 
