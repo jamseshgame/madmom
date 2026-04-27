@@ -188,6 +188,18 @@ export default function CreatePage() {
     setPhase('done')
   }, [])
 
+  const handleKill = async () => {
+    const id = jobId
+    reset()
+    if (id) {
+      try {
+        await fetch(`/api/stems/${id}/cancel`, { method: 'POST' })
+      } catch {
+        // best-effort; backend may already be gone
+      }
+    }
+  }
+
   const handleError = useCallback((msg: string) => {
     setError(msg)
     setPhase('error')
@@ -533,7 +545,17 @@ export default function CreatePage() {
       )}
 
       {phase === 'separating' && jobId && (
-        <ProgressTracker jobId={jobId} statusUrl={`/api/stems/${jobId}/status`} onDone={handleDone} onError={handleError} />
+        <div className="space-y-4">
+          <ProgressTracker jobId={jobId} statusUrl={`/api/stems/${jobId}/status`} onDone={handleDone} onError={handleError} />
+          <div className="flex justify-end">
+            <button
+              onClick={handleKill}
+              className="px-4 py-2 bg-red-900/40 hover:bg-red-800/60 border border-red-800 text-red-300 hover:text-red-200 rounded-lg text-sm font-medium transition-colors"
+            >
+              Kill task
+            </button>
+          </div>
+        </div>
       )}
 
       {phase === 'done' && <StemResult jobId={jobId} metadata={metadata} />}

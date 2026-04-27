@@ -91,6 +91,7 @@ async def _stream_demucs(
     clip_mode: str,
     jobs: int,
     progress_callback,
+    set_process=None,
 ) -> int:
     """Run demucs as an async subprocess, streaming stderr in real time."""
     cmd = [
@@ -134,6 +135,8 @@ async def _stream_demucs(
             f'asyncio subprocess not supported on this event loop ({_debug_env()}). '
             f'Start the server via run.py so the Windows Proactor policy is set.'
         ) from e
+    if set_process is not None:
+        set_process(proc)
 
     stderr_lines: list[str] = []
     state = {
@@ -226,6 +229,7 @@ async def separate_stems(
     jobs: int = 0,
     game_ready: bool = False,
     progress_callback=None,
+    set_process=None,
 ) -> dict:
     """Run Demucs to split audio into stems."""
     audio = Path(audio_path)
@@ -249,6 +253,7 @@ async def separate_stems(
         str(audio), str(out), model, demucs_format, mp3_bitrate,
         shifts, two_stems, segment, overlap, clip_mode, jobs,
         progress_callback,
+        set_process=set_process,
     )
 
     if progress_callback:

@@ -100,6 +100,7 @@ async def start_separation(
                 clip_mode=clip_mode,
                 game_ready=game_ready,
                 progress_callback=job.send,
+                set_process=lambda p: setattr(job, 'process', p),
             )
             job.metadata.update(result)
 
@@ -139,15 +140,32 @@ async def start_separation(
                 print(f'[stems] Track save failed: {te}')
 
             await job.send_done(job.metadata)
+        except asyncio.CancelledError:
+            # cancel() already published the cancelled event + flipped status
+            return
         except Exception as e:
+            if job.cancelled:
+                return
             import traceback
             err_msg = str(e) or traceback.format_exc().splitlines()[-1]
             print(f'[stems] Job {job.id} failed: {traceback.format_exc()}')
             await job.send_error(err_msg)
 
-    asyncio.create_task(_run())
+    job.task = asyncio.create_task(_run())
 
     return {'job_id': job.id}
+
+
+@router.post('/{job_id}/cancel')
+async def cancel_separation(job_id: str):
+    """Kill the running demucs subprocess for this job and stop the worker."""
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(404, 'Job not found')
+    if job.status not in (JobStatus.QUEUED, JobStatus.RUNNING):
+        return {'cancelled': False, 'status': job.status.value}
+    await job.cancel()
+    return {'cancelled': True, 'status': job.status.value}
 
 
 @router.get('/{job_id}/status')

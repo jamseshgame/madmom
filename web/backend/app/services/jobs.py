@@ -13,6 +13,7 @@ class JobStatus(str, Enum):
     RUNNING = 'running'
     DONE = 'done'
     FAILED = 'failed'
+    CANCELLED = 'cancelled'
 
 
 @dataclass
@@ -23,8 +24,30 @@ class Job:
     output_dir: Path | None = None
     error: str | None = None
     metadata: dict = field(default_factory=dict)
+    # Cancellation handles — set by the worker so the cancel endpoint can stop work
+    cancelled: bool = field(default=False, repr=False)
+    process: 'asyncio.subprocess.Process | None' = field(default=None, repr=False)
+    task: 'asyncio.Task | None' = field(default=None, repr=False)
     # SSE subscribers
     _queues: list[asyncio.Queue] = field(default_factory=list, repr=False)
+
+    async def cancel(self):
+        """Kill the running subprocess + cancel the wrapping task. Notifies subscribers."""
+        if self.cancelled or self.status in (JobStatus.DONE, JobStatus.FAILED, JobStatus.CANCELLED):
+            return
+        self.cancelled = True
+        proc = self.process
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.kill()
+            except (ProcessLookupError, OSError):
+                pass
+        if self.task is not None and not self.task.done():
+            self.task.cancel()
+        self.status = JobStatus.CANCELLED
+        for q in list(self._queues):
+            await q.put({'step': 'cancelled', 'progress': -1, 'message': 'Cancelled by user'})
+            await q.put(None)
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue()
