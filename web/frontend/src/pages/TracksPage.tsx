@@ -833,10 +833,18 @@ export default function TracksPage() {
           ).length
           const hasArt = !!track.stems.album_png
           return (
-            <button
+            <div
               key={track.id}
               onClick={() => setSelectedId(track.id)}
-              className="w-full text-left bg-gray-900 border border-gray-800 hover:border-gray-700 hover:bg-gray-900/70 rounded-xl px-4 py-3 transition-colors"
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  setSelectedId(track.id)
+                }
+              }}
+              className="cursor-pointer bg-gray-900 border border-gray-800 hover:border-gray-700 hover:bg-gray-900/70 rounded-xl px-4 py-3 transition-colors"
             >
               <div className="flex items-center justify-between gap-4">
                 <div className="flex items-center gap-3 min-w-0">
@@ -861,13 +869,52 @@ export default function TracksPage() {
                 </div>
                 <div className="flex items-center gap-3 shrink-0">
                   <span className="text-xs text-gray-500">{stemCount} stems</span>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setConfirmDelete(track)
+                    }}
+                    className="px-2.5 py-1 bg-red-900/30 hover:bg-red-800/60 border border-red-800/50 hover:border-red-700 text-red-300 hover:text-red-200 rounded-md text-xs font-medium transition-colors"
+                    aria-label={`Delete ${track.name}`}
+                  >
+                    Delete
+                  </button>
                   <span className="text-gray-600">→</span>
                 </div>
               </div>
-            </button>
+            </div>
           )
         })}
       </div>
+
+      {confirmDelete && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center px-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-md p-6 space-y-4">
+            <h3 className="text-lg font-semibold text-gray-100">Delete this track?</h3>
+            <p className="text-sm text-gray-400">
+              <span className="text-gray-200 font-medium">{confirmDelete.name}</span> and all of its
+              stems, song.ini, and album art will be permanently removed. This cannot be undone.
+            </p>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                onClick={() => setConfirmDelete(null)}
+                disabled={deleting}
+                className="px-4 py-2 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-gray-200 rounded-lg text-sm font-medium transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={performConfirmedDelete}
+                disabled={deleting}
+                className="px-4 py-2 bg-red-700 hover:bg-red-600 disabled:opacity-40 text-white rounded-lg text-sm font-medium transition-colors"
+              >
+                {deleting ? 'Deleting...' : 'Delete track'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
