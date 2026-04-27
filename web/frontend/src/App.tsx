@@ -7,8 +7,8 @@ import { logout } from './components/AuthGate.tsx'
 
 const navItems = [
   { to: '/', label: 'Create' },
-  { to: '/tracks', label: 'Tracks' },
-  { to: '/game-songs', label: 'Game Songs' },
+  { to: '/tracks', label: 'Studio Library' },
+  { to: '/game-songs', label: 'Game Library' },
 ]
 
 export default function App() {

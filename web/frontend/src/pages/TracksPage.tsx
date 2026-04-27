@@ -435,6 +435,8 @@ export default function TracksPage() {
   const [loading, setLoading] = useState(true)
   const [beatmapPanel, setBeatmapPanel] = useState<{ track: Track; stem: string } | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState<Track | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
   // song.ini editor state for the detail view
   const [songIni, setSongIni] = useState<Record<string, string>>({})
@@ -538,6 +540,18 @@ export default function TracksPage() {
     loadTracks()
   }
 
+  const performConfirmedDelete = async () => {
+    if (!confirmDelete) return
+    setDeleting(true)
+    try {
+      await handleDelete(confirmDelete.id)
+      setSelectedId(null)
+      setConfirmDelete(null)
+    } finally {
+      setDeleting(false)
+    }
+  }
+
   const formatDate = (ts: number) => {
     return new Date(ts * 1000).toLocaleDateString(undefined, {
       year: 'numeric', month: 'short', day: 'numeric',
@@ -567,13 +581,10 @@ export default function TracksPage() {
               </p>
             </div>
             <button
-              onClick={() => {
-                handleDelete(selectedTrack.id)
-                setSelectedId(null)
-              }}
-              className="text-xs text-gray-600 hover:text-red-400 transition-colors"
+              onClick={() => setConfirmDelete(selectedTrack)}
+              className="px-3 py-1.5 bg-red-900/40 hover:bg-red-800/60 border border-red-800/60 hover:border-red-700 text-red-300 hover:text-red-200 rounded-md text-xs font-medium transition-colors"
             >
-              Delete
+              Delete track
             </button>
           </div>
 
@@ -762,6 +773,34 @@ export default function TracksPage() {
             onClose={() => setBeatmapPanel(null)}
           />
         )}
+
+        {confirmDelete && (
+          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center px-4">
+            <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-md p-6 space-y-4">
+              <h3 className="text-lg font-semibold text-gray-100">Delete this track?</h3>
+              <p className="text-sm text-gray-400">
+                <span className="text-gray-200 font-medium">{confirmDelete.name}</span> and all of its
+                stems, song.ini, and album art will be permanently removed. This cannot be undone.
+              </p>
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  onClick={() => setConfirmDelete(null)}
+                  disabled={deleting}
+                  className="px-4 py-2 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-gray-200 rounded-lg text-sm font-medium transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={performConfirmedDelete}
+                  disabled={deleting}
+                  className="px-4 py-2 bg-red-700 hover:bg-red-600 disabled:opacity-40 text-white rounded-lg text-sm font-medium transition-colors"
+                >
+                  {deleting ? 'Deleting...' : 'Delete track'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     )
   }
@@ -769,7 +808,7 @@ export default function TracksPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold">Track Library</h1>
+        <h1 className="text-2xl font-bold">Studio Library</h1>
         <p className="text-gray-500 mt-1">Saved stems from previous separations. Click a track to view details.</p>
       </div>
 

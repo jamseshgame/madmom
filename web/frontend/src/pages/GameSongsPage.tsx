@@ -189,7 +189,7 @@ export default function GameSongsPage() {
         <div className="flex items-center justify-between">
           <div>
             <button onClick={closeEdit} className="text-sm text-gray-400 hover:text-gray-200">
-              ← Back to Game Songs
+              ← Back to Game Library
             </button>
             <h1 className="text-2xl font-bold mt-1">{editing}</h1>
           </div>
@@ -330,7 +330,7 @@ export default function GameSongsPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Game Songs</h1>
+          <h1 className="text-2xl font-bold">Game Library</h1>
           <p className="text-gray-500 mt-1">Songs published to the Jamsesh game repo.</p>
         </div>
         <button
