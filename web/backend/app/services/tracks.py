@@ -103,21 +103,67 @@ def create_track(
     return track
 
 
+def _read_song_ini_metadata(stems_dir: Path) -> dict[str, str]:
+    """Pull just name/artist/album/genre/year from a track's song.ini if present."""
+    path = stems_dir / 'song.ini'
+    if not path.exists():
+        return {}
+    out: dict[str, str] = {}
+    try:
+        for raw in path.read_text(encoding='utf-8', errors='replace').splitlines():
+            line = raw.strip()
+            if not line or line.startswith(('#', ';', '[')) or '=' not in line:
+                continue
+            k, _, v = line.partition('=')
+            key = k.strip().lower()
+            if key in ('name', 'artist', 'album', 'genre', 'year'):
+                val = v.strip()
+                if val:
+                    out[key] = val
+    except Exception:
+        return {}
+    return out
+
+
 def list_tracks() -> list[dict[str, Any]]:
-    """List all saved tracks, newest first."""
+    """List all saved tracks, newest first.
+
+    Enriches each track with metadata from its song.ini (if present), so the
+    library shows the clean title even when the track.json was created before
+    the user filled in the form.
+    """
     TRACKS_DIR.mkdir(parents=True, exist_ok=True)
     tracks = []
     for d in TRACKS_DIR.iterdir():
         if d.is_dir() and (d / 'track.json').exists():
             t = Track.load(d.name)
-            if t:
-                tracks.append(t.to_dict())
+            if not t:
+                continue
+            data = t.to_dict()
+            ini = _read_song_ini_metadata(t.stems_dir)
+            for key in ('name', 'artist', 'album', 'genre', 'year'):
+                if ini.get(key):
+                    data[key] = ini[key]
+            tracks.append(data)
     tracks.sort(key=lambda t: t['created_at'], reverse=True)
     return tracks
 
 
 def get_track(track_id: str) -> Track | None:
     return Track.load(track_id)
+
+
+def get_track_enriched(track_id: str) -> dict[str, Any] | None:
+    """Same as get_track().to_dict() but with song.ini metadata layered on."""
+    t = Track.load(track_id)
+    if not t:
+        return None
+    data = t.to_dict()
+    ini = _read_song_ini_metadata(t.stems_dir)
+    for key in ('name', 'artist', 'album', 'genre', 'year'):
+        if ini.get(key):
+            data[key] = ini[key]
+    return data
 
 
 def delete_track(track_id: str) -> bool:

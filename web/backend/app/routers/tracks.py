@@ -25,6 +25,7 @@ from ..services.tracks import (
     delete_track,
     get_beatmap_dir,
     get_track,
+    get_track_enriched,
     list_tracks,
     update_track_meta,
 )
@@ -47,10 +48,10 @@ async def get_song_ini_schema():
 @router.get('/{track_id}')
 async def get_single_track(track_id: str):
     """Get a single track by ID."""
-    track = get_track(track_id)
-    if not track:
+    data = get_track_enriched(track_id)
+    if not data:
         raise HTTPException(404, 'Track not found')
-    return track.to_dict()
+    return data
 
 
 @router.patch('/{track_id}')
