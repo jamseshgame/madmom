@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from ..config import settings
 from ..services.audio import resize_to_square_png
-from ..services.stems import MODEL_STEMS, separate_stems, write_song_ini
+from ..services.stems import DEMUCS_TO_GAME, MODEL_STEMS, _convert_to_ogg, separate_stems, write_song_ini
 from ..services.github_publisher import publish_song_folder
 from ..services.jobs import JobStatus, create_job, get_job
 from ..services.tracks import create_track
@@ -153,6 +153,157 @@ async def start_separation(
 
     job.task = asyncio.create_task(_run())
 
+    return {'job_id': job.id}
+
+
+@router.post('/manual')
+async def manual_stems(
+    file: UploadFile,
+    vocals: Optional[UploadFile] = File(None),
+    drums: Optional[UploadFile] = File(None),
+    bass: Optional[UploadFile] = File(None),
+    guitar: Optional[UploadFile] = File(None),
+    piano: Optional[UploadFile] = File(None),
+    other: Optional[UploadFile] = File(None),
+    song_ini: Optional[str] = Form(None),
+    album_art: Optional[UploadFile] = File(None),
+):
+    """Package user-supplied stems with the master song as a game-ready folder.
+
+    Skips Demucs entirely — converts each provided stem to OGG with the game
+    naming, uses the uploaded master as song.ogg, writes song.ini + album.png.
+    """
+    ext = Path(file.filename or '').suffix.lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(400, f'Unsupported master format: {ext}')
+
+    stem_uploads = {
+        'vocals': vocals,
+        'drums': drums,
+        'bass': bass,
+        'guitar': guitar,
+        'piano': piano,
+        'other': other,
+    }
+    provided = {k: v for k, v in stem_uploads.items() if v is not None and v.filename}
+    if not provided:
+        raise HTTPException(400, 'At least one stem file is required')
+
+    upload_dir = Path(settings.upload_dir)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    job = create_job()
+    job_dir = upload_dir / job.id
+    job_dir.mkdir()
+    job.output_dir = job_dir
+
+    # Save master
+    master_bytes = await file.read()
+    if len(master_bytes) > settings.max_upload_mb * 1024 * 1024:
+        raise HTTPException(413, f'Master file too large. Max {settings.max_upload_mb} MB.')
+    master_path = job_dir / f'input{ext}'
+    master_path.write_bytes(master_bytes)
+
+    original_name = Path(file.filename or 'audio').stem
+    job.metadata['original_name'] = original_name
+
+    # Save uploaded stems to a staging dir
+    staging = job_dir / '_uploaded_stems'
+    staging.mkdir()
+    saved: dict[str, Path] = {}
+    for stem_name, upload in provided.items():
+        s_ext = Path(upload.filename or '').suffix.lower() or '.wav'
+        if s_ext not in ALLOWED_EXTENSIONS:
+            raise HTTPException(400, f'Unsupported {stem_name} format: {s_ext}')
+        data = await upload.read()
+        if len(data) > settings.max_upload_mb * 1024 * 1024:
+            raise HTTPException(413, f'{stem_name} file too large. Max {settings.max_upload_mb} MB.')
+        path = staging / f'{stem_name}{s_ext}'
+        path.write_bytes(data)
+        saved[stem_name] = path
+
+    # Album art
+    album_png_bytes: Optional[bytes] = None
+    if album_art is not None:
+        raw = await album_art.read()
+        if raw:
+            try:
+                album_png_bytes = resize_to_square_png(raw, size=512)
+            except Exception as ae:
+                print(f'[stems/manual] album_art resize failed: {ae}')
+
+    out_dir = job_dir / 'stems'
+    out_dir.mkdir()
+
+    async def _run():
+        job.status = JobStatus.RUNNING
+        try:
+            stems_to_convert = list(saved.items())
+            total_steps = len(stems_to_convert) + 1  # +1 for master → song.ogg
+            game_stems: dict[str, str] = {}
+
+            for idx, (stem_name, src_path) in enumerate(stems_to_convert, 1):
+                game_name = DEMUCS_TO_GAME.get(stem_name, stem_name)
+                pct = int(85 * idx / total_steps)
+                await job.send('convert', pct, f'Converting stem {idx}/{total_steps} → {game_name}.ogg')
+                ogg_path = out_dir / f'{game_name}.ogg'
+                await _convert_to_ogg(src_path, ogg_path)
+                game_stems[game_name] = ogg_path.name
+
+            # Master → song.ogg
+            await job.send('convert', 90, f'Converting master {total_steps}/{total_steps} → song.ogg')
+            song_ogg = out_dir / 'song.ogg'
+            await _convert_to_ogg(master_path, song_ogg)
+            game_stems['song'] = 'song.ogg'
+
+            # song.ini
+            if song_ini:
+                try:
+                    ini_fields = json.loads(song_ini)
+                    write_song_ini(out_dir, ini_fields)
+                    game_stems['song_ini'] = 'song.ini'
+                    job.metadata['song_ini'] = ini_fields
+                except Exception as ie:
+                    print(f'[stems/manual] song.ini write failed: {ie}')
+
+            # album.png
+            if album_png_bytes:
+                try:
+                    (out_dir / 'album.png').write_bytes(album_png_bytes)
+                    game_stems['album_png'] = 'album.png'
+                except Exception as ae:
+                    print(f'[stems/manual] album.png write failed: {ae}')
+
+            job.metadata['stems'] = game_stems
+            job.metadata['game_ready'] = True
+            job.metadata['model'] = 'manual'
+            job.metadata['output_format'] = 'ogg'
+
+            # Persist as track
+            try:
+                track = create_track(
+                    name=original_name,
+                    stems=game_stems,
+                    source_stems_dir=out_dir,
+                    model='manual',
+                    output_format='ogg',
+                )
+                job.metadata['track_id'] = track.id
+            except Exception as te:
+                print(f'[stems/manual] Track save failed: {te}')
+
+            await job.send_done(job.metadata)
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            if job.cancelled:
+                return
+            import traceback
+            err_msg = str(e) or 'Manual stems processing failed'
+            print(f'[stems/manual] Job {job.id} failed: {traceback.format_exc()}')
+            await job.send_error(err_msg)
+
+    job.task = asyncio.create_task(_run())
     return {'job_id': job.id}
 
 

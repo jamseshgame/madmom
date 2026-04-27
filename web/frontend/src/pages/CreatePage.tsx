@@ -49,6 +49,15 @@ export default function CreatePage() {
   const [albumArt, setAlbumArt] = useState<File | null>(null)
   const [albumPreview, setAlbumPreview] = useState<string | null>(null)
   const albumInputRef = useRef<HTMLInputElement | null>(null)
+  const [mode, setMode] = useState<'generate' | 'manual'>('generate')
+  const [manualStems, setManualStems] = useState<Record<string, File | null>>({
+    vocals: null,
+    drums: null,
+    bass: null,
+    guitar: null,
+    piano: null,
+    other: null,
+  })
   const [songIni, setSongIni] = useState({
     name: '',
     artist: '',
@@ -160,17 +169,31 @@ export default function CreatePage() {
 
     const formData = new FormData()
     formData.append('file', file)
-    formData.append('model', model)
-    formData.append('stems', Array.from(selectedStems).join(','))
-    formData.append('shifts', String(shifts))
-    formData.append('overlap', String(overlap))
-    formData.append('clip_mode', clipMode)
-    formData.append('game_ready', 'true')
     formData.append('song_ini', JSON.stringify(songIni))
     if (albumArt) formData.append('album_art', albumArt)
 
+    let endpoint: string
+    if (mode === 'manual') {
+      const provided = Object.entries(manualStems).filter(([, f]) => f)
+      if (provided.length === 0) {
+        setError('Upload at least one stem file before continuing.')
+        setPhase('error')
+        return
+      }
+      for (const [stem, f] of provided) if (f) formData.append(stem, f)
+      endpoint = '/api/stems/manual'
+    } else {
+      formData.append('model', model)
+      formData.append('stems', Array.from(selectedStems).join(','))
+      formData.append('shifts', String(shifts))
+      formData.append('overlap', String(overlap))
+      formData.append('clip_mode', clipMode)
+      formData.append('game_ready', 'true')
+      endpoint = '/api/stems/separate'
+    }
+
     try {
-      const res = await fetch('/api/stems/separate', { method: 'POST', body: formData })
+      const res = await fetch(endpoint, { method: 'POST', body: formData })
       if (!res.ok) {
         const err = await res.json()
         throw new Error(err.detail || 'Upload failed')
@@ -219,6 +242,8 @@ export default function CreatePage() {
     if (albumPreview) URL.revokeObjectURL(albumPreview)
     setAlbumArt(null)
     setAlbumPreview(null)
+    setMode('generate')
+    setManualStems({ vocals: null, drums: null, bass: null, guitar: null, piano: null, other: null })
   }
 
   const currentModelStems = MODELS[model]?.stems || []
@@ -245,6 +270,32 @@ export default function CreatePage() {
             )}
           </div>
 
+          {/* Source mode */}
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-2 flex gap-1">
+            {(
+              [
+                { key: 'generate', label: 'Generate stems', sub: 'Run Demucs to split the master' },
+                { key: 'manual', label: 'Upload stems', sub: 'Bring your own stems; master becomes song.ogg' },
+              ] as const
+            ).map((opt) => {
+              const active = mode === opt.key
+              return (
+                <button
+                  key={opt.key}
+                  onClick={() => setMode(opt.key)}
+                  className={`flex-1 text-left p-3 rounded-lg transition-colors ${
+                    active ? 'bg-jam-600/15 ring-1 ring-jam-500' : 'hover:bg-gray-800'
+                  }`}
+                >
+                  <div className={`text-sm font-medium ${active ? 'text-jam-300' : 'text-gray-200'}`}>{opt.label}</div>
+                  <div className="text-xs text-gray-500 mt-0.5">{opt.sub}</div>
+                </button>
+              )
+            })}
+          </div>
+
+          {mode === 'generate' && (
+          <>
           {/* Model selection */}
           <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">
             <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Model</h3>
@@ -343,6 +394,61 @@ export default function CreatePage() {
               </div>
             </label>
           </div>
+          </>
+          )}
+
+          {mode === 'manual' && (
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">
+              <div>
+                <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Upload stems</h3>
+                <p className="text-xs text-gray-500 mt-1">
+                  Drop one file per stem (any audio format). Each gets converted to OGG with the game name. The master
+                  audio above becomes <span className="text-gray-400 font-mono">song.ogg</span>.
+                </p>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {(['vocals', 'drums', 'bass', 'guitar', 'piano', 'other'] as const).map((stem) => {
+                  const meta = STEM_META[stem]
+                  const f = manualStems[stem]
+                  return (
+                    <label
+                      key={stem}
+                      className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+                        f ? 'border-jam-500/40 bg-jam-600/5' : 'border-gray-700 hover:border-gray-500 bg-gray-800/40'
+                      }`}
+                    >
+                      <input
+                        type="file"
+                        accept=".flac,.mp3,.ogg,.wav,.m4a,.aac,.wma"
+                        className="hidden"
+                        onChange={(e) =>
+                          setManualStems((prev) => ({ ...prev, [stem]: e.target.files?.[0] ?? null }))
+                        }
+                      />
+                      <span className={`text-sm font-medium ${meta.color}`}>{meta.label}</span>
+                      <span className="text-xs text-gray-500 flex-1 truncate">
+                        {f ? f.name : 'Click to choose file'}
+                      </span>
+                      {f && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.preventDefault()
+                            e.stopPropagation()
+                            setManualStems((prev) => ({ ...prev, [stem]: null }))
+                          }}
+                          className="text-gray-500 hover:text-gray-200 text-xs"
+                          aria-label="Remove"
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </label>
+                  )
+                })}
+              </div>
+            </div>
+          )}
 
           {/* song.ini editor */}
           <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">
@@ -528,7 +634,7 @@ export default function CreatePage() {
               onClick={handleSeparate}
               className="px-6 py-2.5 bg-jam-600 hover:bg-jam-500 text-white rounded-lg font-medium transition-colors"
             >
-              Separate for Game
+              {mode === 'manual' ? 'Build for Game' : 'Separate for Game'}
             </button>
             <button onClick={reset} className="px-4 py-2.5 text-gray-400 hover:text-gray-200 transition-colors">
               Cancel
