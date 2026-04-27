@@ -953,12 +953,14 @@ export default function TracksPage() {
                     >
                       Download
                     </a>
-                    <button
-                      onClick={() => setBeatmapPanel({ track: selectedTrack, stem })}
-                      className="px-2 py-1 bg-green-700/60 hover:bg-green-600/70 text-green-200 rounded text-xs font-medium transition-colors"
-                    >
-                      Beatmap
-                    </button>
+                    {stem !== 'song' && (
+                      <button
+                        onClick={() => setBeatmapPanel({ track: selectedTrack, stem })}
+                        className="px-2 py-1 bg-green-700/60 hover:bg-green-600/70 text-green-200 rounded text-xs font-medium transition-colors"
+                      >
+                        Beatmap
+                      </button>
+                    )}
                   </div>
                   {(selectedTrack.beatmaps || [])
                     .filter((bm) => bm.stem === stem)

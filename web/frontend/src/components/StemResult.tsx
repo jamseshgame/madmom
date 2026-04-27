@@ -227,7 +227,7 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                 </a>
 
                 {/* Beatmap generation */}
-                {!bm && (
+                {!bm && stem !== 'song' && (
                   <button
                     onClick={() => generateBeatmap(stem)}
                     className="px-3 py-1.5 bg-green-700/60 hover:bg-green-600/70 text-green-200 rounded text-xs font-medium transition-colors w-full"
