@@ -443,9 +443,12 @@ async def publish_track_to_game(
 
     # Build game-ready files in a temp directory
     tmp_dir = Path(tempfile.mkdtemp(prefix='jamsesh_publish_'))
+    NON_AUDIO_KEYS = {'song_ini', 'album_png'}
     try:
         # Convert each stem to ogg with game naming
         for stem_name, filename in track.stems.items():
+            if stem_name in NON_AUDIO_KEYS:
+                continue
             src = track.stems_dir / filename
             if not src.exists():
                 continue
@@ -456,6 +459,11 @@ async def publish_track_to_game(
                 shutil.copy2(str(src), str(dst))
             else:
                 await _convert_to_ogg(src, dst)
+
+        # Carry album.png across to the published folder if the track has one
+        album_src = track.stems_dir / 'album.png'
+        if album_src.exists():
+            shutil.copy2(str(album_src), str(tmp_dir / 'album.png'))
 
         # Create song.ogg (full mix) by mixing all stems with ffmpeg
         ogg_stems = sorted(tmp_dir.glob('*.ogg'))
