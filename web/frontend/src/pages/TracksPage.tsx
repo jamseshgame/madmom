@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 
 interface Track {
   id: string
@@ -434,7 +435,15 @@ export default function TracksPage() {
   const [tracks, setTracks] = useState<Track[]>([])
   const [loading, setLoading] = useState(true)
   const [beatmapPanel, setBeatmapPanel] = useState<{ track: Track; stem: string } | null>(null)
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [searchParams, setSearchParams] = useSearchParams()
+  const selectedId = searchParams.get('id')
+  const setSelectedId = useCallback(
+    (id: string | null) => {
+      if (id) setSearchParams({ id }, { replace: false })
+      else setSearchParams({}, { replace: false })
+    },
+    [setSearchParams],
+  )
   const [confirmDelete, setConfirmDelete] = useState<Track | null>(null)
   const [deleting, setDeleting] = useState(false)
 
