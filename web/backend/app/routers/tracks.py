@@ -18,7 +18,16 @@ from ..services.game_songs import _parse_song_ini
 from ..services.github_publisher import publish_song_folder
 from ..services.jobs import JobStatus, create_job, get_job
 from ..services.stems import DEMUCS_TO_GAME, _convert_to_ogg, write_song_ini
-from ..services.tracks import create_track, delete_track, get_track, list_tracks, update_track_meta
+from ..services.tracks import (
+    add_beatmap_record,
+    create_track,
+    delete_beatmap_record,
+    delete_track,
+    get_beatmap_dir,
+    get_track,
+    list_tracks,
+    update_track_meta,
+)
 
 router = APIRouter(prefix='/api/tracks', tags=['tracks'])
 
@@ -299,6 +308,14 @@ async def generate_beatmap_from_track(
             if result is None:
                 await job.send_error('No onsets detected in stem audio')
             else:
+                add_beatmap_record(
+                    track_id=track_id,
+                    beatmap_id=job.id,
+                    stem=stem,
+                    folder_name=folder_name,
+                    song_name=song_name,
+                    source_dir=output_dir,
+                )
                 await job.send_done(result)
         except Exception as e:
             import traceback
@@ -308,6 +325,96 @@ async def generate_beatmap_from_track(
     asyncio.create_task(_run())
 
     return {'job_id': job.id}
+
+
+def _parse_song_ini_sections(text: str) -> dict[str, dict[str, str]]:
+    """Parse a song.ini, preserving [section] grouping. Lower-cases keys/sections."""
+    sections: dict[str, dict[str, str]] = {}
+    current = '_root'
+    sections[current] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(('#', ';')):
+            continue
+        if line.startswith('[') and line.endswith(']'):
+            current = line[1:-1].strip().lower()
+            sections.setdefault(current, {})
+            continue
+        if '=' not in line:
+            continue
+        k, _, v = line.partition('=')
+        sections[current][k.strip().lower()] = v.strip()
+    return sections
+
+
+@router.get('/{track_id}/beatmaps/{beatmap_id}/stats')
+async def get_beatmap_stats(track_id: str, beatmap_id: str):
+    """Return parsed song.ini sections for a generated beatmap."""
+    bm_dir = get_beatmap_dir(track_id, beatmap_id)
+    if not bm_dir:
+        raise HTTPException(404, 'Beatmap not found')
+    ini_path = bm_dir / 'song.ini'
+    if not ini_path.exists():
+        raise HTTPException(404, 'song.ini missing')
+    sections = _parse_song_ini_sections(ini_path.read_text(encoding='utf-8', errors='replace'))
+    chart_path = bm_dir / 'notes.chart'
+    chart_size = chart_path.stat().st_size if chart_path.exists() else 0
+    return {
+        'sections': sections,
+        'chart_bytes': chart_size,
+    }
+
+
+@router.get('/{track_id}/beatmaps/{beatmap_id}/download/zip')
+async def download_beatmap_zip(track_id: str, beatmap_id: str):
+    """Download the beatmap folder as a ZIP."""
+    import io
+    import zipfile
+
+    bm_dir = get_beatmap_dir(track_id, beatmap_id)
+    if not bm_dir:
+        raise HTTPException(404, 'Beatmap not found')
+
+    folder_name = bm_dir.parent.parent.name  # placeholder; we use a record-derived name
+    track = get_track(track_id)
+    if track:
+        rec = next((b for b in track.beatmaps if b.get('id') == beatmap_id), None)
+        if rec:
+            folder_name = rec.get('folder_name') or folder_name
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for file_path in sorted(bm_dir.iterdir()):
+            if file_path.is_file() and not file_path.name.startswith('_'):
+                zf.write(file_path, f'{folder_name}/{file_path.name}')
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type='application/zip',
+        headers={'Content-Disposition': f'attachment; filename="{folder_name}.zip"'},
+    )
+
+
+@router.get('/{track_id}/beatmaps/{beatmap_id}/download/{filename}')
+async def download_beatmap_file(track_id: str, beatmap_id: str, filename: str):
+    """Download a single file (notes.chart, song.ogg, song.ini, album.png) from a beatmap."""
+    if '/' in filename or '\\' in filename or filename.startswith('.'):
+        raise HTTPException(400, 'Invalid filename')
+    bm_dir = get_beatmap_dir(track_id, beatmap_id)
+    if not bm_dir:
+        raise HTTPException(404, 'Beatmap not found')
+    fp = bm_dir / filename
+    if not fp.exists() or not fp.is_file():
+        raise HTTPException(404, 'File not found')
+    return FileResponse(str(fp), filename=filename)
+
+
+@router.delete('/{track_id}/beatmaps/{beatmap_id}')
+async def remove_beatmap(track_id: str, beatmap_id: str):
+    """Delete a beatmap record and its files."""
+    if not delete_beatmap_record(track_id, beatmap_id):
+        raise HTTPException(404, 'Beatmap not found')
+    return {'ok': True}
 
 
 @router.post('/{track_id}/publish-game')

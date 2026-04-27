@@ -26,6 +26,8 @@ class Track:
     album: str = ''
     genre: str = ''
     year: str = ''
+    # Beatmap records: each {id, stem, generated_at, folder_name, song_name}
+    beatmaps: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def dir(self) -> Path:
@@ -34,6 +36,10 @@ class Track:
     @property
     def stems_dir(self) -> Path:
         return self.dir / 'stems'
+
+    @property
+    def beatmaps_dir(self) -> Path:
+        return self.dir / 'beatmaps'
 
     @property
     def meta_path(self) -> Path:
@@ -54,6 +60,9 @@ class Track:
         if not meta_path.exists():
             return None
         data = json.loads(meta_path.read_text())
+        # Tolerate older track.json files written before new fields existed
+        valid = {f.name for f in cls.__dataclass_fields__.values()}
+        data = {k: v for k, v in data.items() if k in valid}
         return cls(**data)
 
 
@@ -125,7 +134,65 @@ def update_track_meta(track_id: str, **kwargs) -> Track | None:
     if not track:
         return None
     for key, val in kwargs.items():
-        if hasattr(track, key) and key not in ('id', 'created_at', 'stems'):
+        if hasattr(track, key) and key not in ('id', 'created_at', 'stems', 'beatmaps'):
             setattr(track, key, val)
     track.save()
     return track
+
+
+def add_beatmap_record(
+    track_id: str,
+    beatmap_id: str,
+    stem: str,
+    folder_name: str,
+    song_name: str,
+    source_dir: Path,
+) -> Track | None:
+    """Copy a freshly generated beatmap folder into the track's beatmaps_dir
+    and append a record to the track. Returns the updated track."""
+    track = Track.load(track_id)
+    if not track:
+        return None
+
+    track.beatmaps_dir.mkdir(parents=True, exist_ok=True)
+    dest = track.beatmaps_dir / beatmap_id
+    if source_dir.exists() and not dest.exists():
+        shutil.copytree(str(source_dir), str(dest))
+
+    record = {
+        'id': beatmap_id,
+        'stem': stem,
+        'generated_at': time.time(),
+        'folder_name': folder_name,
+        'song_name': song_name,
+    }
+    # Replace any prior record with the same id (shouldn't happen, but keeps it tidy)
+    track.beatmaps = [b for b in track.beatmaps if b.get('id') != beatmap_id]
+    track.beatmaps.append(record)
+    track.save()
+    return track
+
+
+def get_beatmap_dir(track_id: str, beatmap_id: str) -> Path | None:
+    track = Track.load(track_id)
+    if not track:
+        return None
+    if not any(b.get('id') == beatmap_id for b in track.beatmaps):
+        return None
+    d = track.beatmaps_dir / beatmap_id
+    return d if d.exists() else None
+
+
+def delete_beatmap_record(track_id: str, beatmap_id: str) -> bool:
+    track = Track.load(track_id)
+    if not track:
+        return False
+    before = len(track.beatmaps)
+    track.beatmaps = [b for b in track.beatmaps if b.get('id') != beatmap_id]
+    if len(track.beatmaps) == before:
+        return False
+    bm_dir = track.beatmaps_dir / beatmap_id
+    if bm_dir.exists():
+        shutil.rmtree(str(bm_dir), ignore_errors=True)
+    track.save()
+    return True
