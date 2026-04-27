@@ -12,7 +12,14 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from ..config import settings
 from ..services.audio import resize_to_square_png
-from ..services.stems import DEMUCS_TO_GAME, MODEL_STEMS, _convert_to_ogg, separate_stems, write_song_ini
+from ..services.stems import (
+    DEMUCS_TO_GAME,
+    MODEL_STEMS,
+    _convert_to_ogg,
+    _mix_to_ogg,
+    separate_stems,
+    write_song_ini,
+)
 from ..services.github_publisher import publish_song_folder
 from ..services.jobs import JobStatus, create_job, get_job
 from ..services.tracks import create_track
@@ -158,7 +165,7 @@ async def start_separation(
 
 @router.post('/manual')
 async def manual_stems(
-    file: UploadFile,
+    file: Optional[UploadFile] = File(None),
     vocals: Optional[UploadFile] = File(None),
     drums: Optional[UploadFile] = File(None),
     bass: Optional[UploadFile] = File(None),
@@ -168,14 +175,19 @@ async def manual_stems(
     song_ini: Optional[str] = Form(None),
     album_art: Optional[UploadFile] = File(None),
 ):
-    """Package user-supplied stems with the master song as a game-ready folder.
+    """Package user-supplied stems into a game-ready folder.
 
-    Skips Demucs entirely — converts each provided stem to OGG with the game
-    naming, uses the uploaded master as song.ogg, writes song.ini + album.png.
+    If a master `file` is supplied it becomes song.ogg. Otherwise the
+    provided stems are summed with ffmpeg amix to synthesise song.ogg,
+    so users with stems-only sources can still produce a valid game folder.
     """
-    ext = Path(file.filename or '').suffix.lower()
-    if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(400, f'Unsupported master format: {ext}')
+    has_master = file is not None and file.filename
+    if has_master:
+        ext = Path(file.filename or '').suffix.lower()
+        if ext not in ALLOWED_EXTENSIONS:
+            raise HTTPException(400, f'Unsupported master format: {ext}')
+    else:
+        ext = ''
 
     stem_uploads = {
         'vocals': vocals,
@@ -188,6 +200,8 @@ async def manual_stems(
     provided = {k: v for k, v in stem_uploads.items() if v is not None and v.filename}
     if not provided:
         raise HTTPException(400, 'At least one stem file is required')
+    if not has_master and len(provided) < 2:
+        raise HTTPException(400, 'Need at least 2 stems to synthesise song.ogg')
 
     upload_dir = Path(settings.upload_dir)
     upload_dir.mkdir(parents=True, exist_ok=True)
@@ -197,14 +211,30 @@ async def manual_stems(
     job_dir.mkdir()
     job.output_dir = job_dir
 
-    # Save master
-    master_bytes = await file.read()
-    if len(master_bytes) > settings.max_upload_mb * 1024 * 1024:
-        raise HTTPException(413, f'Master file too large. Max {settings.max_upload_mb} MB.')
-    master_path = job_dir / f'input{ext}'
-    master_path.write_bytes(master_bytes)
+    # Save master if provided
+    master_path: Optional[Path] = None
+    if has_master:
+        master_bytes = await file.read()
+        if len(master_bytes) > settings.max_upload_mb * 1024 * 1024:
+            raise HTTPException(413, f'Master file too large. Max {settings.max_upload_mb} MB.')
+        master_path = job_dir / f'input{ext}'
+        master_path.write_bytes(master_bytes)
+        original_name = Path(file.filename or 'audio').stem
+    else:
+        # Derive a fallback name from the song.ini if present, else the first stem
+        original_name = ''
+        if song_ini:
+            try:
+                _ini = json.loads(song_ini)
+                fallback = f"{(_ini.get('artist') or '').strip()} - {(_ini.get('name') or '').strip()}".strip(' -')
+                if fallback != '-' and fallback:
+                    original_name = fallback
+            except Exception:
+                pass
+        if not original_name:
+            first_stem = next(iter(provided.values()))
+            original_name = Path(first_stem.filename or 'stems-only').stem
 
-    original_name = Path(file.filename or 'audio').stem
     job.metadata['original_name'] = original_name
 
     # Save uploaded stems to a staging dir
@@ -250,10 +280,14 @@ async def manual_stems(
                 await _convert_to_ogg(src_path, ogg_path)
                 game_stems[game_name] = ogg_path.name
 
-            # Master → song.ogg
-            await job.send('convert', 90, f'Converting master {total_steps}/{total_steps} → song.ogg')
+            # song.ogg — either convert the supplied master, or mux the stems
             song_ogg = out_dir / 'song.ogg'
-            await _convert_to_ogg(master_path, song_ogg)
+            if master_path is not None:
+                await job.send('convert', 90, f'Converting master {total_steps}/{total_steps} → song.ogg')
+                await _convert_to_ogg(master_path, song_ogg)
+            else:
+                await job.send('convert', 90, f'Mixing {len(stems_to_convert)} stems → song.ogg')
+                await _mix_to_ogg([p for _, p in stems_to_convert], song_ogg)
             game_stems['song'] = 'song.ogg'
 
             # song.ini

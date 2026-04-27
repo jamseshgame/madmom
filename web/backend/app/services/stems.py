@@ -67,6 +67,34 @@ async def _convert_to_ogg(src: Path, dst: Path, progress_callback=None) -> Path:
     return dst
 
 
+async def _mix_to_ogg(src_paths: list[Path], dst: Path) -> Path:
+    """Sum multiple stems into a single OGG using ffmpeg's amix filter.
+
+    `normalize=0` keeps the natural relative levels of each stem instead of
+    dividing by N (which would make the result very quiet). Stems for a single
+    song are typically already balanced, so straight summation is the right
+    default — at the small risk of clipping when several loud stems align.
+    """
+    if not src_paths:
+        raise RuntimeError('No stems provided to mix')
+    n = len(src_paths)
+    cmd: list[str] = ['ffmpeg', '-y']
+    for p in src_paths:
+        cmd.extend(['-i', str(p)])
+    cmd.extend([
+        '-filter_complex', f'amix=inputs={n}:duration=longest:normalize=0',
+        '-c:a', 'libvorbis', '-q:a', '6', str(dst),
+    ])
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        msg = stderr.decode('utf-8', errors='replace').strip().splitlines()[-3:]
+        raise RuntimeError(f'ffmpeg amix failed: {" ".join(msg)}')
+    return dst
+
+
 def _debug_env() -> str:
     import asyncio as _a
 

@@ -165,12 +165,12 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
   }
 
   const handleSeparate = async () => {
-    if (!file) return
+    if (mode === 'generate' && !file) return
     setPhase('separating')
     setError('')
 
     const formData = new FormData()
-    formData.append('file', file)
+    if (file) formData.append('file', file)
     formData.append('song_ini', JSON.stringify(songIni))
     if (albumArt) formData.append('album_art', albumArt)
 
@@ -179,6 +179,11 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
       const provided = Object.entries(manualStems).filter(([, f]) => f)
       if (provided.length === 0) {
         setError('Upload at least one stem file before continuing.')
+        setPhase('error')
+        return
+      }
+      if (!file && provided.length < 2) {
+        setError('Need at least 2 stems to synthesise song.ogg without a master mix.')
         setPhase('error')
         return
       }
@@ -285,48 +290,78 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
             </ul>
           </div>
           <FileUpload accept=".flac,.mp3,.ogg,.wav,.m4a,.aac,.wma" label="Drop your audio file here" onFile={handleFile} />
+          <div className="text-center">
+            <button
+              type="button"
+              onClick={() => {
+                setMode('manual')
+                setFile(null)
+                setPhase('settings')
+              }}
+              className="text-sm text-gray-500 hover:text-jam-300 underline-offset-2 hover:underline transition-colors"
+            >
+              I only have stems — no master mix
+            </button>
+            <p className="text-[11px] text-gray-700 mt-1">
+              We'll mux the stems together to synthesise song.ogg.
+            </p>
+          </div>
         </>
       )}
 
-      {phase === 'settings' && file && (
+      {phase === 'settings' && (file || mode === 'manual') && (
         <div className="space-y-6">
-          {/* File info */}
-          <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 flex items-center justify-between gap-4">
-            <p className="text-sm text-gray-400">
-              File: <span className="text-gray-200">{file.name}</span>{' '}
-              <span className="text-gray-600">({(file.size / 1024 / 1024).toFixed(1)} MB)</span>
-            </p>
-            {loadingMeta && (
-              <span className="flex items-center gap-2 text-xs text-gray-500">
-                <span className="animate-spin h-3.5 w-3.5 border-2 border-jam-400 border-t-transparent rounded-full" />
-                Reading metadata...
-              </span>
-            )}
-          </div>
+          {/* File info — only when a master file is present */}
+          {file && (
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 flex items-center justify-between gap-4">
+              <p className="text-sm text-gray-400">
+                File: <span className="text-gray-200">{file.name}</span>{' '}
+                <span className="text-gray-600">({(file.size / 1024 / 1024).toFixed(1)} MB)</span>
+              </p>
+              {loadingMeta && (
+                <span className="flex items-center gap-2 text-xs text-gray-500">
+                  <span className="animate-spin h-3.5 w-3.5 border-2 border-jam-400 border-t-transparent rounded-full" />
+                  Reading metadata...
+                </span>
+              )}
+            </div>
+          )}
 
-          {/* Source mode */}
-          <div className="bg-gray-900 border border-gray-800 rounded-xl p-2 flex gap-1">
-            {(
-              [
-                { key: 'generate', label: 'Generate stems', sub: 'Run Demucs to split the master' },
-                { key: 'manual', label: 'Upload stems', sub: 'Bring your own stems; master becomes song.ogg' },
-              ] as const
-            ).map((opt) => {
-              const active = mode === opt.key
-              return (
-                <button
-                  key={opt.key}
-                  onClick={() => setMode(opt.key)}
-                  className={`flex-1 text-left p-3 rounded-lg transition-colors ${
-                    active ? 'bg-jam-600/15 ring-1 ring-jam-500' : 'hover:bg-gray-800'
-                  }`}
-                >
-                  <div className={`text-sm font-medium ${active ? 'text-jam-300' : 'text-gray-200'}`}>{opt.label}</div>
-                  <div className="text-xs text-gray-500 mt-0.5">{opt.sub}</div>
-                </button>
-              )
-            })}
-          </div>
+          {!file && (
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 flex items-center justify-between gap-4">
+              <p className="text-sm text-gray-400">
+                <span className="text-gray-200 font-medium">Stems-only mode.</span>{' '}
+                The uploaded stems will be summed into{' '}
+                <span className="text-gray-300 font-mono">song.ogg</span> automatically.
+              </p>
+            </div>
+          )}
+
+          {/* Source mode — only meaningful when a master is present */}
+          {file && (
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-2 flex gap-1">
+              {(
+                [
+                  { key: 'generate', label: 'Generate stems', sub: 'Run Demucs to split the master' },
+                  { key: 'manual', label: 'Upload stems', sub: 'Bring your own stems; master becomes song.ogg' },
+                ] as const
+              ).map((opt) => {
+                const active = mode === opt.key
+                return (
+                  <button
+                    key={opt.key}
+                    onClick={() => setMode(opt.key)}
+                    className={`flex-1 text-left p-3 rounded-lg transition-colors ${
+                      active ? 'bg-jam-600/15 ring-1 ring-jam-500' : 'hover:bg-gray-800'
+                    }`}
+                  >
+                    <div className={`text-sm font-medium ${active ? 'text-jam-300' : 'text-gray-200'}`}>{opt.label}</div>
+                    <div className="text-xs text-gray-500 mt-0.5">{opt.sub}</div>
+                  </button>
+                )
+              })}
+            </div>
+          )}
 
           {mode === 'generate' && (
           <>
@@ -668,7 +703,11 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
               onClick={handleSeparate}
               className="px-6 py-2.5 bg-jam-600 hover:bg-jam-500 text-white rounded-lg font-medium transition-colors"
             >
-              {mode === 'manual' ? 'Build for Game' : 'Separate for Game'}
+              {mode === 'manual'
+                ? file
+                  ? 'Build for Game'
+                  : 'Mux Stems → Build for Game'
+                : 'Separate for Game'}
             </button>
             <button onClick={reset} className="px-4 py-2.5 text-gray-400 hover:text-gray-200 transition-colors">
               Cancel
