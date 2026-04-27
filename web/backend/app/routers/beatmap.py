@@ -202,6 +202,8 @@ async def create_beatmap_from_stem(
 
     output_dir = job_dir / folder_name
 
+    track_id = source_job.metadata.get('track_id')
+
     async def _run():
         job.status = JobStatus.RUNNING
         try:
@@ -218,7 +220,21 @@ async def create_beatmap_from_stem(
             if result is None:
                 await job.send_error('No onsets detected in stem audio')
             else:
-                await job.send_done(result)
+                if track_id:
+                    try:
+                        from ..services.tracks import add_beatmap_record
+                        add_beatmap_record(
+                            track_id=track_id,
+                            beatmap_id=job.id,
+                            stem=stem,
+                            folder_name=folder_name,
+                            song_name=song_name,
+                            source_dir=output_dir,
+                        )
+                        job.metadata['track_id'] = track_id
+                    except Exception as be:
+                        print(f'[beatmap] add_beatmap_record failed: {be}')
+                await job.send_done(job.metadata | result)
         except Exception as e:
             import traceback
             print(f'[beatmap] Job {job.id} failed: {traceback.format_exc()}')

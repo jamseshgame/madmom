@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import StemPlayer from './StemPlayer.tsx'
+import BeatmapStatsModal, { BeatmapRecord } from './BeatmapStatsModal.tsx'
 
 interface StemResultProps {
   jobId: string
@@ -29,7 +30,15 @@ const NON_AUDIO_KEYS = new Set(['song_ini', 'album_png'])
 
 type BeatmapState = 'idle' | 'generating' | 'done' | 'error'
 
-function StemBeatmapTracker({ beatmapJobId }: { beatmapJobId: string }) {
+function StemBeatmapTracker({
+  beatmapJobId,
+  onDone,
+  onView,
+}: {
+  beatmapJobId: string
+  onDone?: (jobId: string) => void
+  onView?: (jobId: string) => void
+}) {
   const [progress, setProgress] = useState(0)
   const [message, setMessage] = useState('Starting...')
   const [done, setDone] = useState(false)
@@ -46,6 +55,7 @@ function StemBeatmapTracker({ beatmapJobId }: { beatmapJobId: string }) {
       if (data.step === 'done') {
         evtSource.close()
         setDone(true)
+        if (onDone) onDone(beatmapJobId)
       } else if (data.step === 'error') {
         evtSource.close()
         setError(data.message)
@@ -58,7 +68,7 @@ function StemBeatmapTracker({ beatmapJobId }: { beatmapJobId: string }) {
     }
 
     return () => evtSource.close()
-  }, [beatmapJobId])
+  }, [beatmapJobId, onDone])
 
   if (error) {
     return <div className="text-xs text-red-400 mt-1">{error}</div>
@@ -67,11 +77,19 @@ function StemBeatmapTracker({ beatmapJobId }: { beatmapJobId: string }) {
   if (done) {
     return (
       <div className="flex flex-wrap gap-1.5 mt-1">
+        {onView && (
+          <button
+            onClick={() => onView(beatmapJobId)}
+            className="px-2.5 py-1 bg-jam-600 hover:bg-jam-500 text-white rounded text-xs font-medium transition-colors"
+          >
+            View stats
+          </button>
+        )}
         <a
           href={`/api/beatmap/${beatmapJobId}/download/zip`}
-          className="px-2.5 py-1 bg-jam-600 hover:bg-jam-500 text-white rounded text-xs font-medium transition-colors"
+          className="px-2.5 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded text-xs font-medium transition-colors"
         >
-          Download ZIP
+          ZIP
         </a>
         <a
           href={`/api/beatmap/${beatmapJobId}/download/notes.chart`}
@@ -100,7 +118,9 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
   const stems = (metadata.stems || {}) as Record<string, string>
   const trackName = (metadata.original_name as string) || 'track'
   const isGameReady = !!metadata.game_ready
+  const trackId = (metadata.track_id as string) || ''
   const [beatmaps, setBeatmaps] = useState<Record<string, { jobId: string; state: BeatmapState }>>({})
+  const [statsBeatmap, setStatsBeatmap] = useState<BeatmapRecord | null>(null)
   const [publishing, setPublishing] = useState<'idle' | 'publishing' | 'done' | 'error'>('idle')
   const [publishResult, setPublishResult] = useState<{ commitUrl: string; folder: string } | null>(null)
   const [publishError, setPublishError] = useState('')
@@ -245,7 +265,21 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
 
                 {bm?.state === 'generating' && bm.jobId && (
                   <div className="w-full">
-                    <StemBeatmapTracker beatmapJobId={bm.jobId} />
+                    <StemBeatmapTracker
+                      beatmapJobId={bm.jobId}
+                      onView={
+                        trackId
+                          ? (id) =>
+                              setStatsBeatmap({
+                                id,
+                                stem,
+                                generated_at: Date.now() / 1000,
+                                folder_name: '',
+                                song_name: `${trackName} (${info.label})`,
+                              })
+                          : undefined
+                      }
+                    />
                   </div>
                 )}
 
@@ -465,6 +499,14 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
           </a>
         )}
       </div>
+
+      {statsBeatmap && trackId && (
+        <BeatmapStatsModal
+          trackId={trackId}
+          beatmap={statsBeatmap}
+          onClose={() => setStatsBeatmap(null)}
+        />
+      )}
     </div>
   )
 }
