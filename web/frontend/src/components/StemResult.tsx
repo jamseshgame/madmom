@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import StemPlayer from './StemPlayer.tsx'
 
 interface StemResultProps {
   jobId: string
@@ -99,8 +100,6 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
   const stems = (metadata.stems || {}) as Record<string, string>
   const trackName = (metadata.original_name as string) || 'track'
   const isGameReady = !!metadata.game_ready
-  const [playing, setPlaying] = useState<string | null>(null)
-  const [audioEl, setAudioEl] = useState<HTMLAudioElement | null>(null)
   const [beatmaps, setBeatmaps] = useState<Record<string, { jobId: string; state: BeatmapState }>>({})
   const [publishing, setPublishing] = useState<'idle' | 'publishing' | 'done' | 'error'>('idle')
   const [publishResult, setPublishResult] = useState<{ commitUrl: string; folder: string } | null>(null)
@@ -177,21 +176,6 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
     }
   }
 
-  const togglePlay = (stem: string) => {
-    if (playing === stem && audioEl) {
-      audioEl.pause()
-      setPlaying(null)
-      setAudioEl(null)
-      return
-    }
-    if (audioEl) audioEl.pause()
-    const audio = new Audio(`/api/stems/${jobId}/download/${stem}`)
-    audio.play()
-    audio.onended = () => { setPlaying(null); setAudioEl(null) }
-    setPlaying(stem)
-    setAudioEl(audio)
-  }
-
   const generateBeatmap = async (stem: string) => {
     const info = STEM_LABELS[stem] || { label: stem }
     setBeatmaps((prev) => ({ ...prev, [stem]: { jobId: '', state: 'generating' } }))
@@ -227,38 +211,26 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
             .filter(([stem]) => !NON_AUDIO_KEYS.has(stem))
             .map(([stem]) => {
             const info = STEM_LABELS[stem] || { label: stem, color: 'text-gray-300' }
-            const isPlaying = playing === stem
             const bm = beatmaps[stem]
             return (
               <div
                 key={stem}
-                className="bg-gray-800 border border-gray-700 rounded-lg p-4 flex flex-col items-center gap-2"
+                className="bg-gray-800 border border-gray-700 rounded-lg p-4 flex flex-col items-stretch gap-2"
               >
-                <span className={`text-sm font-semibold ${info.color}`}>{info.label}</span>
-                <div className="flex gap-1.5">
-                  <button
-                    onClick={() => togglePlay(stem)}
-                    className={`px-2.5 py-1.5 rounded text-xs font-medium transition-colors ${
-                      isPlaying
-                        ? 'bg-jam-600 text-white'
-                        : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-                    }`}
-                  >
-                    {isPlaying ? 'Stop' : 'Play'}
-                  </button>
-                  <a
-                    href={`/api/stems/${jobId}/download/${stem}`}
-                    className="px-2.5 py-1.5 bg-gray-700 text-gray-300 hover:bg-gray-600 rounded text-xs font-medium transition-colors"
-                  >
-                    Download
-                  </a>
-                </div>
+                <span className={`text-sm font-semibold text-center ${info.color}`}>{info.label}</span>
+                <StemPlayer src={`/api/stems/${jobId}/download/${stem}`} />
+                <a
+                  href={`/api/stems/${jobId}/download/${stem}`}
+                  className="px-2.5 py-1.5 bg-gray-700 text-gray-300 hover:bg-gray-600 rounded text-xs font-medium transition-colors text-center"
+                >
+                  Download
+                </a>
 
                 {/* Beatmap generation */}
                 {!bm && (
                   <button
                     onClick={() => generateBeatmap(stem)}
-                    className="mt-1 px-3 py-1.5 bg-green-700/60 hover:bg-green-600/70 text-green-200 rounded text-xs font-medium transition-colors w-full"
+                    className="px-3 py-1.5 bg-green-700/60 hover:bg-green-600/70 text-green-200 rounded text-xs font-medium transition-colors w-full"
                   >
                     Generate Beatmap
                   </button>

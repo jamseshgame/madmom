@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import CreateSection from '../components/CreateSection.tsx'
+import StemPlayer from '../components/StemPlayer.tsx'
 
 interface BeatmapRecord {
   id: string
@@ -929,11 +930,12 @@ export default function TracksPage() {
               .map(([stem]) => (
                 <div
                   key={stem}
-                  className="bg-gray-800 border border-gray-700 rounded-lg p-3 flex flex-col items-center gap-2"
+                  className="bg-gray-800 border border-gray-700 rounded-lg p-3 flex flex-col items-stretch gap-2"
                 >
-                  <span className={`text-sm font-semibold ${STEM_COLORS[stem] || 'text-gray-300'}`}>
+                  <span className={`text-sm font-semibold text-center ${STEM_COLORS[stem] || 'text-gray-300'}`}>
                     {STEM_LABELS[stem] || stem}
                   </span>
+                  <StemPlayer src={`/api/tracks/${selectedTrack.id}/stems/${stem}`} />
                   <div className="flex flex-wrap gap-1.5 justify-center">
                     <a
                       href={`/api/tracks/${selectedTrack.id}/stems/${stem}`}
