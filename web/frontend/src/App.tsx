@@ -1,13 +1,11 @@
 import { NavLink, Route, Routes } from 'react-router-dom'
-import CreatePage from './pages/CreatePage.tsx'
 import TracksPage from './pages/TracksPage.tsx'
 import GameSongsPage from './pages/GameSongsPage.tsx'
 import { VersionBanner, VersionFooter } from './components/VersionStatus.tsx'
 import { logout } from './components/AuthGate.tsx'
 
 const navItems = [
-  { to: '/', label: 'Create' },
-  { to: '/tracks', label: 'Studio Library' },
+  { to: '/', label: 'Studio Library' },
   { to: '/game-songs', label: 'Game Library' },
 ]
 
@@ -49,7 +47,7 @@ export default function App() {
       <main className="flex-1 max-w-5xl mx-auto px-4 py-8 w-full space-y-6">
         <VersionBanner />
         <Routes>
-          <Route path="/" element={<CreatePage />} />
+          <Route path="/" element={<TracksPage />} />
           <Route path="/tracks" element={<TracksPage />} />
           <Route path="/game-songs" element={<GameSongsPage />} />
         </Routes>

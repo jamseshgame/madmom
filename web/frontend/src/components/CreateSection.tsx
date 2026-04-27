@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState } from 'react'
-import FileUpload from '../components/FileUpload.tsx'
-import ProgressTracker from '../components/ProgressTracker.tsx'
-import StemResult from '../components/StemResult.tsx'
+import FileUpload from './FileUpload.tsx'
+import ProgressTracker from './ProgressTracker.tsx'
+import StemResult from './StemResult.tsx'
 
 type Phase = 'upload' | 'settings' | 'separating' | 'done' | 'error'
 
@@ -32,7 +32,7 @@ const STEM_META: Record<string, { label: string; color: string }> = {
   other: { label: 'Other', color: 'text-blue-400' },
 }
 
-export default function CreatePage() {
+export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}) {
   const [phase, setPhase] = useState<Phase>('upload')
   const [file, setFile] = useState<File | null>(null)
   const [jobId, setJobId] = useState('')
@@ -211,7 +211,8 @@ export default function CreatePage() {
   const handleDone = useCallback((meta: Record<string, unknown>) => {
     setMetadata(meta)
     setPhase('done')
-  }, [])
+    if (onSaved) onSaved()
+  }, [onSaved])
 
   const handleKill = async () => {
     const id = jobId
@@ -264,20 +265,12 @@ export default function CreatePage() {
             <ul className="space-y-2.5 text-sm">
               <li className="flex gap-3">
                 <span className="shrink-0 w-28 px-2 py-0.5 rounded-md bg-jam-600/15 text-jam-300 text-xs font-medium text-center">
-                  Create
-                </span>
-                <span className="text-gray-400">
-                  Drop a song to split it into stems with Demucs, or upload your own stems. Edit
-                  song.ini metadata and album art before saving to the library.
-                </span>
-              </li>
-              <li className="flex gap-3">
-                <span className="shrink-0 w-28 px-2 py-0.5 rounded-md bg-gray-800 text-gray-300 text-xs font-medium text-center">
                   Studio Library
                 </span>
                 <span className="text-gray-400">
-                  Browse saved tracks, download stems, tweak song.ini, generate beatmaps, and
-                  publish finished songs to the Jamsesh game repo.
+                  Drop a song below to split it into stems with Demucs (or upload your own).
+                  Browse saved tracks, edit song.ini, generate beatmaps, and publish finished
+                  songs to the Jamsesh game repo.
                 </span>
               </li>
               <li className="flex gap-3">

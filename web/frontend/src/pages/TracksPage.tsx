@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
+import CreateSection from '../components/CreateSection.tsx'
 
 interface BeatmapRecord {
   id: string
@@ -1167,7 +1168,9 @@ export default function TracksPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
+      <CreateSection onSaved={loadTracks} />
+
       <div>
         <h1 className="text-2xl font-bold">Studio Library</h1>
         <p className="text-gray-500 mt-1">Saved stems from previous separations. Click a track to view details.</p>
