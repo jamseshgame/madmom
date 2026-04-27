@@ -15,7 +15,6 @@ const STEM_LABELS: Record<string, { label: string; color: string }> = {
   rhythm: { label: 'Rhythm', color: 'text-green-400' },
   crowd: { label: 'Crowd', color: 'text-blue-400' },
   song: { label: 'Full Mix', color: 'text-gray-300' },
-  song_ini: { label: 'song.ini', color: 'text-yellow-400' },
   no_vocals: { label: 'Instrumental', color: 'text-cyan-400' },
   no_drums: { label: 'No Drums', color: 'text-cyan-400' },
   no_bass: { label: 'No Bass', color: 'text-cyan-400' },
@@ -23,6 +22,9 @@ const STEM_LABELS: Record<string, { label: string; color: string }> = {
   no_piano: { label: 'No Piano', color: 'text-cyan-400' },
   no_other: { label: 'No Other', color: 'text-cyan-400' },
 }
+
+// Keys that historically appeared in the stems map but aren't actual audio
+const NON_AUDIO_KEYS = new Set(['song_ini', 'album_png'])
 
 type BeatmapState = 'idle' | 'generating' | 'done' | 'error'
 
@@ -104,6 +106,37 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
   const [publishResult, setPublishResult] = useState<{ commitUrl: string; folder: string } | null>(null)
   const [publishError, setPublishError] = useState('')
 
+  const [songIni, setSongIni] = useState<Record<string, string>>(() => {
+    const raw = (metadata.song_ini || {}) as Record<string, unknown>
+    const out: Record<string, string> = {}
+    for (const [k, v] of Object.entries(raw)) out[k] = String(v ?? '')
+    return out
+  })
+  const [iniSaveState, setIniSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  const [iniError, setIniError] = useState('')
+  const updateIni = (key: string, value: string) =>
+    setSongIni((prev) => ({ ...prev, [key]: value }))
+
+  const saveSongIni = async () => {
+    setIniSaveState('saving')
+    setIniError('')
+    try {
+      const fd = new FormData()
+      fd.append('fields', JSON.stringify(songIni))
+      const res = await fetch(`/api/stems/${jobId}/song-ini`, { method: 'PATCH', body: fd })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || `Save failed: ${res.status}`)
+      }
+      setSongIni(await res.json())
+      setIniSaveState('saved')
+      setTimeout(() => setIniSaveState('idle'), 2000)
+    } catch (e) {
+      setIniError((e as Error).message)
+      setIniSaveState('error')
+    }
+  }
+
   const publishToGame = async () => {
     setPublishing('publishing')
     setPublishError('')
@@ -166,7 +199,9 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
         <p className="text-sm text-gray-500 mb-5">{trackName}</p>
 
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-          {Object.entries(stems).map(([stem]) => {
+          {Object.entries(stems)
+            .filter(([stem]) => !NON_AUDIO_KEYS.has(stem))
+            .map(([stem]) => {
             const info = STEM_LABELS[stem] || { label: stem, color: 'text-gray-300' }
             const isPlaying = playing === stem
             const bm = beatmaps[stem]
@@ -224,6 +259,117 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
               </div>
             )
           })}
+        </div>
+      </div>
+
+      {/* song.ini metadata editor — same fields as the Create page */}
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="text-yellow-400 text-xs font-mono">song.ini</span>
+            <span className="text-gray-600 text-xs">[song]</span>
+          </div>
+          <div className="flex items-center gap-3">
+            {iniSaveState === 'saved' && (
+              <span className="text-xs text-emerald-400">Saved</span>
+            )}
+            {iniSaveState === 'error' && (
+              <span className="text-xs text-red-400">{iniError}</span>
+            )}
+            <button
+              onClick={saveSongIni}
+              disabled={iniSaveState === 'saving'}
+              className="px-3 py-1.5 bg-jam-600 hover:bg-jam-500 disabled:opacity-40 text-white rounded-md text-xs font-medium"
+            >
+              {iniSaveState === 'saving' ? 'Saving...' : 'Save metadata'}
+            </button>
+          </div>
+        </div>
+
+        {/* Primary fields */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {([
+            ['name', 'name *'],
+            ['artist', 'artist *'],
+          ] as const).map(([key, label]) => (
+            <label key={key} className="block">
+              <span className="text-xs text-gray-400">{label}</span>
+              <input
+                type="text"
+                value={songIni[key] ?? ''}
+                onChange={(e) => updateIni(key, e.target.value)}
+                className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-jam-500"
+              />
+            </label>
+          ))}
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          {(['album', 'genre', 'year'] as const).map((key) => (
+            <label key={key} className="block">
+              <span className="text-xs text-gray-400">{key}</span>
+              <input
+                type="text"
+                value={songIni[key] ?? ''}
+                onChange={(e) => updateIni(key, e.target.value)}
+                className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-jam-500"
+              />
+            </label>
+          ))}
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {(['charter', 'loading_phrase'] as const).map((key) => (
+            <label key={key} className="block">
+              <span className="text-xs text-gray-400">{key}</span>
+              <input
+                type="text"
+                value={songIni[key] ?? ''}
+                onChange={(e) => updateIni(key, e.target.value)}
+                className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-jam-500"
+              />
+            </label>
+          ))}
+        </div>
+
+        {/* Timing */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {([
+            ['delay', 'delay (ms)'],
+            ['song_length', 'song_length (ms)'],
+            ['preview_start_time', 'preview_start_time (ms)'],
+          ] as const).map(([key, label]) => (
+            <label key={key} className="block">
+              <span className="text-xs text-gray-400">{label}</span>
+              <input
+                type="number"
+                value={songIni[key] ?? ''}
+                onChange={(e) => updateIni(key, e.target.value)}
+                className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-jam-500"
+              />
+            </label>
+          ))}
+        </div>
+
+        {/* Difficulties */}
+        <div>
+          <span className="text-xs text-gray-500 block mb-2">Difficulties</span>
+          <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+            {(['diff_band', 'diff_guitar', 'diff_drums', 'diff_bass', 'diff_rhythm', 'diff_keys'] as const).map(
+              (key) => (
+                <label key={key} className="block">
+                  <span className="text-xs text-gray-600">{key.replace('diff_', '')}</span>
+                  <input
+                    type="number"
+                    min="-1"
+                    max="6"
+                    value={songIni[key] ?? ''}
+                    onChange={(e) => updateIni(key, e.target.value)}
+                    className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-200 text-center focus:outline-none focus:border-jam-500"
+                  />
+                </label>
+              ),
+            )}
+          </div>
+          <span className="text-xs text-gray-700 mt-1 block">-1 = uncharted, 0–6 = difficulty tier</span>
         </div>
       </div>
 

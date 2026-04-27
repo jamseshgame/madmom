@@ -307,6 +307,28 @@ async def manual_stems(
     return {'job_id': job.id}
 
 
+@router.patch('/{job_id}/song-ini')
+async def update_job_song_ini(job_id: str, fields: str = Form(...)):
+    """Rewrite song.ini for a completed job and refresh job metadata."""
+    job = get_job(job_id)
+    if not job or not job.output_dir:
+        raise HTTPException(404, 'Job not found')
+    try:
+        ini_fields = json.loads(fields)
+    except json.JSONDecodeError:
+        raise HTTPException(400, 'fields must be JSON')
+    if not isinstance(ini_fields, dict):
+        raise HTTPException(400, 'fields must be a JSON object')
+
+    stems_dir = job.output_dir / 'stems'
+    if not stems_dir.exists():
+        raise HTTPException(404, 'Stems directory not found for job')
+
+    write_song_ini(stems_dir, ini_fields)
+    job.metadata['song_ini'] = ini_fields
+    return ini_fields
+
+
 @router.post('/{job_id}/cancel')
 async def cancel_separation(job_id: str):
     """Kill the running demucs subprocess for this job and stop the worker."""
