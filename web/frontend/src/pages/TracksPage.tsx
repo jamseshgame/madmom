@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useLocation, useSearchParams } from 'react-router-dom'
 import CreateSection from '../components/CreateSection.tsx'
 import StemPlayer from '../components/StemPlayer.tsx'
 
@@ -766,6 +766,8 @@ export default function TracksPage() {
   const [loading, setLoading] = useState(true)
   const [beatmapPanel, setBeatmapPanel] = useState<{ track: Track; stem: string } | null>(null)
   const [searchParams, setSearchParams] = useSearchParams()
+  const location = useLocation()
+  const createResetKey = (location.state as { resetAt?: number } | null)?.resetAt ?? 'default'
   const selectedId = searchParams.get('id')
   const setSelectedId = useCallback(
     (id: string | null) => {
@@ -1183,7 +1185,7 @@ export default function TracksPage() {
 
   return (
     <div className="space-y-8">
-      <CreateSection onSaved={loadTracks} />
+      <CreateSection key={createResetKey} onSaved={loadTracks} />
 
       <div>
         <h1 className="text-2xl font-bold">Studio Library</h1>

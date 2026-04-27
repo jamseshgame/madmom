@@ -1,4 +1,4 @@
-import { NavLink, Route, Routes } from 'react-router-dom'
+import { NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import TracksPage from './pages/TracksPage.tsx'
 import GameSongsPage from './pages/GameSongsPage.tsx'
 import { VersionBanner, VersionFooter } from './components/VersionStatus.tsx'
@@ -10,6 +10,8 @@ const navItems = [
 ]
 
 export default function App() {
+  const navigate = useNavigate()
+  const location = useLocation()
   return (
     <div className="min-h-screen flex flex-col">
       <header className="border-b border-gray-800 bg-gray-900/80 backdrop-blur sticky top-0 z-50">
@@ -24,6 +26,16 @@ export default function App() {
                 key={to}
                 to={to}
                 end={to === '/'}
+                onClick={(e) => {
+                  // For Studio Library specifically: always reset back to the
+                  // top-level list, even if we're already at /. NavLink would
+                  // otherwise no-op in that case and leave the create-flow
+                  // result screen up.
+                  if (to === '/' && location.pathname === '/') {
+                    e.preventDefault()
+                    navigate('/', { state: { resetAt: Date.now() } })
+                  }
+                }}
                 className={({ isActive }) =>
                   `px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
                     isActive
