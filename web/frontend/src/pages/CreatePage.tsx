@@ -253,7 +253,46 @@ export default function CreatePage() {
   return (
     <div className="space-y-8">
       {phase === 'upload' && (
-        <FileUpload accept=".flac,.mp3,.ogg,.wav,.m4a,.aac,.wma" label="Drop your audio file here" onFile={handleFile} />
+        <>
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">
+            <div>
+              <h1 className="text-2xl font-bold text-gray-100">Welcome to Jamsesh Studio</h1>
+              <p className="text-sm text-gray-400 mt-1">
+                Turn any track into game-ready stems and beatmaps for Jamsesh.
+              </p>
+            </div>
+            <ul className="space-y-2.5 text-sm">
+              <li className="flex gap-3">
+                <span className="shrink-0 w-28 px-2 py-0.5 rounded-md bg-jam-600/15 text-jam-300 text-xs font-medium text-center">
+                  Create
+                </span>
+                <span className="text-gray-400">
+                  Drop a song to split it into stems with Demucs, or upload your own stems. Edit
+                  song.ini metadata and album art before saving to the library.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <span className="shrink-0 w-28 px-2 py-0.5 rounded-md bg-gray-800 text-gray-300 text-xs font-medium text-center">
+                  Studio Library
+                </span>
+                <span className="text-gray-400">
+                  Browse saved tracks, download stems, tweak song.ini, generate beatmaps, and
+                  publish finished songs to the Jamsesh game repo.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <span className="shrink-0 w-28 px-2 py-0.5 rounded-md bg-gray-800 text-gray-300 text-xs font-medium text-center">
+                  Game Library
+                </span>
+                <span className="text-gray-400">
+                  View every song already published to the game repo. Edit metadata in place and
+                  push the update straight back to GitHub.
+                </span>
+              </li>
+            </ul>
+          </div>
+          <FileUpload accept=".flac,.mp3,.ogg,.wav,.m4a,.aac,.wma" label="Drop your audio file here" onFile={handleFile} />
+        </>
       )}
 
       {phase === 'settings' && file && (
