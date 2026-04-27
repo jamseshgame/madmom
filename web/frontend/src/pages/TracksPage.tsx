@@ -910,7 +910,13 @@ export default function TracksPage() {
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
           <div className="flex items-start justify-between mb-4">
             <div>
-              <h3 className="font-semibold text-gray-100 text-lg">{selectedTrack.name}</h3>
+              <h3 className="font-semibold text-gray-100 text-lg">
+                {(() => {
+                  const liveName = (songIni.name || '').trim() || selectedTrack.name
+                  const liveArtist = (songIni.artist || '').trim() || selectedTrack.artist
+                  return liveArtist ? `${liveArtist} — ${liveName}` : liveName
+                })()}
+              </h3>
               <p className="text-xs text-gray-600 mt-0.5">
                 {formatDate(selectedTrack.created_at)} &middot; {selectedTrack.model} &middot;{' '}
                 {selectedTrack.output_format.toUpperCase()}
@@ -1226,7 +1232,9 @@ export default function TracksPage() {
                     )}
                   </div>
                   <div className="min-w-0">
-                    <h3 className="font-medium text-gray-100 truncate">{track.name}</h3>
+                    <h3 className="font-medium text-gray-100 truncate">
+                      {track.artist ? `${track.artist} — ${track.name}` : track.name}
+                    </h3>
                     <p className="text-xs text-gray-600 mt-0.5">
                       {formatDate(track.created_at)} &middot; {track.model} &middot;{' '}
                       {track.output_format.toUpperCase()}
