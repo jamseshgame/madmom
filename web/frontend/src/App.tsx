@@ -1,6 +1,7 @@
-import { NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import { Link, NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import TracksPage from './pages/TracksPage.tsx'
 import GameSongsPage from './pages/GameSongsPage.tsx'
+import ChangelogPage from './pages/ChangelogPage.tsx'
 import { VersionBanner, VersionFooter } from './components/VersionStatus.tsx'
 import { logout } from './components/AuthGate.tsx'
 import { STUDIO_VERSION } from './version.ts'
@@ -17,13 +18,19 @@ export default function App() {
     <div className="min-h-screen flex flex-col">
       <header className="border-b border-gray-800 bg-gray-900/80 backdrop-blur sticky top-0 z-50">
         <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
-          <a href="/" className="flex items-center gap-2 text-xl font-bold tracking-tight">
-            <img src="/jamsesh-logo.png" alt="Jamsesh" className="h-7 w-auto" />
-            <span className="text-gray-400">Studio</span>
-            <span className="text-[11px] font-medium text-gray-600 px-1.5 py-0.5 rounded bg-gray-800/60 ml-1 tracking-normal">
+          <div className="flex items-center gap-2 text-xl font-bold tracking-tight">
+            <a href="/" className="flex items-center gap-2">
+              <img src="/jamsesh-logo.png" alt="Jamsesh" className="h-7 w-auto" />
+              <span className="text-gray-400">Studio</span>
+            </a>
+            <Link
+              to="/changelog"
+              title="View changelog"
+              className="text-[11px] font-medium text-gray-600 hover:text-jam-300 px-1.5 py-0.5 rounded bg-gray-800/60 hover:bg-gray-800 ml-1 tracking-normal transition-colors"
+            >
               v{STUDIO_VERSION}
-            </span>
-          </a>
+            </Link>
+          </div>
           <nav className="flex gap-1 items-center">
             {navItems.map(({ to, label }) => (
               <NavLink
@@ -66,12 +73,23 @@ export default function App() {
           <Route path="/" element={<TracksPage />} />
           <Route path="/tracks" element={<TracksPage />} />
           <Route path="/game-songs" element={<GameSongsPage />} />
+          <Route path="/changelog" element={<ChangelogPage />} />
         </Routes>
       </main>
       <footer className="border-t border-gray-800 py-4 text-center text-xs text-gray-600 space-x-2">
-        <span>Jamsesh Studio v{STUDIO_VERSION} &middot; Powered by madmom</span>
+        <span>
+          Jamsesh Studio{' '}
+          <Link to="/changelog" className="text-gray-500 hover:text-jam-300 transition-colors">
+            v{STUDIO_VERSION}
+          </Link>
+          {' '}&middot; Powered by madmom
+        </span>
         <span className="text-gray-700">·</span>
         <VersionFooter />
+        <span className="text-gray-700">·</span>
+        <Link to="/changelog" className="text-gray-500 hover:text-jam-300 transition-colors">
+          Changelog
+        </Link>
       </footer>
     </div>
   )
