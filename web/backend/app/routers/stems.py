@@ -308,8 +308,12 @@ async def manual_stems(
 
 
 @router.patch('/{job_id}/song-ini')
-async def update_job_song_ini(job_id: str, fields: str = Form(...)):
-    """Rewrite song.ini for a completed job and refresh job metadata."""
+async def update_job_song_ini(
+    job_id: str,
+    fields: str = Form(...),
+    album_art: Optional[UploadFile] = File(None),
+):
+    """Rewrite song.ini for a completed job and (optionally) replace album.png."""
     job = get_job(job_id)
     if not job or not job.output_dir:
         raise HTTPException(404, 'Job not found')
@@ -326,6 +330,17 @@ async def update_job_song_ini(job_id: str, fields: str = Form(...)):
 
     write_song_ini(stems_dir, ini_fields)
     job.metadata['song_ini'] = ini_fields
+
+    if album_art is not None:
+        raw = await album_art.read()
+        if raw:
+            try:
+                png = resize_to_square_png(raw, size=512)
+                (stems_dir / 'album.png').write_bytes(png)
+                stems = job.metadata.setdefault('stems', {})
+                stems['album_png'] = 'album.png'
+            except Exception as ae:
+                print(f'[stems] album.png replace failed: {ae}')
     return ini_fields
 
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 interface StemResultProps {
   jobId: string
@@ -117,18 +117,40 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
   const updateIni = (key: string, value: string) =>
     setSongIni((prev) => ({ ...prev, [key]: value }))
 
+  // Album art — preview existing if any, click to replace
+  const albumInputRef = useRef<HTMLInputElement | null>(null)
+  const [albumArtFile, setAlbumArtFile] = useState<File | null>(null)
+  const [albumPreview, setAlbumPreview] = useState<string | null>(() =>
+    (metadata.stems as Record<string, string> | undefined)?.album_png
+      ? `/api/stems/${jobId}/download/album_png`
+      : null,
+  )
+  const handleAlbumPick = (f: File | null) => {
+    if (!f) return
+    if (albumPreview && albumPreview.startsWith('blob:')) URL.revokeObjectURL(albumPreview)
+    setAlbumArtFile(f)
+    setAlbumPreview(URL.createObjectURL(f))
+  }
+
   const saveSongIni = async () => {
     setIniSaveState('saving')
     setIniError('')
     try {
       const fd = new FormData()
       fd.append('fields', JSON.stringify(songIni))
+      if (albumArtFile) fd.append('album_art', albumArtFile)
       const res = await fetch(`/api/stems/${jobId}/song-ini`, { method: 'PATCH', body: fd })
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
         throw new Error(err.detail || `Save failed: ${res.status}`)
       }
       setSongIni(await res.json())
+      if (albumArtFile) {
+        // Force a fresh fetch from server now that album.png was rewritten
+        if (albumPreview && albumPreview.startsWith('blob:')) URL.revokeObjectURL(albumPreview)
+        setAlbumArtFile(null)
+        setAlbumPreview(`/api/stems/${jobId}/download/album_png?t=${Date.now()}`)
+      }
       setIniSaveState('saved')
       setTimeout(() => setIniSaveState('idle'), 2000)
     } catch (e) {
@@ -195,7 +217,9 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
   return (
     <div className="space-y-6">
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-6">
-        <h3 className="text-lg font-semibold text-jam-300 mb-1">Separation Complete</h3>
+        <h3 className="text-lg font-semibold text-jam-300 mb-1">
+          {metadata.model === 'manual' ? 'Conversion Complete' : 'Separation Complete'}
+        </h3>
         <p className="text-sm text-gray-500 mb-5">{trackName}</p>
 
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
@@ -283,6 +307,42 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
             >
               {iniSaveState === 'saving' ? 'Saving...' : 'Save metadata'}
             </button>
+          </div>
+        </div>
+
+        {/* Album art */}
+        <div className="flex gap-4 items-start">
+          <button
+            type="button"
+            onClick={() => albumInputRef.current?.click()}
+            className="group relative w-24 h-24 shrink-0 rounded-lg overflow-hidden border border-gray-700 hover:border-jam-500 bg-gray-800"
+            title="Click to replace album.png"
+          >
+            {albumPreview ? (
+              <>
+                <img src={albumPreview} alt="album" className="w-full h-full object-cover" />
+                <span className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-xs text-gray-200">
+                  Change
+                </span>
+              </>
+            ) : (
+              <span className="w-full h-full flex items-center justify-center text-xs text-gray-500 px-2 text-center">
+                Click to add<br />album.png
+              </span>
+            )}
+          </button>
+          <input
+            ref={albumInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            className="hidden"
+            onChange={(e) => handleAlbumPick(e.target.files?.[0] ?? null)}
+          />
+          <div className="text-xs text-gray-500 mt-1">
+            <p>
+              <span className="text-gray-400 font-mono">album.png</span> — included in the published game folder.
+            </p>
+            <p className="text-gray-600 mt-1">Any image is resized to 512×512 PNG on save.</p>
           </div>
         </div>
 

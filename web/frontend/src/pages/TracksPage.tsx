@@ -427,10 +427,14 @@ function InlinePublish({ track }: { track: Track }) {
   )
 }
 
+// Keys that historically appeared in stems map but aren't audio
+const NON_AUDIO_KEYS = new Set(['song_ini', 'album_png'])
+
 export default function TracksPage() {
   const [tracks, setTracks] = useState<Track[]>([])
   const [loading, setLoading] = useState(true)
   const [beatmapPanel, setBeatmapPanel] = useState<{ track: Track; stem: string } | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
 
   const loadTracks = useCallback(() => {
     fetch('/api/tracks')
@@ -456,11 +460,86 @@ export default function TracksPage() {
     })
   }
 
+  const selectedTrack = tracks.find((t) => t.id === selectedId) || null
+
+  if (selectedTrack) {
+    return (
+      <div className="space-y-6">
+        <button
+          onClick={() => setSelectedId(null)}
+          className="text-sm text-gray-400 hover:text-gray-200 transition-colors"
+        >
+          ← Back to library
+        </button>
+
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+          <div className="flex items-start justify-between mb-4">
+            <div>
+              <h3 className="font-semibold text-gray-100 text-lg">{selectedTrack.name}</h3>
+              <p className="text-xs text-gray-600 mt-0.5">
+                {formatDate(selectedTrack.created_at)} &middot; {selectedTrack.model} &middot;{' '}
+                {selectedTrack.output_format.toUpperCase()}
+              </p>
+            </div>
+            <button
+              onClick={() => {
+                handleDelete(selectedTrack.id)
+                setSelectedId(null)
+              }}
+              className="text-xs text-gray-600 hover:text-red-400 transition-colors"
+            >
+              Delete
+            </button>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+            {Object.entries(selectedTrack.stems)
+              .filter(([stem]) => !NON_AUDIO_KEYS.has(stem))
+              .map(([stem]) => (
+                <div
+                  key={stem}
+                  className="bg-gray-800 border border-gray-700 rounded-lg p-3 flex flex-col items-center gap-2"
+                >
+                  <span className={`text-sm font-semibold ${STEM_COLORS[stem] || 'text-gray-300'}`}>
+                    {STEM_LABELS[stem] || stem}
+                  </span>
+                  <div className="flex flex-wrap gap-1.5 justify-center">
+                    <a
+                      href={`/api/tracks/${selectedTrack.id}/stems/${stem}`}
+                      className="px-2 py-1 bg-gray-700 text-gray-300 hover:bg-gray-600 rounded text-xs font-medium transition-colors"
+                    >
+                      Download
+                    </a>
+                    <button
+                      onClick={() => setBeatmapPanel({ track: selectedTrack, stem })}
+                      className="px-2 py-1 bg-green-700/60 hover:bg-green-600/70 text-green-200 rounded text-xs font-medium transition-colors"
+                    >
+                      Beatmap
+                    </button>
+                  </div>
+                </div>
+              ))}
+          </div>
+
+          <InlinePublish track={selectedTrack} />
+        </div>
+
+        {beatmapPanel && (
+          <BeatmapPanel
+            track={beatmapPanel.track}
+            stem={beatmapPanel.stem}
+            onClose={() => setBeatmapPanel(null)}
+          />
+        )}
+      </div>
+    )
+  }
+
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold">Track Library</h1>
-        <p className="text-gray-500 mt-1">Saved stems from previous separations. Generate beatmaps from any stem.</p>
+        <p className="text-gray-500 mt-1">Saved stems from previous separations. Click a track to view details.</p>
       </div>
 
       {loading && (
@@ -473,68 +552,38 @@ export default function TracksPage() {
       {!loading && tracks.length === 0 && (
         <div className="bg-gray-900 border border-gray-800 rounded-xl p-8 text-center">
           <p className="text-gray-400">No tracks saved yet.</p>
-          <p className="text-gray-600 text-sm mt-1">Separate a track on the Stems page to save it here.</p>
+          <p className="text-gray-600 text-sm mt-1">Separate a track on the Create page to save it here.</p>
         </div>
       )}
 
-      <div className="space-y-4">
-        {tracks.map((track) => (
-          <div key={track.id} className="bg-gray-900 border border-gray-800 rounded-xl p-5">
-            <div className="flex items-start justify-between mb-3">
-              <div>
-                <h3 className="font-semibold text-gray-200">{track.name}</h3>
-                <p className="text-xs text-gray-600 mt-0.5">
-                  {formatDate(track.created_at)} &middot; {track.model} &middot; {track.output_format.toUpperCase()}
-                </p>
-              </div>
-              <button
-                onClick={() => handleDelete(track.id)}
-                className="text-xs text-gray-600 hover:text-red-400 transition-colors"
-              >
-                Delete
-              </button>
-            </div>
-
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
-              {Object.entries(track.stems).map(([stem]) => (
-                <div
-                  key={stem}
-                  className="bg-gray-800 border border-gray-700 rounded-lg p-3 flex flex-col items-center gap-2"
-                >
-                  <span className={`text-sm font-semibold ${STEM_COLORS[stem] || 'text-gray-300'}`}>
-                    {STEM_LABELS[stem] || stem}
-                  </span>
-                  <div className="flex flex-wrap gap-1.5 justify-center">
-                    <a
-                      href={`/api/tracks/${track.id}/stems/${stem}`}
-                      className="px-2 py-1 bg-gray-700 text-gray-300 hover:bg-gray-600 rounded text-xs font-medium transition-colors"
-                    >
-                      Download
-                    </a>
-                    <button
-                      onClick={() => setBeatmapPanel({ track, stem })}
-                      className="px-2 py-1 bg-green-700/60 hover:bg-green-600/70 text-green-200 rounded text-xs font-medium transition-colors"
-                    >
-                      Beatmap
-                    </button>
-                  </div>
+      <div className="space-y-2">
+        {tracks.map((track) => {
+          const stemCount = Object.entries(track.stems).filter(
+            ([k]) => !NON_AUDIO_KEYS.has(k),
+          ).length
+          return (
+            <button
+              key={track.id}
+              onClick={() => setSelectedId(track.id)}
+              className="w-full text-left bg-gray-900 border border-gray-800 hover:border-gray-700 hover:bg-gray-900/70 rounded-xl px-5 py-4 transition-colors"
+            >
+              <div className="flex items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <h3 className="font-medium text-gray-100 truncate">{track.name}</h3>
+                  <p className="text-xs text-gray-600 mt-0.5">
+                    {formatDate(track.created_at)} &middot; {track.model} &middot;{' '}
+                    {track.output_format.toUpperCase()}
+                  </p>
                 </div>
-              ))}
-            </div>
-
-            <InlinePublish track={track} />
-          </div>
-        ))}
+                <div className="flex items-center gap-3 shrink-0">
+                  <span className="text-xs text-gray-500">{stemCount} stems</span>
+                  <span className="text-gray-600">→</span>
+                </div>
+              </div>
+            </button>
+          )
+        })}
       </div>
-
-      {beatmapPanel && (
-        <BeatmapPanel
-          track={beatmapPanel.track}
-          stem={beatmapPanel.stem}
-          onClose={() => setBeatmapPanel(null)}
-        />
-      )}
-
     </div>
   )
 }

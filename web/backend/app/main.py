@@ -11,8 +11,11 @@ from fastapi.middleware.cors import CORSMiddleware
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
+from fastapi import Depends
+
 from .config import settings
-from .routers import beatmap, game_songs, stems, tracks, versions
+from .routers import auth, beatmap, game_songs, stems, tracks, versions
+from .routers.auth import require_auth
 from .services.jobs import cleanup_old_jobs
 
 
@@ -43,11 +46,14 @@ app.add_middleware(
     allow_headers=['*'],
 )
 
-app.include_router(beatmap.router)
-app.include_router(stems.router)
-app.include_router(tracks.router)
-app.include_router(versions.router)
-app.include_router(game_songs.router)
+app.include_router(auth.router)
+
+_auth_dep = [Depends(require_auth)]
+app.include_router(beatmap.router, dependencies=_auth_dep)
+app.include_router(stems.router, dependencies=_auth_dep)
+app.include_router(tracks.router, dependencies=_auth_dep)
+app.include_router(versions.router, dependencies=_auth_dep)
+app.include_router(game_songs.router, dependencies=_auth_dep)
 
 
 @app.get('/api/health')

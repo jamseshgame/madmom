@@ -3,6 +3,7 @@ import CreatePage from './pages/CreatePage.tsx'
 import TracksPage from './pages/TracksPage.tsx'
 import GameSongsPage from './pages/GameSongsPage.tsx'
 import { VersionBanner, VersionFooter } from './components/VersionStatus.tsx'
+import { logout } from './components/AuthGate.tsx'
 
 const navItems = [
   { to: '/', label: 'Create' },
@@ -19,7 +20,7 @@ export default function App() {
             <img src="/jamsesh-logo.png" alt="Jamsesh" className="h-7 w-auto" />
             <span className="text-gray-400">Studio</span>
           </a>
-          <nav className="flex gap-1">
+          <nav className="flex gap-1 items-center">
             {navItems.map(({ to, label }) => (
               <NavLink
                 key={to}
@@ -36,6 +37,12 @@ export default function App() {
                 {label}
               </NavLink>
             ))}
+            <button
+              onClick={logout}
+              className="ml-2 px-3 py-1.5 rounded-md text-sm font-medium text-gray-500 hover:text-gray-300 hover:bg-gray-800 transition-colors"
+            >
+              Sign out
+            </button>
           </nav>
         </div>
       </header>

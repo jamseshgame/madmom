@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     github_branch: str = 'main'
     github_inbox_prefix: str = 'SongInbox'
 
+    studio_username: str = 'admin'
+    studio_password: str = 'SlayTheStage'
+
     madmom_root: str = str(Path(__file__).resolve().parents[4])
 
     model_config = {
