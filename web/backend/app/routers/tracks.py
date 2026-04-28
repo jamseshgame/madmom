@@ -524,25 +524,33 @@ async def publish_track_to_game(
             )
             await proc.communicate()
 
-        # Pull the latest beatmap's notes.chart into the publish folder. The
-        # game can't load the song without it, and without this step the
-        # published folder ends up with stems + ini + ogg but no chart at all.
-        # Falls back to any *.chart file so legacy generator outputs (e.g.
-        # notes_fixed_slides.chart from bin/JamseshMenu) still get picked up.
+        # Pull the latest beatmap's chart into the publish folder. The Jamsesh
+        # game expects the legacy "notes_fixed_slides.chart" filename — the
+        # one bin/JamseshMenu emits — so we always write under that name
+        # regardless of the source filename inside the beatmap directory.
         chart_status: dict = {'found': False, 'source': None}
         if track.beatmaps:
             latest = max(track.beatmaps, key=lambda b: b.get('generated_at', 0))
             bm_dir = track.beatmaps_dir / latest.get('id', '')
             if bm_dir.exists():
-                preferred = bm_dir / 'notes.chart'
-                if preferred.exists():
-                    shutil.copy2(str(preferred), str(tmp_dir / 'notes.chart'))
-                    chart_status = {'found': True, 'source': preferred.name, 'beatmap_id': latest.get('id')}
-                else:
-                    fallback = next(iter(bm_dir.glob('*.chart')), None)
-                    if fallback is not None:
-                        shutil.copy2(str(fallback), str(tmp_dir / 'notes.chart'))
-                        chart_status = {'found': True, 'source': fallback.name, 'beatmap_id': latest.get('id')}
+                # Prefer notes.chart (web generator output), then notes_fixed_slides
+                # (legacy CLI output), then any *.chart file in the directory.
+                src_chart = None
+                for candidate in ('notes.chart', 'notes_fixed_slides.chart'):
+                    p = bm_dir / candidate
+                    if p.exists():
+                        src_chart = p
+                        break
+                if src_chart is None:
+                    src_chart = next(iter(bm_dir.glob('*.chart')), None)
+                if src_chart is not None:
+                    shutil.copy2(str(src_chart), str(tmp_dir / 'notes_fixed_slides.chart'))
+                    chart_status = {
+                        'found': True,
+                        'source': src_chart.name,
+                        'published_as': 'notes_fixed_slides.chart',
+                        'beatmap_id': latest.get('id'),
+                    }
 
         # Write song.ini
         write_song_ini(tmp_dir, ini_fields)

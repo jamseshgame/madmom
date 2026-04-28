@@ -314,7 +314,7 @@ function InlinePublish({ track }: { track: Track }) {
   const [result, setResult] = useState<{
     commitUrl: string
     folder: string
-    chart: { found: boolean; source: string | null; beatmap_id?: string }
+    chart: { found: boolean; source: string | null; published_as?: string; beatmap_id?: string }
   } | null>(null)
   const [error, setError] = useState('')
 
@@ -438,10 +438,10 @@ function InlinePublish({ track }: { track: Track }) {
             <span>+ <span className="text-pink-300">album.png</span></span>
           )}
           {(track.beatmaps && track.beatmaps.length > 0) ? (
-            <span>+ <span className="text-emerald-400">notes.chart</span></span>
+            <span>+ <span className="text-emerald-400">notes_fixed_slides.chart</span></span>
           ) : (
             <span className="text-amber-500/80" title="No beatmap on this track yet — generate one before publishing or the song won't load">
-              ⚠ no notes.chart
+              ⚠ no notes_fixed_slides.chart
             </span>
           )}
         </div>
@@ -488,14 +488,14 @@ function InlinePublish({ track }: { track: Track }) {
             <p className="text-xs text-gray-500 font-mono">{result.folder}</p>
             {result.chart.found ? (
               <p className="text-xs text-gray-500">
-                Included <span className="font-mono text-gray-300">notes.chart</span>
-                {result.chart.source && result.chart.source !== 'notes.chart' && (
+                Included <span className="font-mono text-gray-300">{result.chart.published_as || 'notes_fixed_slides.chart'}</span>
+                {result.chart.source && result.chart.source !== (result.chart.published_as || 'notes_fixed_slides.chart') && (
                   <span className="text-gray-600"> (from {result.chart.source})</span>
                 )}
               </p>
             ) : (
               <p className="text-xs text-amber-400">
-                ⚠ No beatmap found for this track — published without notes.chart. Generate a beatmap on a stem and re-publish.
+                ⚠ No beatmap found for this track — published without notes_fixed_slides.chart. Generate a beatmap on a stem and re-publish.
               </p>
             )}
             <a href={result.commitUrl} target="_blank" rel="noopener noreferrer" className="text-sm text-jam-400 hover:text-jam-300 underline">

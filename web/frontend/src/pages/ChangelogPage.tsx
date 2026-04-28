@@ -10,6 +10,16 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.3.4',
+    date: '2026-04-28',
+    summary:
+      'Publish to Game now writes the chart as notes_fixed_slides.chart — the filename the Jamsesh game expects.',
+    entries: [
+      { kind: 'changed', text: 'Publish to Game writes the chart file as notes_fixed_slides.chart in the published folder regardless of the source filename inside the beatmap directory. v1.2.3 was renaming everything to notes.chart, but the Jamsesh game expects the legacy fixed-slides filename — songs published before this release need to be re-published.' },
+      { kind: 'changed', text: 'Source-file precedence for the publish copy: notes.chart → notes_fixed_slides.chart → first *.chart found. The publish-result panel now reports both the source name and the published name when they differ.' },
+    ],
+  },
+  {
     version: '1.3.3',
     date: '2026-04-28',
     summary:
