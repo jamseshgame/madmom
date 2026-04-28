@@ -46,8 +46,12 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
   // Settings
   const [model, setModel] = useState('htdemucs_6s')
   const [selectedStems, setSelectedStems] = useState<Set<string>>(new Set(MODELS.htdemucs_6s.stems))
-  const [shifts, setShifts] = useState(10)
-  const [overlap, setOverlap] = useState(0.5)
+  // shifts trades quality for time linearly — every additional shift is another full
+  // inference pass over the audio. The Demucs paper's ablation plateaus around 2;
+  // for game stems the quality bump beyond that is inaudible. Crank it up via the
+  // slider if you really need it.
+  const [shifts, setShifts] = useState(2)
+  const [overlap, setOverlap] = useState(0.25)
   const [clipMode, setClipMode] = useState('rescale')
   const [loadingMeta, setLoadingMeta] = useState(false)
   const [albumArt, setAlbumArt] = useState<File | null>(null)
@@ -289,8 +293,8 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
     setError('')
     setModel('htdemucs_6s')
     setSelectedStems(new Set(MODELS.htdemucs_6s.stems))
-    setShifts(10)
-    setOverlap(0.5)
+    setShifts(2)
+    setOverlap(0.25)
     setClipMode('rescale')
     if (albumPreview) URL.revokeObjectURL(albumPreview)
     setAlbumArt(null)
@@ -477,7 +481,15 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
                   />
                   <span className="text-sm text-gray-400 w-6 text-right">{shifts}</span>
                 </div>
-                <span className="text-xs text-gray-600">{shifts === 1 ? 'Fast' : shifts >= 8 ? 'Best' : 'Balanced'}</span>
+                <span className="text-xs text-gray-600">
+                  {shifts === 1
+                    ? 'Fastest — single inference pass'
+                    : shifts === 2
+                      ? 'Recommended — quality plateau for most music'
+                      : shifts <= 4
+                        ? 'High — diminishing returns'
+                        : 'Best — long wait for marginal gains'}
+                </span>
               </label>
 
               {/* Clip mode */}

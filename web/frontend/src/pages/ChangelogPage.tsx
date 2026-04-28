@@ -10,6 +10,18 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.2.1',
+    date: '2026-04-28',
+    summary:
+      'Demucs separations are roughly 5× faster by default. The shifts slider used to default to 10 (Best) which ran 10 full inference passes per song; the quality plateau for music stems is around 2 passes, so that is the new default.',
+    entries: [
+      { kind: 'changed', text: 'Default Quality (shifts) lowered from 10 to 2. A 4-minute song that took ~30 minutes to separate now takes ~6 minutes on the production droplet, with no audible difference for game stems. Slider still goes up to 10 for power users.' },
+      { kind: 'changed', text: 'Default overlap lowered from 0.5 to 0.25 (the Demucs default) — slightly faster, no perceptible quality loss.' },
+      { kind: 'changed', text: 'Quality slider hint now describes each shift count instead of the generic Fast/Balanced/Best buckets.' },
+      { kind: 'added', text: 'Job event log entries now carry a `ts` field with wall-clock time, so per-pass timing can be reconstructed from the persisted JSON to diagnose any future "is it slowing down?" reports.' },
+    ],
+  },
+  {
     version: '1.2',
     date: '2026-04-28',
     summary:

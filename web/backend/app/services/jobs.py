@@ -147,6 +147,9 @@ class Job:
     # -------------------------------------------------------------- Events
 
     def _record_event(self, event: dict) -> None:
+        # Stamp every event with wall-clock time so the persisted log can be used
+        # to graph per-pass duration / detect slowdowns after the fact.
+        event.setdefault('ts', time.time())
         self.event_log.append(event)
         if len(self.event_log) > _EVENT_LOG_LIMIT:
             self.event_log = self.event_log[-_EVENT_LOG_LIMIT:]
@@ -155,12 +158,12 @@ class Job:
             self.last_message = msg
         if event.get('progress', -1) >= 0:
             self.progress = event['progress']
-        self.updated_at = time.time()
+        self.updated_at = event['ts']
 
     async def send(self, step: str, progress: int, message: str) -> None:
         if self.status == JobStatus.QUEUED:
             self.status = JobStatus.RUNNING
-        event = {'step': step, 'progress': progress, 'message': message}
+        event = {'step': step, 'progress': progress, 'message': message, 'ts': time.time()}
         self._record_event(event)
         self._persist()
         for q in list(self._queues):
@@ -176,7 +179,10 @@ class Job:
         self.status = JobStatus.DONE
         self.progress = 100
         self.finished_at = time.time()
-        event = {'step': 'done', 'progress': 100, 'message': 'Complete', 'metadata': self.metadata}
+        event = {
+            'step': 'done', 'progress': 100, 'message': 'Complete',
+            'metadata': self.metadata, 'ts': self.finished_at,
+        }
         self._record_event(event)
         self._persist()
         for q in list(self._queues):
@@ -187,7 +193,7 @@ class Job:
         self.status = JobStatus.FAILED
         self.error = error
         self.finished_at = time.time()
-        event = {'step': 'error', 'progress': -1, 'message': error}
+        event = {'step': 'error', 'progress': -1, 'message': error, 'ts': self.finished_at}
         self._record_event(event)
         self._persist()
         for q in list(self._queues):
@@ -208,7 +214,10 @@ class Job:
             self.task.cancel()
         self.status = JobStatus.CANCELLED
         self.finished_at = time.time()
-        event = {'step': 'cancelled', 'progress': -1, 'message': 'Cancelled by user'}
+        event = {
+            'step': 'cancelled', 'progress': -1, 'message': 'Cancelled by user',
+            'ts': self.finished_at,
+        }
         self._record_event(event)
         self._persist()
         for q in list(self._queues):
