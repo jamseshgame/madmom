@@ -13,7 +13,7 @@ from ..config import settings
 from ..services.audio import extract_cover_art, fetch_cover_from_web, read_audio_metadata, resize_to_square_png
 from ..services.chart_generator import generate_full_chart
 from ..services.github_publisher import publish_song_folder
-from ..services.jobs import JobStatus, create_job, get_job
+from ..services.jobs import JobKind, JobStatus, create_job, get_job
 
 router = APIRouter(prefix='/api/beatmap', tags=['beatmap'])
 
@@ -111,7 +111,8 @@ async def create_beatmap(
     upload_dir = Path(settings.upload_dir)
     upload_dir.mkdir(parents=True, exist_ok=True)
 
-    job = create_job()
+    basename = Path(file.filename or 'audio').stem.replace('.', ' ').replace('_', ' ').strip()
+    job = create_job(kind=JobKind.BEATMAP, title=title or basename)
     job_dir = upload_dir / job.id
     job_dir.mkdir()
     job.output_dir = job_dir
@@ -124,12 +125,12 @@ async def create_beatmap(
 
     # Read metadata from file, override with form values
     meta = read_audio_metadata(str(audio_path))
-    basename = Path(file.filename or 'audio').stem.replace('.', ' ').replace('_', ' ').strip()
     song_name = title or meta.get('title') or basename
     song_artist = artist or meta.get('artist') or 'Unknown'
     song_album = album or meta.get('album') or 'Unknown'
     song_year = year or meta.get('year') or 'Unknown'
     song_genre = genre or meta.get('genre') or 'Unknown'
+    job.title = f'{song_artist} — {song_name}' if song_artist != 'Unknown' else song_name
 
     safe_artist = song_artist.replace('/', '-').replace('\\', '-').replace(':', '-').strip()
     safe_title = song_name.replace('/', '-').replace('\\', '-').replace(':', '-').strip()
@@ -194,7 +195,7 @@ async def create_beatmap_from_stem(
     song_artist = artist or 'Unknown'
 
     upload_dir = Path(settings.upload_dir)
-    job = create_job()
+    job = create_job(kind=JobKind.BEATMAP, title=f'{song_artist} — {song_name}' if song_artist != 'Unknown' else song_name)
     job_dir = upload_dir / job.id
     job_dir.mkdir(parents=True)
     job.output_dir = job_dir
@@ -207,6 +208,8 @@ async def create_beatmap_from_stem(
     output_dir = job_dir / folder_name
 
     track_id = source_job.metadata.get('track_id')
+    if track_id:
+        job.track_id = track_id
 
     async def _run():
         job.status = JobStatus.RUNNING
@@ -265,7 +268,11 @@ async def cancel_beatmap(job_id: str):
 
 @router.get('/{job_id}/status')
 async def beatmap_status(job_id: str):
-    """SSE stream of generation progress."""
+    """SSE stream of generation progress.
+
+    Replays the stored event log on connect. Backwards-compatible alias for
+    ``/api/jobs/{id}/events``.
+    """
     job = get_job(job_id)
     if not job:
         raise HTTPException(404, 'Job not found')
@@ -274,21 +281,13 @@ async def beatmap_status(job_id: str):
 
     async def event_stream():
         try:
-            # Send current status if already done
-            if job.status == JobStatus.DONE:
-                yield f'data: {json.dumps({"step": "done", "progress": 100, "message": "Complete", "metadata": job.metadata})}\n\n'
-                return
-            if job.status == JobStatus.FAILED:
-                yield f'data: {json.dumps({"step": "error", "progress": -1, "message": job.error or "Failed"})}\n\n'
-                return
-
             while True:
-                event = await asyncio.wait_for(queue.get(), timeout=300)
+                event = await asyncio.wait_for(queue.get(), timeout=900)
                 if event is None:
                     break
                 yield f'data: {json.dumps(event)}\n\n'
         except asyncio.TimeoutError:
-            yield f'data: {json.dumps({"step": "error", "progress": -1, "message": "Timeout"})}\n\n'
+            yield f'data: {json.dumps({"step": "error", "progress": -1, "message": "Idle timeout"})}\n\n'
         finally:
             job.unsubscribe(queue)
 

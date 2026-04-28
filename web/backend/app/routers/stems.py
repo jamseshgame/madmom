@@ -21,7 +21,7 @@ from ..services.stems import (
     write_song_ini,
 )
 from ..services.github_publisher import publish_song_folder
-from ..services.jobs import JobStatus, create_job, get_job
+from ..services.jobs import JobKind, JobStatus, create_job, get_job
 from ..services.tracks import create_track
 
 router = APIRouter(prefix='/api/stems', tags=['stems'])
@@ -67,7 +67,8 @@ async def start_separation(
     upload_dir = Path(settings.upload_dir)
     upload_dir.mkdir(parents=True, exist_ok=True)
 
-    job = create_job()
+    original_name = Path(file.filename or 'audio').stem
+    job = create_job(kind=JobKind.SEPARATE, title=original_name)
     job_dir = upload_dir / job.id
     job_dir.mkdir()
     job.output_dir = job_dir
@@ -78,7 +79,6 @@ async def start_separation(
         raise HTTPException(413, f'File too large. Max {settings.max_upload_mb} MB.')
     audio_path.write_bytes(content)
 
-    original_name = Path(file.filename or 'audio').stem
     job.metadata['original_name'] = original_name
 
     # Stage album.png (resized to 512×512) for the game-ready folder
@@ -206,7 +206,7 @@ async def manual_stems(
     upload_dir = Path(settings.upload_dir)
     upload_dir.mkdir(parents=True, exist_ok=True)
 
-    job = create_job()
+    job = create_job(kind=JobKind.MANUAL_STEMS, title='')
     job_dir = upload_dir / job.id
     job_dir.mkdir()
     job.output_dir = job_dir
@@ -236,6 +236,7 @@ async def manual_stems(
             original_name = Path(first_stem.filename or 'stems-only').stem
 
     job.metadata['original_name'] = original_name
+    job.title = original_name
 
     # Save uploaded stems to a staging dir
     staging = job_dir / '_uploaded_stems'
@@ -392,7 +393,12 @@ async def cancel_separation(job_id: str):
 
 @router.get('/{job_id}/status')
 async def separation_status(job_id: str):
-    """SSE stream of separation progress."""
+    """SSE stream of separation progress.
+
+    Replays the stored event log first (so refreshing the tab catches up), then
+    streams live events. The dedicated ``/api/jobs/{id}/events`` endpoint does
+    the same thing for any job kind — this is kept as a backward-compatible alias.
+    """
     job = get_job(job_id)
     if not job:
         raise HTTPException(404, 'Job not found')
@@ -401,20 +407,13 @@ async def separation_status(job_id: str):
 
     async def event_stream():
         try:
-            if job.status == JobStatus.DONE:
-                yield f'data: {json.dumps({"step": "done", "progress": 100, "message": "Complete", "metadata": job.metadata})}\n\n'
-                return
-            if job.status == JobStatus.FAILED:
-                yield f'data: {json.dumps({"step": "error", "progress": -1, "message": job.error or "Failed"})}\n\n'
-                return
-
             while True:
-                event = await asyncio.wait_for(queue.get(), timeout=600)
+                event = await asyncio.wait_for(queue.get(), timeout=900)
                 if event is None:
                     break
                 yield f'data: {json.dumps(event)}\n\n'
         except asyncio.TimeoutError:
-            yield f'data: {json.dumps({"step": "error", "progress": -1, "message": "Timeout"})}\n\n'
+            yield f'data: {json.dumps({"step": "error", "progress": -1, "message": "Idle timeout"})}\n\n'
         finally:
             job.unsubscribe(queue)
 

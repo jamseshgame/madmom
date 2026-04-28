@@ -474,8 +474,30 @@ function InlinePublish({ track }: { track: Track }) {
 // Keys that historically appeared in stems map but aren't audio
 const NON_AUDIO_KEYS = new Set(['song_ini', 'album_png'])
 
+interface JobRow {
+  id: string
+  kind: string
+  title: string
+  status: 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
+  progress: number
+  last_message: string
+  created_at: number
+  updated_at: number
+  error: string | null
+  track_id: string | null
+}
+
+const JOB_STATUS_PILL: Record<JobRow['status'], { label: string; cls: string }> = {
+  queued: { label: 'Queued', cls: 'bg-gray-700/50 text-gray-300 border-gray-600' },
+  running: { label: 'Running', cls: 'bg-jam-600/20 text-jam-300 border-jam-600/40' },
+  done: { label: 'Done', cls: 'bg-emerald-900/40 text-emerald-300 border-emerald-800/60' },
+  failed: { label: 'Failed', cls: 'bg-red-900/40 text-red-300 border-red-800/60' },
+  cancelled: { label: 'Cancelled', cls: 'bg-amber-900/30 text-amber-300 border-amber-800/60' },
+}
+
 export default function TracksPage() {
   const [tracks, setTracks] = useState<Track[]>([])
+  const [jobs, setJobs] = useState<JobRow[]>([])
   const [loading, setLoading] = useState(true)
   const [beatmapPanel, setBeatmapPanel] = useState<{ track: Track; stem: string } | null>(null)
   const [searchParams, setSearchParams] = useSearchParams()
@@ -520,7 +542,33 @@ export default function TracksPage() {
       .catch(() => setLoading(false))
   }, [])
 
-  useEffect(() => { loadTracks() }, [loadTracks])
+  const loadJobs = useCallback(() => {
+    // Pull recent stem-related jobs. Beatmap jobs are surfaced inside the track
+    // detail view, so they don't belong as ghost rows in the library list.
+    fetch('/api/jobs?limit=30')
+      .then((r) => (r.ok ? r.json() : []))
+      .then((data: JobRow[]) => {
+        const filtered = (data || []).filter(
+          (j) => j.kind === 'separate' || j.kind === 'manual_stems',
+        )
+        setJobs(filtered)
+      })
+      .catch(() => undefined)
+  }, [])
+
+  useEffect(() => { loadTracks(); loadJobs() }, [loadTracks, loadJobs])
+
+  // Poll jobs while any are still running so the status pill stays live
+  useEffect(() => {
+    const anyActive = jobs.some((j) => j.status === 'queued' || j.status === 'running')
+    if (!anyActive) return
+    const t = window.setInterval(() => {
+      loadJobs()
+      // Also refresh tracks so finished separations appear without a manual refresh
+      loadTracks()
+    }, 4000)
+    return () => window.clearInterval(t)
+  }, [jobs, loadJobs, loadTracks])
 
   // Whenever the user selects a different track, hydrate the metadata panel
   useEffect(() => {
@@ -932,6 +980,83 @@ export default function TracksPage() {
       )}
 
       <div className="space-y-2">
+        {/* Running / failed jobs as ghost rows. Done jobs whose track has been
+            promoted into the library are filtered out so we don't double-list. */}
+        {jobs
+          .filter((j) => {
+            if (j.status === 'done') return false
+            if (j.status === 'cancelled' && Date.now() / 1000 - j.updated_at > 60 * 60) return false
+            if (j.track_id && tracks.some((t) => t.id === j.track_id)) return false
+            return true
+          })
+          .map((j) => {
+            const pill = JOB_STATUS_PILL[j.status]
+            const isActive = j.status === 'running' || j.status === 'queued'
+            return (
+              <div
+                key={j.id}
+                onClick={() => navigate(`/?job=${j.id}`)}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    navigate(`/?job=${j.id}`)
+                  }
+                }}
+                className="cursor-pointer bg-gray-900 border border-gray-800 hover:border-gray-700 hover:bg-gray-900/70 rounded-xl px-4 py-3 transition-colors"
+              >
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="w-12 h-12 shrink-0 rounded-md bg-gray-800 border border-gray-700 flex items-center justify-center">
+                      {isActive ? (
+                        <div className="animate-spin h-5 w-5 border-2 border-jam-400 border-t-transparent rounded-full" />
+                      ) : j.status === 'failed' ? (
+                        <span className="text-red-400 text-lg leading-none">!</span>
+                      ) : (
+                        <span className="text-gray-600 text-[10px] font-mono">job</span>
+                      )}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <h3 className="font-medium text-gray-100 truncate">
+                          {j.title || j.id}
+                        </h3>
+                        <span
+                          className={`shrink-0 px-1.5 py-0.5 rounded border text-[10px] font-medium uppercase tracking-wider ${pill.cls}`}
+                        >
+                          {pill.label}
+                        </span>
+                      </div>
+                      <p className="text-xs text-gray-600 mt-0.5 truncate">
+                        {j.kind === 'manual_stems' ? 'Stems-only mux' : 'Stem separation'}
+                        {' · '}
+                        {formatDate(j.created_at)}
+                        {isActive && j.last_message ? (
+                          <>
+                            <span className="text-gray-700"> · </span>
+                            <span className="text-gray-500">{j.last_message}</span>
+                          </>
+                        ) : null}
+                        {j.status === 'failed' && j.error ? (
+                          <>
+                            <span className="text-gray-700"> · </span>
+                            <span className="text-red-400/80">{j.error}</span>
+                          </>
+                        ) : null}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3 shrink-0">
+                    {isActive && (
+                      <span className="text-xs font-mono text-gray-500">{j.progress}%</span>
+                    )}
+                    <span className="text-gray-600">→</span>
+                  </div>
+                </div>
+              </div>
+            )
+          })}
         {tracks.map((track) => {
           const stemCount = Object.entries(track.stems).filter(
             ([k]) => !NON_AUDIO_KEYS.has(k),

@@ -10,6 +10,20 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.2',
+    date: '2026-04-28',
+    summary:
+      'Jobs are now persisted, resumable, and listed in the Studio Library. Close the tab during a long separation and the URL ?job=<id> reattaches you to the live progress on any machine.',
+    entries: [
+      { kind: 'added', text: 'Each running task pins itself to the URL as ?job=<id>. Reload, copy the URL to another browser, or hand it to a teammate — they pick up the live progress and full event log instead of starting over.' },
+      { kind: 'added', text: 'Studio Library now shows a ghost row for every active or recently failed separation, with a status pill (Queued / Running / Failed / Cancelled) and the latest log line. Click the row to open the live progress view.' },
+      { kind: 'added', text: 'Backend persists every job to disk (`<upload_dir>/jobs/<id>.json`) on every event. A backend restart restores the records — running jobs at the time of restart are flipped to Failed with a clear reason rather than silently disappearing.' },
+      { kind: 'added', text: 'New universal jobs API: GET /api/jobs (list), GET /api/jobs/:id (snapshot + last 200 events), GET /api/jobs/:id/events (SSE replay), POST /api/jobs/:id/cancel.' },
+      { kind: 'changed', text: 'SSE subscribers now receive the full event log on connect instead of only future events, so a refreshed tab sees the same demucs log lines from the start.' },
+      { kind: 'changed', text: 'Job records carry a kind (separate / manual_stems / beatmap) and a human-readable title so the library row reads "Artist — Track" instead of an opaque ID.' },
+    ],
+  },
+  {
     version: '1.1',
     date: '2026-04-27',
     summary:

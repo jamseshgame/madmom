@@ -16,7 +16,7 @@ from ..services.audio import resize_to_square_png
 from ..services.chart_generator import generate_full_chart
 from ..services.game_songs import _parse_song_ini
 from ..services.github_publisher import publish_song_folder
-from ..services.jobs import JobStatus, create_job, get_job
+from ..services.jobs import JobKind, JobStatus, create_job, get_job
 from ..services.stems import DEMUCS_TO_GAME, _convert_to_ogg, write_song_ini
 from ..services.tracks import (
     add_beatmap_record,
@@ -280,7 +280,11 @@ async def generate_beatmap_from_track(
     }
 
     upload_dir = Path(settings.upload_dir)
-    job = create_job()
+    bm_title = f'{song_artist} — {song_name} ({stem})' if song_artist and song_artist != 'Unknown' else f'{song_name} ({stem})'
+    job = create_job(kind=JobKind.BEATMAP, title=bm_title)
+    job.track_id = track_id
+    job.metadata['track_id'] = track_id
+    job.metadata['stem'] = stem
     job_dir = upload_dir / job.id
     job_dir.mkdir(parents=True)
     job.output_dir = job_dir

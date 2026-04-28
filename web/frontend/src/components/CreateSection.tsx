@@ -1,4 +1,5 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import FileUpload from './FileUpload.tsx'
 import ProgressTracker from './ProgressTracker.tsx'
 import StemResult from './StemResult.tsx'
@@ -33,9 +34,12 @@ const STEM_META: Record<string, { label: string; color: string }> = {
 }
 
 export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}) {
-  const [phase, setPhase] = useState<Phase>('upload')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const resumeJobId = searchParams.get('job') || ''
+
+  const [phase, setPhase] = useState<Phase>(resumeJobId ? 'separating' : 'upload')
   const [file, setFile] = useState<File | null>(null)
-  const [jobId, setJobId] = useState('')
+  const [jobId, setJobId] = useState(resumeJobId)
   const [metadata, setMetadata] = useState<Record<string, unknown>>({})
   const [error, setError] = useState('')
 
@@ -80,6 +84,45 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
   const updateIni = (key: string, value: string) => {
     setSongIni((prev) => ({ ...prev, [key]: value }))
   }
+
+  // If the URL carries ?job=<id>, hydrate from the persisted backend record so
+  // the user lands directly on the running progress / completed result view.
+  useEffect(() => {
+    if (!resumeJobId) return
+    let cancelled = false
+    fetch(`/api/jobs/${resumeJobId}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`${r.status}`))))
+      .then((data) => {
+        if (cancelled) return
+        if (data.kind === 'beatmap') {
+          // Beatmap jobs don't run inside CreateSection — drop the param and
+          // fall back to the upload screen so the user isn't stranded.
+          setSearchParams({}, { replace: true })
+          setPhase('upload')
+          return
+        }
+        const status = data.status
+        if (status === 'done') {
+          setMetadata(data.metadata || {})
+          setPhase('done')
+        } else if (status === 'failed' || status === 'cancelled') {
+          setError(data.error || data.last_message || 'Job failed')
+          setPhase('error')
+        } else {
+          setPhase('separating')
+        }
+      })
+      .catch(() => {
+        if (cancelled) return
+        // Job ID points to nothing — clear the param and reset to upload
+        setSearchParams({}, { replace: true })
+        setPhase('upload')
+        setJobId('')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [resumeJobId, setSearchParams])
 
   const handleFile = async (f: File) => {
     // Filename fallback for name/artist
@@ -207,6 +250,8 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
       }
       const { job_id } = await res.json()
       setJobId(job_id)
+      // Pin the running job to the URL so the tab can be closed/shared/reopened
+      setSearchParams({ job: job_id }, { replace: true })
     } catch (e) {
       setError((e as Error).message)
       setPhase('error')
@@ -224,7 +269,7 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
     reset()
     if (id) {
       try {
-        await fetch(`/api/stems/${id}/cancel`, { method: 'POST' })
+        await fetch(`/api/jobs/${id}/cancel`, { method: 'POST' })
       } catch {
         // best-effort; backend may already be gone
       }
@@ -252,6 +297,9 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
     setAlbumPreview(null)
     setMode('generate')
     setManualStems({ vocals: null, drums: null, bass: null, guitar: null, piano: null, other: null })
+    if (searchParams.get('job')) {
+      setSearchParams({}, { replace: true })
+    }
   }
 
   const currentModelStems = MODELS[model]?.stems || []
@@ -729,8 +777,14 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
 
       {phase === 'separating' && jobId && (
         <div className="space-y-4">
-          <ProgressTracker jobId={jobId} statusUrl={`/api/stems/${jobId}/status`} onDone={handleDone} onError={handleError} />
-          <div className="flex justify-end">
+          <ProgressTracker jobId={jobId} statusUrl={`/api/jobs/${jobId}/events`} onDone={handleDone} onError={handleError} />
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-xs text-gray-500">
+              Resumable URL —
+              {' '}
+              <span className="font-mono text-gray-400 break-all">?job={jobId}</span>
+              <span className="text-gray-700"> · safe to close this tab</span>
+            </div>
             <button
               onClick={handleKill}
               className="px-4 py-2 bg-red-900/40 hover:bg-red-800/60 border border-red-800 text-red-300 hover:text-red-200 rounded-lg text-sm font-medium transition-colors"

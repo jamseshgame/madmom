@@ -14,14 +14,16 @@ if sys.platform == 'win32':
 from fastapi import Depends
 
 from .config import settings
-from .routers import auth, beatmap, game_songs, stems, tracks, versions
+from .routers import auth, beatmap, game_songs, jobs, stems, tracks, versions
 from .routers.auth import require_auth
-from .services.jobs import cleanup_old_jobs
+from .services.jobs import cleanup_old_jobs, load_jobs_from_disk
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Cleanup timer that removes expired jobs every 10 minutes."""
+    """Restore persisted jobs and run a periodic cleanup loop."""
+    load_jobs_from_disk()
+
     async def _cleanup_loop():
         while True:
             await asyncio.sleep(600)
@@ -54,6 +56,7 @@ app.include_router(stems.router, dependencies=_auth_dep)
 app.include_router(tracks.router, dependencies=_auth_dep)
 app.include_router(versions.router, dependencies=_auth_dep)
 app.include_router(game_songs.router, dependencies=_auth_dep)
+app.include_router(jobs.router, dependencies=_auth_dep)
 
 
 @app.get('/api/health')
