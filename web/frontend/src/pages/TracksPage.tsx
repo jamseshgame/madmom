@@ -306,6 +306,226 @@ function BeatmapPanel({
 }
 
 
+// ── Tutorial samples + voice reference manager ────────────────────────────
+const TUTORIAL_SAMPLE_SLOTS: { slot: string; label: string; cls: string }[] = [
+  { slot: 'lane_1', label: 'Lane 1 (Green)', cls: 'text-emerald-400' },
+  { slot: 'lane_2', label: 'Lane 2 (Red)', cls: 'text-red-400' },
+  { slot: 'lane_3', label: 'Lane 3 (Yellow)', cls: 'text-amber-400' },
+  { slot: 'lane_4', label: 'Lane 4 (Blue)', cls: 'text-sky-400' },
+  { slot: 'lane_5', label: 'Lane 5 (Orange)', cls: 'text-orange-400' },
+  { slot: 'chord_12', label: 'Chord 1+2', cls: 'text-amber-200' },
+  { slot: 'chord_23', label: 'Chord 2+3', cls: 'text-amber-200' },
+  { slot: 'chord_34', label: 'Chord 3+4', cls: 'text-amber-200' },
+  { slot: 'chord_45', label: 'Chord 4+5', cls: 'text-amber-200' },
+  { slot: 'open', label: 'Open strum', cls: 'text-purple-300' },
+]
+
+function TutorialSamplesPanel({ track }: { track: Track }) {
+  const [expanded, setExpanded] = useState(false)
+  const [samples, setSamples] = useState<Record<string, { filename: string; size_bytes: number; mtime: number }>>({})
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState('')
+  const [hasVoiceRef, setHasVoiceRef] = useState(false)
+  const [voiceRefBust, setVoiceRefBust] = useState(0)
+
+  const loadSamples = useCallback(() => {
+    fetch(`/api/tutorial/${track.id}/samples`)
+      .then((r) => (r.ok ? r.json() : {}))
+      .then(setSamples)
+      .catch(() => undefined)
+    fetch(`/api/tutorial/${track.id}/voice-ref`, { method: 'HEAD' })
+      .then((r) => setHasVoiceRef(r.ok))
+      .catch(() => setHasVoiceRef(false))
+  }, [track.id])
+
+  useEffect(() => {
+    if (expanded) loadSamples()
+  }, [expanded, loadSamples])
+
+  const uploadSample = async (slot: string, file: File) => {
+    setBusy(slot)
+    setError('')
+    try {
+      const fd = new FormData()
+      fd.append('file', file)
+      const res = await fetch(`/api/tutorial/${track.id}/samples/${slot}`, { method: 'PUT', body: fd })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || `Upload failed (${res.status})`)
+      }
+      loadSamples()
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const deleteSample = async (slot: string) => {
+    setBusy(slot)
+    setError('')
+    try {
+      await fetch(`/api/tutorial/${track.id}/samples/${slot}`, { method: 'DELETE' })
+      loadSamples()
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const uploadVoiceRef = async (file: File) => {
+    setBusy('_voice_ref')
+    setError('')
+    try {
+      const fd = new FormData()
+      fd.append('file', file)
+      const res = await fetch(`/api/tutorial/${track.id}/voice-ref`, { method: 'POST', body: fd })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || `Upload failed (${res.status})`)
+      }
+      setHasVoiceRef(true)
+      setVoiceRefBust((v) => v + 1)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const deleteVoiceRef = async () => {
+    setBusy('_voice_ref')
+    try {
+      await fetch(`/api/tutorial/${track.id}/voice-ref`, { method: 'DELETE' })
+      setHasVoiceRef(false)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const slotsFilled = Object.keys(samples).length
+
+  if (!expanded) {
+    return (
+      <button
+        onClick={() => setExpanded(true)}
+        className="mt-3 w-full py-2.5 border border-purple-800 bg-purple-900/20 hover:bg-purple-900/40 text-purple-300 rounded-lg text-sm font-medium transition-colors"
+      >
+        Tutorial samples + voice clone {slotsFilled > 0 ? `· ${slotsFilled}/10 slots filled` : ''}
+      </button>
+    )
+  }
+
+  return (
+    <div className="mt-4 border border-purple-900/50 rounded-xl overflow-hidden">
+      <div className="bg-purple-900/20 px-4 py-3 flex items-center justify-between">
+        <div>
+          <h4 className="text-sm font-semibold text-purple-300">Tutorial samples + voice clone</h4>
+          <p className="text-xs text-gray-500">
+            10 instrument samples (slide_up / slide_down auto-generated at publish)
+            + an optional 5–30s voice reference for Chatterbox to clone.
+          </p>
+        </div>
+        <button onClick={() => setExpanded(false)} className="text-gray-500 hover:text-gray-300 text-lg">&times;</button>
+      </div>
+
+      {error && (
+        <div className="mx-4 mt-3 bg-red-900/30 border border-red-800 rounded p-2 text-xs text-red-300">{error}</div>
+      )}
+
+      <div className="p-4 space-y-4">
+        {/* Voice ref */}
+        <div className="bg-gray-950 border border-gray-800 rounded-lg p-3 space-y-2">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold text-sky-300">Voice reference</span>
+            <span className="text-[11px] text-gray-500">5–30s clip · cloned by TTS</span>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="px-2.5 py-1 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-xs text-gray-200 cursor-pointer">
+              {hasVoiceRef ? 'Replace' : 'Upload'}
+              <input
+                type="file"
+                accept=".wav,.ogg,.mp3,.flac,.m4a"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0]
+                  if (f) uploadVoiceRef(f)
+                }}
+              />
+            </label>
+            {hasVoiceRef && (
+              <>
+                <audio
+                  controls
+                  src={`/api/tutorial/${track.id}/voice-ref?t=${voiceRefBust}`}
+                  className="h-6 max-w-xs"
+                />
+                <button
+                  onClick={deleteVoiceRef}
+                  disabled={busy === '_voice_ref'}
+                  className="px-2 py-1 bg-red-900/40 hover:bg-red-800/60 border border-red-800 text-red-300 rounded text-[11px]"
+                >
+                  Delete
+                </button>
+              </>
+            )}
+            {busy === '_voice_ref' && <span className="text-xs text-gray-500">Uploading…</span>}
+          </div>
+        </div>
+
+        {/* Sample slots */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          {TUTORIAL_SAMPLE_SLOTS.map(({ slot, label, cls }) => {
+            const filled = samples[slot]
+            return (
+              <div key={slot} className="bg-gray-950 border border-gray-800 rounded p-2 space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className={`text-xs font-medium ${cls}`}>{label}</span>
+                  {filled && (
+                    <button
+                      onClick={() => deleteSample(slot)}
+                      disabled={busy === slot}
+                      className="text-[10px] text-red-400 hover:text-red-200"
+                    >
+                      delete
+                    </button>
+                  )}
+                </div>
+                {filled ? (
+                  <audio
+                    controls
+                    src={`/api/tutorial/${track.id}/samples/${slot}/file?t=${filled.mtime}`}
+                    className="w-full h-7"
+                  />
+                ) : (
+                  <span className="text-[11px] text-gray-600">empty</span>
+                )}
+                <label className="block px-1.5 py-0.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-center text-[11px] text-gray-300 cursor-pointer">
+                  {filled ? 'Replace' : 'Upload OGG / WAV / MP3'}
+                  <input
+                    type="file"
+                    accept=".ogg,.wav,.mp3,.flac,.m4a"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0]
+                      if (f) uploadSample(slot, f)
+                    }}
+                  />
+                </label>
+                {busy === slot && <span className="text-[10px] text-gray-500">Working…</span>}
+              </div>
+            )
+          })}
+        </div>
+
+        <p className="text-[11px] text-gray-600">
+          slide_up / slide_down variants for each slot are synthesised automatically
+          at publish time via ffmpeg pitch-shift (±2 semitones). No upload required.
+        </p>
+      </div>
+    </div>
+  )
+}
+
 function InlinePublish({ track }: { track: Track }) {
   const [expanded, setExpanded] = useState(false)
   const [schema, setSchema] = useState<Record<string, SongIniField>>({})
@@ -1279,6 +1499,7 @@ export default function TracksPage() {
             </div>
           </div>
 
+          <TutorialSamplesPanel track={selectedTrack} />
           <InlinePublish track={selectedTrack} />
         </div>
 

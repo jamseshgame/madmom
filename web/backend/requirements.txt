@@ -17,3 +17,7 @@ torchcodec
 # the system ffmpeg for the mp3 extraction post-processor, which we already
 # install at the OS level.
 yt-dlp>=2024.3
+# Chatterbox TTS (Resemble AI, MIT) — voice-cloning text-to-speech for tutorial
+# VO generation. Lazy-loaded on first /api/tts/synth call. ~3 GB model
+# download + ~3 GB RSS while loaded.
+chatterbox-tts

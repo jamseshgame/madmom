@@ -9,6 +9,33 @@ interface ChartNote {
   sustain: number    // sustain length in ticks (0 = single hit)
 }
 
+// Tutorial-mode events sit in their own [TutorialScript] section in the
+// chart. VOs are timestamped audio playback prompts; STEPs declare a
+// pass/fail boundary with optional retry semantics. Both are draggable on
+// the runway just like notes.
+type TimingMode = 'any' | 'perfect'
+
+interface TutorialVoEvent {
+  kind: 'vo'
+  id: string             // ephemeral, not persisted (regenerated per parse)
+  tick: number
+  file: string           // relative path under the beatmap dir, e.g. "vo/abc.ogg"
+  text: string           // optional draft text used to (re)generate the clip
+}
+
+interface TutorialStepEvent {
+  kind: 'step'
+  id: string
+  tick: number
+  stepId: string         // user-facing identifier, e.g. "intro" or "chord_drill"
+  required: number       // notes the player must hit to pass; 0 = no gate
+  timing: TimingMode     // 'any' counts every hit, 'perfect' only perfects
+  retryVo: string        // optional VO file played on fail
+  next: string           // step id to jump to on pass; empty = end-of-tutorial
+}
+
+type TutorialEvent = TutorialVoEvent | TutorialStepEvent
+
 interface ChartState {
   fullText: string
   resolution: number
@@ -18,6 +45,8 @@ interface ChartState {
   availableSections: string[]
   activeName: string
   notes: ChartNote[]
+  tutorialEnabled: boolean
+  tutorial: TutorialEvent[]
 }
 
 const DIFFICULTY_PREFERENCE = [
@@ -75,6 +104,113 @@ function replaceSectionNotes(text: string, name: string, notes: ChartNote[]): st
   return text.slice(0, open + 1) + '\n' + combined.join('\n') + '\n' + text.slice(close)
 }
 
+// ── Tutorial section parsing ────────────────────────────────────────────────
+// The chart-side schema is intentionally simple: every line in [TutorialScript]
+// looks like `<tick> = STEP|VO <args>`. STEP lines carry id + pass/fail
+// fields as key=value; VO lines carry a file path and an optional draft text.
+//
+// Examples:
+//   192 = STEP "intro" required=5 timing=any retry_vo="vo/retry.ogg" next="chord_drill"
+//   384 = VO "vo/intro.ogg" text="Welcome to the tutorial."
+
+function _shellSplit(line: string): string[] {
+  const out: string[] = []
+  let cur = ''
+  let inQuote = false
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]
+    if (ch === '"') {
+      inQuote = !inQuote
+      continue
+    }
+    if (!inQuote && /\s/.test(ch)) {
+      if (cur) { out.push(cur); cur = '' }
+      continue
+    }
+    cur += ch
+  }
+  if (cur) out.push(cur)
+  return out
+}
+
+function parseTutorialSection(text: string): TutorialEvent[] {
+  const m = text.match(/\[TutorialScript\]\s*\{([^}]*)\}/)
+  if (!m) return []
+  const body = m[1]
+  const events: TutorialEvent[] = []
+  let counter = 0
+  for (const raw of body.split(/\r?\n/)) {
+    const line = raw.replace(/^\s*;.*$/, '').trim()
+    if (!line) continue
+    const eq = line.indexOf('=')
+    if (eq < 0) continue
+    const tick = Number(line.slice(0, eq).trim())
+    if (!Number.isFinite(tick)) continue
+    const tail = line.slice(eq + 1).trim()
+    const tokens = _shellSplit(tail)
+    if (tokens.length === 0) continue
+    const kind = tokens[0].toUpperCase()
+    if (kind === 'VO') {
+      const file = tokens[1] || ''
+      let textArg = ''
+      for (const t of tokens.slice(2)) {
+        if (t.startsWith('text=')) textArg = t.slice(5)
+      }
+      events.push({
+        kind: 'vo',
+        id: `vo-${tick}-${counter++}`,
+        tick,
+        file,
+        text: textArg,
+      })
+    } else if (kind === 'STEP') {
+      const stepId = tokens[1] || ''
+      const fields: Record<string, string> = {}
+      for (const t of tokens.slice(2)) {
+        const ix = t.indexOf('=')
+        if (ix > 0) fields[t.slice(0, ix)] = t.slice(ix + 1)
+      }
+      const timing: TimingMode = fields.timing === 'perfect' ? 'perfect' : 'any'
+      events.push({
+        kind: 'step',
+        id: `step-${tick}-${counter++}`,
+        tick,
+        stepId,
+        required: Number(fields.required || 0) || 0,
+        timing,
+        retryVo: fields.retry_vo || '',
+        next: fields.next || '',
+      })
+    }
+  }
+  return events.sort((a, b) => a.tick - b.tick)
+}
+
+function serializeTutorialSection(events: TutorialEvent[]): string {
+  if (events.length === 0) return ''
+  const sorted = [...events].sort((a, b) => a.tick - b.tick)
+  const lines = sorted.map((e) => {
+    if (e.kind === 'vo') {
+      const t = e.text ? ` text="${e.text.replace(/"/g, "'")}"` : ''
+      return `  ${e.tick} = VO "${e.file}"${t}`
+    }
+    return (
+      `  ${e.tick} = STEP "${e.stepId}" required=${e.required} timing=${e.timing}`
+      + (e.retryVo ? ` retry_vo="${e.retryVo}"` : '')
+      + (e.next ? ` next="${e.next}"` : '')
+    )
+  })
+  return `[TutorialScript]\n{\n${lines.join('\n')}\n}\n`
+}
+
+function applyTutorialToFullText(fullText: string, events: TutorialEvent[], enabled: boolean): string {
+  const stripped = fullText.replace(/\[TutorialScript\]\s*\{[^}]*\}\s*/g, '')
+  if (!enabled || events.length === 0) return stripped
+  const newSection = serializeTutorialSection(events)
+  // Append at the end of the file so it doesn't perturb the existing layout.
+  return stripped.trimEnd() + '\n' + newSection
+}
+
 function parseChart(text: string, prefer?: string): ChartState {
   const resMatch = text.match(/Resolution\s*=\s*(\d+)/)
   const resolution = resMatch ? Number(resMatch[1]) : 192
@@ -95,7 +231,13 @@ function parseChart(text: string, prefer?: string): ChartState {
   if (!activeName && availableSections.length > 0) activeName = availableSections[0]
 
   const notes = activeName ? parseSectionNotes(text, activeName) : []
-  return { fullText: text, resolution, bpm, bpmRaw, songName, availableSections, activeName, notes }
+  const tutorial = parseTutorialSection(text)
+  const tutorialEnabled = tutorial.length > 0
+  return {
+    fullText: text, resolution, bpm, bpmRaw, songName,
+    availableSections, activeName, notes,
+    tutorialEnabled, tutorial,
+  }
 }
 
 function tickToSeconds(tick: number, bpm: number, resolution: number): number {
@@ -295,6 +437,52 @@ export default function BeatmapEditor() {
       ctx.strokeStyle = LANE_FILL[lane]
       ctx.lineWidth = 2
       ctx.stroke()
+    }
+
+    // Tutorial events (drawn beneath notes so notes stay legible)
+    if (chart.tutorialEnabled) {
+      // STEP boundaries — full-width horizontal stripe with a label.
+      ctx.font = '10px monospace'
+      ctx.textAlign = 'left'
+      for (const ev of chart.tutorial) {
+        if (ev.kind !== 'step') continue
+        const y = HIT - (t2s(ev.tick) - currentTime) * scrollSpeed
+        if (y < -40 || y > H + 20) continue
+        ctx.fillStyle = 'rgba(168, 85, 247, 0.10)'
+        ctx.fillRect(0, y - 12, W, 14)
+        ctx.strokeStyle = 'rgba(168, 85, 247, 0.55)'
+        ctx.lineWidth = 1
+        ctx.beginPath()
+        ctx.moveTo(0, y)
+        ctx.lineTo(W, y)
+        ctx.stroke()
+        ctx.fillStyle = '#c4b5fd'
+        const tag = `STEP ${ev.stepId || '?'} · ${ev.required || 0} ${ev.timing}`
+        ctx.fillText(tag, 6, y - 2)
+      }
+      // VOs — left-edge ▶ icon + thin line across the runway
+      for (const ev of chart.tutorial) {
+        if (ev.kind !== 'vo') continue
+        const y = HIT - (t2s(ev.tick) - currentTime) * scrollSpeed
+        if (y < -20 || y > H + 20) continue
+        ctx.strokeStyle = 'rgba(56, 189, 248, 0.5)'
+        ctx.setLineDash([4, 3])
+        ctx.lineWidth = 1
+        ctx.beginPath()
+        ctx.moveTo(0, y)
+        ctx.lineTo(W, y)
+        ctx.stroke()
+        ctx.setLineDash([])
+        ctx.fillStyle = '#38bdf8'
+        ctx.font = 'bold 11px sans-serif'
+        ctx.textAlign = 'left'
+        ctx.fillText('▶', 4, y + 4)
+        if (ev.text) {
+          ctx.font = '10px sans-serif'
+          ctx.fillStyle = '#7dd3fc'
+          ctx.fillText(ev.text.slice(0, 50), 18, y + 4)
+        }
+      }
     }
 
     // Notes
@@ -498,8 +686,10 @@ export default function BeatmapEditor() {
     if (dirty && !window.confirm('Switch difficulty? Unsaved edits in this section will be kept in memory but you must Save to write them back.')) {
       return
     }
-    const newFull = replaceSectionNotes(chart.fullText, chart.activeName, chart.notes)
+    let newFull = replaceSectionNotes(chart.fullText, chart.activeName, chart.notes)
+    newFull = applyTutorialToFullText(newFull, chart.tutorial, chart.tutorialEnabled)
     const newNotes = parseSectionNotes(newFull, name)
+    // Tutorial section is shared across difficulties — just keep current state.
     setChart({ ...chart, fullText: newFull, activeName: name, notes: newNotes })
     setSelectedId(null)
   }
@@ -516,7 +706,8 @@ export default function BeatmapEditor() {
     setSaving(true)
     setSaveMsg('')
     try {
-      const newFull = replaceSectionNotes(chart.fullText, chart.activeName, chart.notes)
+      let newFull = replaceSectionNotes(chart.fullText, chart.activeName, chart.notes)
+      newFull = applyTutorialToFullText(newFull, chart.tutorial, chart.tutorialEnabled)
       const res = await fetch(`/api/tracks/${trackId}/beatmaps/${beatmapId}/chart`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -540,6 +731,104 @@ export default function BeatmapEditor() {
   const handleClose = () => {
     if (dirty && !window.confirm('Discard unsaved changes?')) return
     navigate(`/?id=${trackId}`)
+  }
+
+  // ── Tutorial editing helpers ──────────────────────────────────────────────
+  const updateTutorial = (next: TutorialEvent[], enabled?: boolean) => {
+    if (!chart) return
+    setChart({
+      ...chart,
+      tutorial: next,
+      tutorialEnabled: enabled ?? chart.tutorialEnabled,
+    })
+    setDirty(true)
+  }
+
+  const playheadTick = useMemo(() => {
+    if (!chart) return 0
+    const snap = Math.max(1, Math.round(chart.resolution / snapDivisor))
+    const raw = (currentTime * chart.bpm * chart.resolution) / 60
+    return Math.max(0, Math.round(raw / snap) * snap)
+  }, [chart, currentTime, snapDivisor])
+
+  const addVo = () => {
+    if (!chart) return
+    const ev: TutorialVoEvent = {
+      kind: 'vo',
+      id: `vo-${Date.now()}`,
+      tick: playheadTick,
+      file: '',
+      text: '',
+    }
+    updateTutorial([...chart.tutorial, ev], true)
+  }
+
+  const addStep = () => {
+    if (!chart) return
+    const ev: TutorialStepEvent = {
+      kind: 'step',
+      id: `step-${Date.now()}`,
+      tick: playheadTick,
+      stepId: `step_${chart.tutorial.filter((e) => e.kind === 'step').length + 1}`,
+      required: 5,
+      timing: 'any',
+      retryVo: '',
+      next: '',
+    }
+    updateTutorial([...chart.tutorial, ev], true)
+  }
+
+  const removeTutorialEvent = (id: string) => {
+    if (!chart) return
+    updateTutorial(chart.tutorial.filter((e) => e.id !== id))
+  }
+
+  const updateTutorialEvent = (id: string, patch: Partial<TutorialEvent>) => {
+    if (!chart) return
+    const next = chart.tutorial.map((e) =>
+      e.id === id ? ({ ...e, ...patch } as TutorialEvent) : e,
+    )
+    updateTutorial(next)
+  }
+
+  const seekToTick = (tick: number) => {
+    if (!chart || !audioRef.current) return
+    const sec = (tick / chart.resolution) * (60 / chart.bpm)
+    audioRef.current.currentTime = sec
+    setCurrentTime(sec)
+  }
+
+  // TTS for a VO event — POST text to backend, then assign returned file path
+  const [ttsBusy, setTtsBusy] = useState<string | null>(null)
+  const generateVoAudio = async (ev: TutorialVoEvent) => {
+    if (!ev.text.trim()) return
+    setTtsBusy(ev.id)
+    try {
+      const fd = new FormData()
+      fd.append('text', ev.text)
+      fd.append('track_id', trackId)
+      fd.append('beatmap_id', beatmapId)
+      const res = await fetch('/api/tutorial/tts/synth', { method: 'POST', body: fd })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || `TTS failed (${res.status})`)
+      }
+      const data = await res.json()
+      updateTutorialEvent(ev.id, { file: data.rel_path })
+    } catch (e) {
+      window.alert((e as Error).message)
+    } finally {
+      setTtsBusy(null)
+    }
+  }
+
+  const fmtTick = (tick: number) => {
+    if (!chart) return ''
+    const sec = (tick / chart.resolution) * (60 / chart.bpm)
+    const m = Math.floor(sec / 60)
+    const s = Math.floor(sec % 60)
+    const cs = Math.floor((sec % 1) * 100)
+    return `${m}:${s.toString().padStart(2, '0')}.${cs.toString().padStart(2, '0')}`
   }
 
   const noteCount = chart?.notes.length ?? 0
@@ -715,6 +1004,184 @@ export default function BeatmapEditor() {
               <li><span className="font-mono text-gray-300">Space</span> play/pause</li>
             </ul>
           </section>
+
+          {chart && (
+            <section className="border-t border-gray-800 pt-4">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Tutorial</h3>
+                <label className="flex items-center gap-1 text-[11px] text-gray-400">
+                  <input
+                    type="checkbox"
+                    checked={chart.tutorialEnabled}
+                    onChange={(e) => updateTutorial(chart.tutorial, e.target.checked)}
+                    className="accent-jam-500"
+                  />
+                  enabled
+                </label>
+              </div>
+              {chart.tutorialEnabled && (
+                <>
+                  <div className="flex gap-1 mb-2">
+                    <button
+                      onClick={addVo}
+                      className="flex-1 px-2 py-1 bg-sky-700/40 hover:bg-sky-600/60 border border-sky-700/60 text-sky-200 rounded text-[11px] font-medium transition-colors"
+                      title={`Add VO event at playhead (tick ${playheadTick})`}
+                    >
+                      + VO at {fmtTick(playheadTick)}
+                    </button>
+                    <button
+                      onClick={addStep}
+                      className="flex-1 px-2 py-1 bg-purple-700/40 hover:bg-purple-600/60 border border-purple-700/60 text-purple-200 rounded text-[11px] font-medium transition-colors"
+                      title={`Add STEP boundary at playhead (tick ${playheadTick})`}
+                    >
+                      + STEP
+                    </button>
+                  </div>
+                  <ul className="space-y-2">
+                    {[...chart.tutorial].sort((a, b) => a.tick - b.tick).map((ev) =>
+                      ev.kind === 'vo' ? (
+                        <li
+                          key={ev.id}
+                          className="bg-sky-900/20 border border-sky-800/40 rounded p-2 space-y-1.5"
+                        >
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              onClick={() => seekToTick(ev.tick)}
+                              className="text-[10px] font-mono text-sky-400 hover:text-sky-200"
+                              title="Jump to this tick"
+                            >
+                              {fmtTick(ev.tick)}
+                            </button>
+                            <span className="text-[10px] text-sky-500/80">VO</span>
+                            <button
+                              onClick={() => removeTutorialEvent(ev.id)}
+                              className="ml-auto text-[10px] text-red-400 hover:text-red-200"
+                              title="Delete this VO"
+                            >
+                              ×
+                            </button>
+                          </div>
+                          <textarea
+                            value={ev.text}
+                            onChange={(e) => updateTutorialEvent(ev.id, { text: e.target.value })}
+                            placeholder="VO script — what the narrator says"
+                            rows={2}
+                            className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-200 resize-y focus:outline-none focus:border-sky-500"
+                          />
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              onClick={() => generateVoAudio(ev)}
+                              disabled={!ev.text.trim() || ttsBusy === ev.id}
+                              className="px-2 py-0.5 bg-jam-600 hover:bg-jam-500 disabled:opacity-40 text-white rounded text-[10px] font-medium transition-colors"
+                              title="Generate speech with Chatterbox TTS"
+                            >
+                              {ttsBusy === ev.id ? 'Synth…' : '🔊 Generate'}
+                            </button>
+                            {ev.file && (
+                              <audio
+                                controls
+                                src={`/api/tutorial/${trackId}/beatmaps/${beatmapId}/${ev.file}`}
+                                className="flex-1 h-6"
+                                style={{ minWidth: 0 }}
+                              />
+                            )}
+                            <input
+                              type="number"
+                              value={ev.tick}
+                              onChange={(e) => updateTutorialEvent(ev.id, { tick: Math.max(0, Number(e.target.value) || 0) })}
+                              className="w-16 bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-[10px] text-gray-300 font-mono"
+                              title="Tick position"
+                            />
+                          </div>
+                        </li>
+                      ) : (
+                        <li
+                          key={ev.id}
+                          className="bg-purple-900/20 border border-purple-800/40 rounded p-2 space-y-1.5"
+                        >
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              onClick={() => seekToTick(ev.tick)}
+                              className="text-[10px] font-mono text-purple-300 hover:text-purple-200"
+                            >
+                              {fmtTick(ev.tick)}
+                            </button>
+                            <span className="text-[10px] text-purple-400/80">STEP</span>
+                            <input
+                              type="text"
+                              value={ev.stepId}
+                              onChange={(e) => updateTutorialEvent(ev.id, { stepId: e.target.value })}
+                              className="flex-1 bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-[11px] text-gray-200"
+                              placeholder="step_id"
+                            />
+                            <button
+                              onClick={() => removeTutorialEvent(ev.id)}
+                              className="text-[10px] text-red-400 hover:text-red-200"
+                              title="Delete this step"
+                            >
+                              ×
+                            </button>
+                          </div>
+                          <div className="grid grid-cols-2 gap-1">
+                            <label className="block">
+                              <span className="text-[10px] text-gray-500">required</span>
+                              <input
+                                type="number"
+                                min="0"
+                                value={ev.required}
+                                onChange={(e) => updateTutorialEvent(ev.id, { required: Math.max(0, Number(e.target.value) || 0) })}
+                                className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-[11px] text-gray-200"
+                              />
+                            </label>
+                            <label className="block">
+                              <span className="text-[10px] text-gray-500">timing</span>
+                              <select
+                                value={ev.timing}
+                                onChange={(e) => updateTutorialEvent(ev.id, { timing: e.target.value as TimingMode })}
+                                className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-[11px] text-gray-200"
+                              >
+                                <option value="any">any</option>
+                                <option value="perfect">perfect</option>
+                              </select>
+                            </label>
+                          </div>
+                          <label className="block">
+                            <span className="text-[10px] text-gray-500">retry_vo (file path)</span>
+                            <input
+                              type="text"
+                              value={ev.retryVo}
+                              onChange={(e) => updateTutorialEvent(ev.id, { retryVo: e.target.value })}
+                              placeholder="vo/retry1.ogg"
+                              className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-[11px] text-gray-200"
+                            />
+                          </label>
+                          <label className="block">
+                            <span className="text-[10px] text-gray-500">next (step id)</span>
+                            <input
+                              type="text"
+                              value={ev.next}
+                              onChange={(e) => updateTutorialEvent(ev.id, { next: e.target.value })}
+                              placeholder="next_step"
+                              className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-[11px] text-gray-200"
+                            />
+                          </label>
+                        </li>
+                      ),
+                    )}
+                  </ul>
+                  {chart.tutorial.length === 0 && (
+                    <p className="text-[11px] text-gray-600 mt-1">
+                      No tutorial events yet. Add a STEP to gate progression and a VO to play narration.
+                    </p>
+                  )}
+                  <p className="text-[11px] text-gray-600 mt-2">
+                    Set up the 10 instrument samples + voice clone reference on the
+                    track detail page (Tutorial samples panel).
+                  </p>
+                </>
+              )}
+            </section>
+          )}
         </aside>
       </div>
 

@@ -620,7 +620,18 @@ async def publish_track_to_game(
                         'selected_beatmaps': beatmap_selection,
                     }
 
-        # Write song.ini
+        # ── Tutorial mode: copy instrument samples, VO clips, and append a
+        # [TutorialScript] section to notes_fixed_slides.chart if the picked
+        # beatmaps carry tutorial events. The Unity dev parses these.
+        tutorial_status = _bundle_tutorial_assets(
+            track,
+            charts_to_merge if track.beatmaps else [],
+            beatmap_selection,
+            tmp_dir,
+            ini_fields,
+        )
+
+        # Write song.ini (after tutorial fields may have been spliced in)
         write_song_ini(tmp_dir, ini_fields)
 
         # Publish to GitHub
@@ -629,8 +640,159 @@ async def publish_track_to_game(
             'commit_url': commit_url,
             'folder': f'{settings.github_inbox_prefix}/{folder_name}',
             'chart': chart_status,
+            'tutorial': tutorial_status,
         }
     except Exception as e:
         raise HTTPException(500, f'Publish failed: {e}')
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# ─── Tutorial-mode bundling ──────────────────────────────────────────────────
+
+# Slot keys that the Tutorial editor accepts. Mirrors routers/tutorial.py.
+_TUTORIAL_SAMPLE_SLOTS = (
+    'lane_1', 'lane_2', 'lane_3', 'lane_4', 'lane_5',
+    'chord_12', 'chord_23', 'chord_34', 'chord_45',
+    'open',
+)
+
+# Pitch shift in semitones used for auto-generating slide_up / slide_down.
+# +2 / -2 is enough to be audible without sounding "wrong".
+_SLIDE_SHIFT = 2.0
+
+
+def _extract_tutorial_section(chart_text: str) -> str | None:
+    """Pull the verbatim contents of a [TutorialScript] section from a chart
+    file, if present. Returns the inner block (without braces) or None."""
+    import re as _re
+
+    m = _re.search(r'\[TutorialScript\]\s*\{([^}]*)\}', chart_text)
+    if not m:
+        return None
+    body = m.group(1).strip()
+    return body if body else None
+
+
+def _bundle_tutorial_assets(
+    track,
+    charts_to_merge: list,
+    beatmap_selection: dict,
+    tmp_dir,
+    ini_fields: dict,
+) -> dict:
+    """If any selected beatmap declares tutorial content, copy the track's
+    tutorial samples + the beatmap's VO clips into the publish folder, append
+    a [TutorialScript] section to notes_fixed_slides.chart, and stamp tutorial
+    metadata into ini_fields so song.ini carries the sample paths.
+
+    Returns a status dict the publish endpoint includes in its response.
+    """
+    import subprocess
+    from pathlib import Path as _Path
+
+    # Aggregate any [TutorialScript] sections from the selected charts.
+    tutorial_blocks: list[tuple[str, str]] = []  # (stem, body)
+    for chart_path, stem in charts_to_merge:
+        try:
+            text = _Path(chart_path).read_text(encoding='utf-8', errors='replace')
+        except OSError:
+            continue
+        body = _extract_tutorial_section(text)
+        if body:
+            tutorial_blocks.append((stem, body))
+
+    if not tutorial_blocks and not (track.dir / 'tutorial_samples').exists():
+        return {'enabled': False}
+
+    # Mark song.ini as a tutorial and stamp the sample paths
+    ini_fields['tutorial'] = 'True'
+    samples_src = track.dir / 'tutorial_samples'
+    samples_dst = tmp_dir / 'tutorial_samples'
+    bundled_samples: list[str] = []
+    if samples_src.exists():
+        samples_dst.mkdir(parents=True, exist_ok=True)
+        for slot in _TUTORIAL_SAMPLE_SLOTS:
+            for ext in ('.ogg', '.wav', '.mp3', '.flac'):
+                p = samples_src / f'{slot}{ext}'
+                if p.exists():
+                    dst = samples_dst / f'{slot}.ogg'
+                    if ext == '.ogg':
+                        shutil.copy2(p, dst)
+                    else:
+                        # Re-encode anything non-ogg into ogg
+                        subprocess.run(
+                            ['ffmpeg', '-y', '-i', str(p), '-vn', '-c:a', 'libvorbis', '-q:a', '6', str(dst)],
+                            capture_output=True,
+                        )
+                    if dst.exists():
+                        bundled_samples.append(slot)
+                        ini_fields[f'sample_{slot}'] = f'tutorial_samples/{slot}.ogg'
+                        # Also synthesise a simple slide_up / slide_down pitch
+                        # variant per base sample. Single ffmpeg pass with
+                        # asetrate (cheap pitch shift; a touch unnatural but
+                        # matches what a slide effect needs).
+                        for direction, shift in (
+                            ('slide_up', _SLIDE_SHIFT),
+                            ('slide_down', -_SLIDE_SHIFT),
+                        ):
+                            slide_dst = samples_dst / f'{slot}_{direction}.ogg'
+                            ratio = 2 ** (shift / 12.0)
+                            subprocess.run(
+                                [
+                                    'ffmpeg', '-y', '-i', str(dst),
+                                    '-af',
+                                    # asetrate scales sample rate (changes pitch
+                                    # AND tempo); aresample brings sr back to
+                                    # 44100 leaving only pitch shifted.
+                                    f'asetrate=44100*{ratio:.6f},aresample=44100',
+                                    '-c:a', 'libvorbis', '-q:a', '6',
+                                    str(slide_dst),
+                                ],
+                                capture_output=True,
+                            )
+                            if slide_dst.exists():
+                                ini_fields[f'sample_{slot}_{direction}'] = f'tutorial_samples/{slot}_{direction}.ogg'
+                    break
+
+    # Bundle VO clips from each selected beatmap
+    bundled_vo: dict[str, list[str]] = {}
+    for stem, bm_id in beatmap_selection.items():
+        vo_src = track.beatmaps_dir / bm_id / 'vo'
+        if not vo_src.exists():
+            continue
+        vo_dst = tmp_dir / 'vo'
+        vo_dst.mkdir(parents=True, exist_ok=True)
+        names: list[str] = []
+        for clip in vo_src.glob('*.ogg'):
+            shutil.copy2(clip, vo_dst / clip.name)
+            names.append(clip.name)
+        if names:
+            bundled_vo[stem] = names
+
+    # Append [TutorialScript] block to notes_fixed_slides.chart
+    chart_path = tmp_dir / 'notes_fixed_slides.chart'
+    if tutorial_blocks and chart_path.exists():
+        merged_lines: list[str] = []
+        for stem, body in tutorial_blocks:
+            merged_lines.append(f'  ; from {stem}')
+            for raw in body.splitlines():
+                line = raw.strip()
+                if line:
+                    merged_lines.append(f'  {line}')
+        section = (
+            '[TutorialScript]\n{\n'
+            + '\n'.join(merged_lines)
+            + '\n}\n'
+        )
+        chart_path.write_text(
+            chart_path.read_text(encoding='utf-8', errors='replace') + section,
+            encoding='utf-8',
+        )
+
+    return {
+        'enabled': True,
+        'samples': bundled_samples,
+        'vo': bundled_vo,
+        'script_blocks': len(tutorial_blocks),
+    }

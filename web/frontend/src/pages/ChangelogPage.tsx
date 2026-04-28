@@ -10,6 +10,20 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.6',
+    date: '2026-04-28',
+    summary:
+      'Tutorial mode — VO + step events on the runway, voice-cloning TTS via Chatterbox, 10 instrument samples per track with auto slide_up/slide_down variants, and a [TutorialScript] section in the published chart.',
+    entries: [
+      { kind: 'added', text: 'Tutorial mode toggle in the BeatmapEditor sidebar. Adds two new event types to the chart: VO (timestamped narration playback) and STEP (pass/fail boundary with required notes, timing strictness, retry VO, and next-step pointer). Both serialise into a new [TutorialScript] section that backwards-compatible engines just ignore.' },
+      { kind: 'added', text: 'Per-VO Generate button calls the new /api/tutorial/tts/synth endpoint. The backend uses Chatterbox (Resemble AI, MIT) to produce a voice-cloned OGG from the typed script, persisted under the beatmap\'s vo/ directory and served back via /api/tutorial/:track/beatmaps/:bm/vo/:name.' },
+      { kind: 'added', text: 'Track detail view gains a Tutorial samples + voice clone panel with 10 instrument-sample slots (lane 1-5, chord 12/23/34/45, open) and an upload zone for a 5-30s voice reference clip. Anything non-OGG is transcoded with ffmpeg on save.' },
+      { kind: 'added', text: 'Editor runway draws STEP boundaries as faint horizontal stripes with id/required/timing labels and VOs as dashed cyan lines with a ▶ glyph. Playhead "+ VO at <time>" / "+ STEP" buttons drop new events at the current playhead, snapped to the active grid.' },
+      { kind: 'added', text: 'Publish to Game extracts [TutorialScript] from each selected beatmap, copies the track\'s tutorial_samples/ + each beatmap\'s vo/ clips into the published folder, and synthesises slide_up / slide_down (±2 semitones) variants of every sample with ffmpeg asetrate. song.ini grows a [tutorial] section with tutorial=True + sample_<slot> paths so the Unity dev can resolve assets.' },
+      { kind: 'added', text: 'Backend endpoints: POST /api/tutorial/tts/synth, GET/POST/DELETE /api/tutorial/:track/voice-ref, GET/PUT/DELETE /api/tutorial/:track/samples/:slot, GET /api/tutorial/:track/beatmaps/:bm/vo/:name. The TTS model lazy-loads on first call; ~3 GB download + ~3 GB resident.' },
+    ],
+  },
+  {
     version: '1.5.3',
     date: '2026-04-28',
     summary:

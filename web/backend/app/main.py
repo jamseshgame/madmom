@@ -14,7 +14,7 @@ if sys.platform == 'win32':
 from fastapi import Depends
 
 from .config import settings
-from .routers import auth, beatmap, game_songs, jobs, stems, tracks, versions, youtube
+from .routers import auth, beatmap, game_songs, jobs, stems, tracks, tutorial, versions, youtube
 from .routers.auth import require_auth
 from .services.jobs import cleanup_old_jobs, load_jobs_from_disk
 
@@ -58,6 +58,7 @@ app.include_router(versions.router, dependencies=_auth_dep)
 app.include_router(game_songs.router, dependencies=_auth_dep)
 app.include_router(jobs.router, dependencies=_auth_dep)
 app.include_router(youtube.router, dependencies=_auth_dep)
+app.include_router(tutorial.router, dependencies=_auth_dep)
 
 
 @app.get('/api/health')
