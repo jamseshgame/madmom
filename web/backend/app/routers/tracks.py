@@ -478,8 +478,16 @@ async def rename_beatmap(
 async def publish_track_to_game(
     track_id: str,
     song_ini: str = Form(...),
+    selected_beatmaps: str = Form(''),
 ):
-    """Convert track stems to game format, write song.ini, and publish to GitHub SongInbox."""
+    """Convert track stems to game format, write song.ini, merge per-stem
+    beatmaps into notes_fixed_slides.chart, and publish to GitHub SongInbox.
+
+    `selected_beatmaps` is an optional JSON object mapping stem name to a
+    specific beatmap_id (e.g. {"drums": "abc123", "guitar": "def456"}). When
+    omitted or a stem isn't listed, the most recent beatmap for that stem
+    is used.
+    """
     track = get_track(track_id)
     if not track:
         raise HTTPException(404, 'Track not found')
@@ -492,6 +500,17 @@ async def publish_track_to_game(
     name = ini_fields.get('name', '').strip()
     if not name:
         raise HTTPException(400, 'Song name is required')
+
+    # Parse stem → beatmap_id selection (optional). Empty/invalid falls back to
+    # the previous "latest per stem" behaviour.
+    stem_overrides: dict[str, str] = {}
+    if selected_beatmaps:
+        try:
+            parsed = json.loads(selected_beatmaps)
+            if isinstance(parsed, dict):
+                stem_overrides = {str(k): str(v) for k, v in parsed.items() if v}
+        except json.JSONDecodeError:
+            raise HTTPException(400, 'selected_beatmaps must be valid JSON')
 
     folder_name = f'{artist} - {name}' if artist else name
     for ch in ['/', '\\', ':', '"', '<', '>', '|', '?', '*']:
@@ -550,15 +569,27 @@ async def publish_track_to_game(
 
         chart_status: dict = {'found': False, 'source': None, 'included_stems': [], 'skipped_stems': []}
         if track.beatmaps:
-            # Sort by generated_at so newer beatmaps win when stems repeat
-            ordered = sorted(track.beatmaps, key=lambda b: b.get('generated_at', 0), reverse=True)
-            seen_stems: set[str] = set()
+            # Group beatmaps by stem so we can apply user overrides cleanly.
+            by_stem: dict[str, list[dict]] = {}
+            for bm in track.beatmaps:
+                by_stem.setdefault(bm.get('stem', ''), []).append(bm)
+
             charts_to_merge: list[tuple[str, str]] = []
-            for bm in ordered:
-                stem = bm.get('stem', '')
-                if stem in seen_stems:
-                    continue
-                bm_dir = track.beatmaps_dir / bm.get('id', '')
+            beatmap_selection: dict[str, str] = {}
+            for stem, candidates in by_stem.items():
+                # Pick: the user-specified beatmap_id if provided AND it exists
+                # for this stem; otherwise the most recently generated.
+                chosen: dict | None = None
+                want = stem_overrides.get(stem)
+                if want:
+                    for bm in candidates:
+                        if bm.get('id') == want:
+                            chosen = bm
+                            break
+                if chosen is None:
+                    chosen = max(candidates, key=lambda b: b.get('generated_at', 0))
+
+                bm_dir = track.beatmaps_dir / chosen.get('id', '')
                 if not bm_dir.exists():
                     continue
                 src_chart = None
@@ -571,8 +602,8 @@ async def publish_track_to_game(
                     src_chart = next(iter(bm_dir.glob('*.chart')), None)
                 if src_chart is None:
                     continue
-                seen_stems.add(stem)
                 charts_to_merge.append((str(src_chart), stem))
+                beatmap_selection[stem] = chosen.get('id', '')
 
             if charts_to_merge:
                 merge_result = merge_beatmap_charts(
@@ -586,6 +617,7 @@ async def publish_track_to_game(
                         'included_stems': merge_result['included'],
                         'skipped_stems': merge_result['skipped'],
                         'source': f'{len(merge_result["included"])}-stem merge',
+                        'selected_beatmaps': beatmap_selection,
                     }
 
         # Write song.ini

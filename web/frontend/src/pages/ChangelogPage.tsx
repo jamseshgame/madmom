@@ -10,6 +10,17 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.5.2',
+    date: '2026-04-28',
+    summary:
+      'Pick which beatmap takes ship in notes_fixed_slides.chart when a track has multiple beatmaps for the same stem.',
+    entries: [
+      { kind: 'added', text: 'Publish to Game now shows a "beatmaps merged into the published chart" panel listing every stem with at least one beatmap. Stems with multiple beatmaps render as a dropdown of available takes (newest first), defaulting to the most recent. Stems with one beatmap render as a static label.' },
+      { kind: 'added', text: 'The publish endpoint accepts a `selected_beatmaps` JSON form field — `{ "drums": "<beatmap_id>", "guitar": "<beatmap_id>" }` — and uses it to override the per-stem selection. Anything missing or empty falls back to the previous "latest per stem" behaviour, so existing publish flows keep working.' },
+      { kind: 'changed', text: 'Publish-result panel reports the chosen beatmap_id per stem under `chart.selected_beatmaps`.' },
+    ],
+  },
+  {
     version: '1.5.1',
     date: '2026-04-28',
     summary:

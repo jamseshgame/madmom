@@ -321,9 +321,35 @@ function InlinePublish({ track }: { track: Track }) {
       beatmap_id?: string
       included_stems?: string[]
       skipped_stems?: string[]
+      selected_beatmaps?: Record<string, string>
     }
   } | null>(null)
   const [error, setError] = useState('')
+
+  // Per-stem beatmap selection. Keys: stem name. Values: beatmap_id.
+  // Initialised on expand to the most recently generated beatmap per stem,
+  // matching the backend default. User can override via the dropdowns below.
+  const beatmapsByStem = (track.beatmaps || []).reduce<Record<string, BeatmapRecord[]>>((acc, bm) => {
+    if (!acc[bm.stem]) acc[bm.stem] = []
+    acc[bm.stem].push(bm)
+    return acc
+  }, {})
+  for (const stem of Object.keys(beatmapsByStem)) {
+    beatmapsByStem[stem].sort((a, b) => b.generated_at - a.generated_at)
+  }
+  const [selectedBeatmaps, setSelectedBeatmaps] = useState<Record<string, string>>({})
+
+  useEffect(() => {
+    if (!expanded) return
+    const init: Record<string, string> = {}
+    for (const [stem, bms] of Object.entries(beatmapsByStem)) {
+      init[stem] = bms[0]?.id || ''
+    }
+    setSelectedBeatmaps(init)
+    // We intentionally only initialise on expand; the by-stem map is derived
+    // from the prop on every render and is stable enough for this purpose.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expanded, track.id])
 
   useEffect(() => {
     if (!expanded) return
@@ -354,6 +380,14 @@ function InlinePublish({ track }: { track: Track }) {
     try {
       const formData = new FormData()
       formData.append('song_ini', JSON.stringify(values))
+      // Only send overrides for stems that actually have a beatmap selected;
+      // empty entries are treated by the backend as "use latest" anyway.
+      const overrides = Object.fromEntries(
+        Object.entries(selectedBeatmaps).filter(([, bid]) => !!bid),
+      )
+      if (Object.keys(overrides).length > 0) {
+        formData.append('selected_beatmaps', JSON.stringify(overrides))
+      }
       const res = await fetch(`/api/tracks/${track.id}/publish-game`, { method: 'POST', body: formData })
       if (!res.ok) {
         const err = await res.json()
@@ -453,6 +487,56 @@ function InlinePublish({ track }: { track: Track }) {
           )}
         </div>
       </div>
+
+      {/* Beatmaps to publish — one per stem. Defaults to latest per stem; user
+          can override via dropdown. Stems with no beatmap are omitted; stems
+          with a single beatmap render as a static label. */}
+      {Object.keys(beatmapsByStem).length > 0 && (
+        <div className="px-4 py-3 border-b border-gray-800 space-y-2">
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-emerald-400 text-xs font-mono">notes_fixed_slides.chart</span>
+            <span className="text-gray-700 text-xs">beatmaps merged into the published chart</span>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {Object.entries(beatmapsByStem).map(([stem, bms]) => {
+              const colour = STEM_COLORS[stem] || 'text-gray-300'
+              const stemLabel = STEM_LABELS[stem] || stem
+              const fmtBm = (bm: BeatmapRecord) => {
+                const date = new Date(bm.generated_at * 1000).toLocaleString(undefined, {
+                  month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+                })
+                const liveName = (bm.song_name || '').trim()
+                return liveName ? `${liveName} · ${date}` : date
+              }
+              return (
+                <div key={stem} className="flex items-center gap-2">
+                  <span className={`shrink-0 text-xs font-medium w-16 ${colour}`}>{stemLabel}</span>
+                  {bms.length === 1 ? (
+                    <span className="text-xs text-gray-400 truncate" title={fmtBm(bms[0])}>
+                      {fmtBm(bms[0])}
+                    </span>
+                  ) : (
+                    <select
+                      value={selectedBeatmaps[stem] || bms[0].id}
+                      onChange={(e) => setSelectedBeatmaps((prev) => ({ ...prev, [stem]: e.target.value }))}
+                      className="flex-1 min-w-0 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200 focus:outline-none focus:border-jam-500"
+                    >
+                      {bms.map((bm) => (
+                        <option key={bm.id} value={bm.id}>
+                          {fmtBm(bm)}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+          <p className="text-[11px] text-gray-600">
+            Latest beatmap per stem is selected by default. Pick a different one to publish that take instead.
+          </p>
+        </div>
+      )}
 
       {/* song.ini form */}
       <div className="p-4 space-y-4">
