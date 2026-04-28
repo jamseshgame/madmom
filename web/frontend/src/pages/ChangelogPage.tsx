@@ -10,6 +10,15 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.5.3',
+    date: '2026-04-28',
+    summary:
+      'Beatmap-editor runway is now centred at a fixed-ish width by default instead of stretching across the entire viewport.',
+    entries: [
+      { kind: 'changed', text: 'Beatmap editor runway capped at 420px and centred horizontally inside the canvas pane. Lanes sit at a comfortable density on a 27" monitor without having to squeeze the window. The ResizeObserver tracks the inner container so the canvas backing store still matches actual rendered pixels.' },
+    ],
+  },
+  {
     version: '1.5.2',
     date: '2026-04-28',
     summary:

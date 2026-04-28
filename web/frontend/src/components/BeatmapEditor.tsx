@@ -578,15 +578,21 @@ export default function BeatmapEditor() {
       </header>
 
       <div className="flex-1 flex min-h-0">
-        <div ref={containerRef} className="flex-1 relative bg-black min-w-0">
-          <canvas
-            ref={canvasRef}
-            onMouseDown={handleMouseDown}
-            onMouseMove={handleMouseMove}
-            onMouseUp={handleMouseUp}
-            onMouseLeave={handleMouseUp}
-            className="absolute inset-0 w-full h-full cursor-crosshair"
-          />
+        {/* Outer flex centres the runway horizontally; inner container is
+            capped at ~420px so the lanes sit at a comfortable density even
+            on wide monitors. The canvas backing-store is sized to this
+            container by the ResizeObserver, not to the full viewport. */}
+        <div className="flex-1 flex justify-center bg-black min-w-0 px-4">
+          <div ref={containerRef} className="relative w-full max-w-[420px]">
+            <canvas
+              ref={canvasRef}
+              onMouseDown={handleMouseDown}
+              onMouseMove={handleMouseMove}
+              onMouseUp={handleMouseUp}
+              onMouseLeave={handleMouseUp}
+              className="absolute inset-0 w-full h-full cursor-crosshair"
+            />
+          </div>
         </div>
 
         <aside className="w-80 shrink-0 border-l border-gray-800 bg-gray-950 overflow-y-auto p-4 space-y-5">
