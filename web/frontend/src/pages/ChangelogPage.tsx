@@ -10,6 +10,16 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.3.3',
+    date: '2026-04-28',
+    summary:
+      'Stem cards in the Studio Library detail collapse to a single button row: Generate Beatmap + advanced settings cog. Download moved into the cog modal.',
+    entries: [
+      { kind: 'changed', text: 'Per-stem Download button moved out of the main stem card and into the advanced settings modal (opened via the ⚙ cog) as a "Download stem" action in the modal header. Generate Beatmap and the cog now share a single tidy row beneath the stem player.' },
+      { kind: 'changed', text: 'Master Mix cards keep the Download button on the card itself — there is no Generate Beatmap option for the master, so no settings modal to nest it under.' },
+    ],
+  },
+  {
     version: '1.3.2',
     date: '2026-04-28',
     summary:

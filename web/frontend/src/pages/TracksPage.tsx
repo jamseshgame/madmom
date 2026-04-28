@@ -222,7 +222,16 @@ function BeatmapPanel({
           <h3 className="text-lg font-semibold">
             Generate Beatmap — <span className={STEM_COLORS[stem] || 'text-gray-300'}>{STEM_LABELS[stem] || stem}</span>
           </h3>
-          <button onClick={onClose} className="text-gray-500 hover:text-gray-300 text-xl leading-none">&times;</button>
+          <div className="flex items-center gap-2">
+            <a
+              href={`/api/tracks/${track.id}/stems/${stem}`}
+              className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-600 text-gray-200 rounded-md text-xs font-medium transition-colors"
+              title={`Download ${STEM_LABELS[stem] || stem} stem`}
+            >
+              Download stem
+            </a>
+            <button onClick={onClose} className="text-gray-500 hover:text-gray-300 text-xl leading-none">&times;</button>
+          </div>
         </div>
 
         <div className="p-5 space-y-5 max-h-[70vh] overflow-y-auto">
@@ -882,13 +891,14 @@ export default function TracksPage() {
                   </span>
                   <StemPlayer src={`/api/tracks/${selectedTrack.id}/stems/${stem}`} />
                   <div className="flex flex-wrap gap-1.5 justify-center items-center">
-                    <a
-                      href={`/api/tracks/${selectedTrack.id}/stems/${stem}`}
-                      className="px-2 py-1 bg-gray-700 text-gray-300 hover:bg-gray-600 rounded text-xs font-medium transition-colors"
-                    >
-                      Download
-                    </a>
-                    {stem !== 'song' && (
+                    {stem === 'song' ? (
+                      <a
+                        href={`/api/tracks/${selectedTrack.id}/stems/${stem}`}
+                        className="px-2 py-1 bg-gray-700 text-gray-300 hover:bg-gray-600 rounded text-xs font-medium transition-colors"
+                      >
+                        Download
+                      </a>
+                    ) : (
                       <>
                         <button
                           onClick={() => startQuickBeatmap(stem)}
@@ -901,8 +911,8 @@ export default function TracksPage() {
                         <button
                           onClick={() => setBeatmapPanel({ track: selectedTrack, stem })}
                           className="px-1.5 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-gray-100 rounded text-sm leading-none transition-colors"
-                          title="Advanced beatmap settings"
-                          aria-label="Advanced beatmap settings"
+                          title="Advanced settings & download stem"
+                          aria-label="Advanced settings & download stem"
                         >
                           ⚙
                         </button>
