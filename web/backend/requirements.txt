@@ -8,3 +8,8 @@ Pillow>=10.0
 numpy
 demucs>=4.0
 torch>=2.0
+# torchaudio >= 2.5 dispatches save()/load() through torchcodec instead of the
+# built-in soundfile/sox backends. demucs 4.x still calls torchaudio.save(),
+# so torchcodec must be present or every separation crashes at the final
+# stem-write step with "TorchCodec is required for save_with_torchcodec".
+torchcodec

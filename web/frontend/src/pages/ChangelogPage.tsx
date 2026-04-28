@@ -10,6 +10,16 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.2.2',
+    date: '2026-04-28',
+    summary:
+      'Hotfix — separations were crashing at the final stem-write step because torchaudio 2.11 dispatches save() through torchcodec, which was not installed. Pinned torchcodec in requirements.txt.',
+    entries: [
+      { kind: 'fixed', text: 'Demucs separation no longer crashes with "TorchCodec is required for save_with_torchcodec" at the final write. torchaudio >= 2.5 routes save()/load() through the torchcodec C++/FFmpeg backend; demucs 4.x still calls torchaudio.save() to write WAVs, so torchcodec must be present or every separation fails after burning the full inference cost.' },
+      { kind: 'changed', text: 'Backend requirements.txt now lists torchcodec explicitly with a comment explaining why, so a fresh deploy from scratch picks it up.' },
+    ],
+  },
+  {
     version: '1.2.1',
     date: '2026-04-28',
     summary:
