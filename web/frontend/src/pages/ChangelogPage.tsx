@@ -10,6 +10,17 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.3.2',
+    date: '2026-04-28',
+    summary:
+      'Publish to Game preview line now shows the full file list correctly — including notes.chart and album.png — and stops listing fake song_ini.ogg / album_png.ogg entries.',
+    entries: [
+      { kind: 'fixed', text: 'Publish to Game preview was iterating every key in track.stems and slapping .ogg on the end. song_ini and album_png are bookkeeping keys, not audio — so the preview was promising song_ini.ogg and album_png.ogg files that never existed. Filtered them out (and song.ogg, which is appended explicitly).' },
+      { kind: 'added', text: 'Preview now lists notes.chart in green when the track has a beatmap, and shows an amber "⚠ no notes.chart" warning when it doesn\'t — surfacing the same check before publish that v1.2.3 added after.' },
+      { kind: 'added', text: 'album.png appears in the preview when the track has cover art, so the published file list matches reality.' },
+    ],
+  },
+  {
     version: '1.3.1',
     date: '2026-04-28',
     summary:

@@ -409,20 +409,32 @@ function InlinePublish({ track }: { track: Track }) {
         <button onClick={() => setExpanded(false)} className="text-gray-500 hover:text-gray-300 text-lg">&times;</button>
       </div>
 
-      {/* Stem mapping */}
+      {/* Stem mapping — preview of what lands in the published folder */}
       <div className="px-4 py-2 bg-gray-800/30 border-b border-gray-800">
         <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-xs font-mono text-gray-600">
-          {Object.keys(track.stems).map((s) => {
-            const gameName = ({ bass: 'rhythm', other: 'crowd' } as Record<string, string>)[s] || s
-            return (
-              <span key={s}>
-                {s !== gameName ? `${s} → ` : ''}
-                <span className={STEM_COLORS[s] || 'text-gray-400'}>{gameName}.ogg</span>
-              </span>
-            )
-          })}
+          {Object.keys(track.stems)
+            .filter((s) => !NON_AUDIO_KEYS.has(s) && s !== 'song')
+            .map((s) => {
+              const gameName = ({ bass: 'rhythm', other: 'crowd' } as Record<string, string>)[s] || s
+              return (
+                <span key={s}>
+                  {s !== gameName ? `${s} → ` : ''}
+                  <span className={STEM_COLORS[s] || 'text-gray-400'}>{gameName}.ogg</span>
+                </span>
+              )
+            })}
           <span>+ <span className="text-gray-300">song.ogg</span></span>
           <span>+ <span className="text-yellow-400">song.ini</span></span>
+          {!!track.stems.album_png && (
+            <span>+ <span className="text-pink-300">album.png</span></span>
+          )}
+          {(track.beatmaps && track.beatmaps.length > 0) ? (
+            <span>+ <span className="text-emerald-400">notes.chart</span></span>
+          ) : (
+            <span className="text-amber-500/80" title="No beatmap on this track yet — generate one before publishing or the song won't load">
+              ⚠ no notes.chart
+            </span>
+          )}
         </div>
       </div>
 
