@@ -108,7 +108,14 @@ async def update_track_song_ini(
     fields: str = Form(...),
     album_art: Optional[UploadFile] = File(None),
 ):
-    """Write song.ini for a track and (optionally) replace album.png."""
+    """Write song.ini for a track and (optionally) replace album.png.
+
+    Important: all mutations land on a single Track instance which is then
+    saved exactly once. Earlier versions called update_track_meta after
+    mutating track.stems locally; that helper does a fresh Track.load()
+    which loses the in-memory stems mutation, so a newly-uploaded album.png
+    file would land on disk but never be referenced from track.json — the
+    library would then render the row as having no art."""
     track = get_track(track_id)
     if not track:
         raise HTTPException(404, 'Track not found')
@@ -133,16 +140,13 @@ async def update_track_song_ini(
             except Exception as ae:
                 print(f'[tracks] album.png replace failed: {ae}')
 
-    # Mirror name/artist/album/genre/year into the Track dataclass so the
-    # library list and publish logic stay in sync.
-    update_track_meta(
-        track_id,
-        name=ini_fields.get('name', track.name),
-        artist=ini_fields.get('artist', track.artist),
-        album=ini_fields.get('album', track.album),
-        genre=ini_fields.get('genre', track.genre),
-        year=ini_fields.get('year', track.year),
-    )
+    # Mirror metadata fields into the Track dataclass so the library list
+    # and publish logic stay in sync — same instance, single save below.
+    for key in ('name', 'artist', 'album', 'genre', 'year'):
+        val = ini_fields.get(key)
+        if val is not None:
+            setattr(track, key, val)
+    track.save()
     return ini_fields
 
 

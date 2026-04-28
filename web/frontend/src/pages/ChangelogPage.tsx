@@ -10,6 +10,15 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.3.1',
+    date: '2026-04-28',
+    summary:
+      'Hotfix — saving metadata after adding album art was wiping the art reference from the track.',
+    entries: [
+      { kind: 'fixed', text: 'PATCH /api/tracks/:id/song-ini was writing album.png to disk but losing the in-memory stems-dict mutation that points track.json at it. update_track_meta() did a fresh Track.load() that overwrote the local instance, so library rows came back with no art reference even though the file was sitting on disk. The PATCH handler now mutates one Track instance and saves it once.' },
+    ],
+  },
+  {
     version: '1.3',
     date: '2026-04-28',
     summary:
