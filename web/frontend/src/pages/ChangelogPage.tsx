@@ -10,6 +10,16 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.2.3',
+    date: '2026-04-28',
+    summary:
+      'Publish to Game now actually includes the chart file. The published folder used to ship stems + song.ini + song.ogg + album.png with no beatmap, leaving the song unplayable in-game.',
+    entries: [
+      { kind: 'fixed', text: 'Publish to Game now copies notes.chart from the latest beatmap on the track into the published folder. Falls back to any *.chart file in the beatmap dir, so legacy generator outputs (notes_fixed_slides.chart from bin/JamseshMenu) get picked up too.' },
+      { kind: 'added', text: 'Publish result panel reports whether a chart was included and where it came from. Shows a yellow warning if the track has no beatmap, telling the user to generate one and re-publish.' },
+    ],
+  },
+  {
     version: '1.2.2',
     date: '2026-04-28',
     summary:

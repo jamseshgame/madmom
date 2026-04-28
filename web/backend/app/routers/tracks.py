@@ -520,12 +520,36 @@ async def publish_track_to_game(
             )
             await proc.communicate()
 
+        # Pull the latest beatmap's notes.chart into the publish folder. The
+        # game can't load the song without it, and without this step the
+        # published folder ends up with stems + ini + ogg but no chart at all.
+        # Falls back to any *.chart file so legacy generator outputs (e.g.
+        # notes_fixed_slides.chart from bin/JamseshMenu) still get picked up.
+        chart_status: dict = {'found': False, 'source': None}
+        if track.beatmaps:
+            latest = max(track.beatmaps, key=lambda b: b.get('generated_at', 0))
+            bm_dir = track.beatmaps_dir / latest.get('id', '')
+            if bm_dir.exists():
+                preferred = bm_dir / 'notes.chart'
+                if preferred.exists():
+                    shutil.copy2(str(preferred), str(tmp_dir / 'notes.chart'))
+                    chart_status = {'found': True, 'source': preferred.name, 'beatmap_id': latest.get('id')}
+                else:
+                    fallback = next(iter(bm_dir.glob('*.chart')), None)
+                    if fallback is not None:
+                        shutil.copy2(str(fallback), str(tmp_dir / 'notes.chart'))
+                        chart_status = {'found': True, 'source': fallback.name, 'beatmap_id': latest.get('id')}
+
         # Write song.ini
         write_song_ini(tmp_dir, ini_fields)
 
         # Publish to GitHub
         commit_url = await publish_song_folder(tmp_dir, folder_name)
-        return {'commit_url': commit_url, 'folder': f'{settings.github_inbox_prefix}/{folder_name}'}
+        return {
+            'commit_url': commit_url,
+            'folder': f'{settings.github_inbox_prefix}/{folder_name}',
+            'chart': chart_status,
+        }
     except Exception as e:
         raise HTTPException(500, f'Publish failed: {e}')
     finally:

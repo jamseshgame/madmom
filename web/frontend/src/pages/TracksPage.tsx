@@ -302,7 +302,11 @@ function InlinePublish({ track }: { track: Track }) {
   const [schema, setSchema] = useState<Record<string, SongIniField>>({})
   const [values, setValues] = useState<Record<string, unknown>>({})
   const [publishing, setPublishing] = useState(false)
-  const [result, setResult] = useState<{ commitUrl: string; folder: string } | null>(null)
+  const [result, setResult] = useState<{
+    commitUrl: string
+    folder: string
+    chart: { found: boolean; source: string | null; beatmap_id?: string }
+  } | null>(null)
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -340,7 +344,11 @@ function InlinePublish({ track }: { track: Track }) {
         throw new Error(err.detail || 'Publish failed')
       }
       const data = await res.json()
-      setResult({ commitUrl: data.commit_url, folder: data.folder })
+      setResult({
+        commitUrl: data.commit_url,
+        folder: data.folder,
+        chart: data.chart || { found: false, source: null },
+      })
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -457,6 +465,18 @@ function InlinePublish({ track }: { track: Track }) {
           <div className="bg-green-900/20 border border-green-800 rounded-lg p-4 space-y-2">
             <p className="text-sm text-green-400 font-medium">Published!</p>
             <p className="text-xs text-gray-500 font-mono">{result.folder}</p>
+            {result.chart.found ? (
+              <p className="text-xs text-gray-500">
+                Included <span className="font-mono text-gray-300">notes.chart</span>
+                {result.chart.source && result.chart.source !== 'notes.chart' && (
+                  <span className="text-gray-600"> (from {result.chart.source})</span>
+                )}
+              </p>
+            ) : (
+              <p className="text-xs text-amber-400">
+                ⚠ No beatmap found for this track — published without notes.chart. Generate a beatmap on a stem and re-publish.
+              </p>
+            )}
             <a href={result.commitUrl} target="_blank" rel="noopener noreferrer" className="text-sm text-jam-400 hover:text-jam-300 underline">
               View commit on GitHub
             </a>
