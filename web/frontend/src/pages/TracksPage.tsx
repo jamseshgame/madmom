@@ -515,6 +515,71 @@ const JOB_STATUS_PILL: Record<JobRow['status'], { label: string; cls: string }> 
   cancelled: { label: 'Cancelled', cls: 'bg-amber-900/30 text-amber-300 border-amber-800/60' },
 }
 
+function InlineBeatmapProgress({
+  jobId,
+  onDone,
+  onCancelled,
+}: {
+  jobId: string
+  onDone?: () => void
+  onCancelled?: () => void
+}) {
+  const [progress, setProgress] = useState(0)
+  const [message, setMessage] = useState('Starting…')
+  const [done, setDone] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    const es = new EventSource(`/api/jobs/${jobId}/events`)
+    es.onmessage = (e) => {
+      const d = JSON.parse(e.data)
+      if (d.progress >= 0) setProgress(d.progress)
+      if (d.message) setMessage(d.message)
+      if (d.step === 'done' && d.metadata) {
+        es.close()
+        setDone(true)
+        if (onDone) onDone()
+      } else if (d.step === 'error') {
+        es.close()
+        setError(d.message)
+      } else if (d.step === 'cancelled') {
+        es.close()
+        if (onCancelled) onCancelled()
+      }
+    }
+    es.onerror = () => es.close()
+    return () => es.close()
+  }, [jobId, onDone, onCancelled])
+
+  if (done) return <div className="text-[11px] text-emerald-400 mt-1">Generated ✓</div>
+  if (error) return <div className="text-[11px] text-red-400 mt-1 truncate" title={error}>{error}</div>
+  return (
+    <div className="mt-1 space-y-1">
+      <div className="w-full bg-gray-900 rounded-full h-1 overflow-hidden">
+        <div
+          className="bg-jam-500 h-full rounded-full transition-all duration-500"
+          style={{ width: `${Math.max(progress, 2)}%` }}
+        />
+      </div>
+      <div className="flex items-center justify-between gap-1">
+        <span className="text-[10px] text-gray-500 truncate flex-1" title={message}>{message}</span>
+        <button
+          onClick={async () => {
+            try {
+              await fetch(`/api/jobs/${jobId}/cancel`, { method: 'POST' })
+            } catch {
+              // best-effort
+            }
+          }}
+          className="shrink-0 px-1.5 py-0.5 bg-red-900/40 hover:bg-red-800/60 border border-red-800 text-red-300 hover:text-red-200 rounded text-[9px] font-medium transition-colors"
+        >
+          Kill
+        </button>
+      </div>
+    </div>
+  )
+}
+
 export default function TracksPage() {
   const [tracks, setTracks] = useState<Track[]>([])
   const [jobs, setJobs] = useState<JobRow[]>([])
@@ -536,6 +601,11 @@ export default function TracksPage() {
   const [deleting, setDeleting] = useState(false)
   const [statsBeatmap, setStatsBeatmap] = useState<BeatmapRecord | null>(null)
   const [coverFetchState, setCoverFetchState] = useState<'idle' | 'loading' | 'none' | 'error'>('idle')
+  // Inline beatmap generation: per-stem job id when one is in flight, plus
+  // tickbox selection for the batch-generate button below the stem grid.
+  const [selectedStems, setSelectedStems] = useState<Set<string>>(new Set())
+  const [inlineBmJobs, setInlineBmJobs] = useState<Record<string, string>>({})
+  const [batchError, setBatchError] = useState('')
 
   // song.ini editor state for the detail view
   const [songIni, setSongIni] = useState<Record<string, string>>({})
@@ -665,6 +735,64 @@ export default function TracksPage() {
     loadTracks()
   }
 
+  // Reset inline beatmap state when switching tracks so jobs don't bleed across rows
+  useEffect(() => {
+    setSelectedStems(new Set())
+    setInlineBmJobs({})
+    setBatchError('')
+  }, [selectedId])
+
+  const toggleSelectedStem = (stem: string) =>
+    setSelectedStems((prev) => {
+      const next = new Set(prev)
+      if (next.has(stem)) next.delete(stem)
+      else next.add(stem)
+      return next
+    })
+
+  const startQuickBeatmap = useCallback(
+    async (stem: string): Promise<string | null> => {
+      const track = tracks.find((t) => t.id === selectedId)
+      if (!track) return null
+      const fd = new FormData()
+      fd.append('stem', stem)
+      fd.append('name', (songIni.name || track.name || '').trim())
+      fd.append('artist', (songIni.artist || track.artist || 'Unknown').trim())
+      fd.append('album', (songIni.album || track.album || 'Unknown').trim())
+      fd.append('genre', (songIni.genre || track.genre || 'Unknown').trim())
+      fd.append('year', (songIni.year || track.year || '').trim())
+      // The backend now defaults five_lane_drums=true. Pass it explicitly for
+      // drums stems so it sticks regardless of any future schema flip.
+      if (stem === 'drums') fd.append('five_lane_drums', 'true')
+      try {
+        const res = await fetch(`/api/tracks/${track.id}/generate-beatmap`, {
+          method: 'POST',
+          body: fd,
+        })
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}))
+          throw new Error(err.detail || `Failed (${res.status})`)
+        }
+        const { job_id } = await res.json()
+        setInlineBmJobs((prev) => ({ ...prev, [stem]: job_id }))
+        return job_id
+      } catch (e) {
+        setBatchError((e as Error).message)
+        return null
+      }
+    },
+    [tracks, selectedId, songIni],
+  )
+
+  const generateSelected = useCallback(async () => {
+    setBatchError('')
+    for (const stem of Array.from(selectedStems)) {
+      if (inlineBmJobs[stem]) continue
+      await startQuickBeatmap(stem)
+    }
+    setSelectedStems(new Set())
+  }, [selectedStems, inlineBmJobs, startQuickBeatmap])
+
   const performConfirmedDelete = async () => {
     if (!confirmDelete) return
     setDeleting(true)
@@ -725,13 +853,23 @@ export default function TracksPage() {
               .map(([stem]) => (
                 <div
                   key={stem}
-                  className="bg-gray-800 border border-gray-700 rounded-lg p-3 flex flex-col items-stretch gap-2"
+                  className="bg-gray-800 border border-gray-700 rounded-lg p-3 flex flex-col items-stretch gap-2 relative"
                 >
+                  {stem !== 'song' && (
+                    <input
+                      type="checkbox"
+                      checked={selectedStems.has(stem)}
+                      onChange={() => toggleSelectedStem(stem)}
+                      className="absolute top-2 left-2 h-4 w-4 rounded border-gray-600 bg-gray-900 accent-jam-500 cursor-pointer"
+                      aria-label={`Select ${STEM_LABELS[stem] || stem} for batch beatmap`}
+                      title="Select for batch beatmap generation"
+                    />
+                  )}
                   <span className={`text-sm font-semibold text-center ${STEM_COLORS[stem] || 'text-gray-300'}`}>
                     {STEM_LABELS[stem] || stem}
                   </span>
                   <StemPlayer src={`/api/tracks/${selectedTrack.id}/stems/${stem}`} />
-                  <div className="flex flex-wrap gap-1.5 justify-center">
+                  <div className="flex flex-wrap gap-1.5 justify-center items-center">
                     <a
                       href={`/api/tracks/${selectedTrack.id}/stems/${stem}`}
                       className="px-2 py-1 bg-gray-700 text-gray-300 hover:bg-gray-600 rounded text-xs font-medium transition-colors"
@@ -739,14 +877,46 @@ export default function TracksPage() {
                       Download
                     </a>
                     {stem !== 'song' && (
-                      <button
-                        onClick={() => setBeatmapPanel({ track: selectedTrack, stem })}
-                        className="px-2 py-1 bg-green-700/60 hover:bg-green-600/70 text-green-200 rounded text-xs font-medium transition-colors"
-                      >
-                        Beatmap
-                      </button>
+                      <>
+                        <button
+                          onClick={() => startQuickBeatmap(stem)}
+                          disabled={!!inlineBmJobs[stem]}
+                          className="px-2 py-1 bg-green-700/60 hover:bg-green-600/70 disabled:opacity-40 disabled:cursor-not-allowed text-green-200 rounded text-xs font-medium transition-colors"
+                          title="Generate beatmap with current track metadata"
+                        >
+                          Generate Beatmap
+                        </button>
+                        <button
+                          onClick={() => setBeatmapPanel({ track: selectedTrack, stem })}
+                          className="px-1.5 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-gray-100 rounded text-sm leading-none transition-colors"
+                          title="Advanced beatmap settings"
+                          aria-label="Advanced beatmap settings"
+                        >
+                          ⚙
+                        </button>
+                      </>
                     )}
                   </div>
+                  {inlineBmJobs[stem] && (
+                    <InlineBeatmapProgress
+                      jobId={inlineBmJobs[stem]}
+                      onDone={() => {
+                        setInlineBmJobs((prev) => {
+                          const next = { ...prev }
+                          delete next[stem]
+                          return next
+                        })
+                        loadTracks()
+                      }}
+                      onCancelled={() => {
+                        setInlineBmJobs((prev) => {
+                          const next = { ...prev }
+                          delete next[stem]
+                          return next
+                        })
+                      }}
+                    />
+                  )}
                   {(selectedTrack.beatmaps || [])
                     .filter((bm) => bm.stem === stem)
                     .sort((a, b) => b.generated_at - a.generated_at)
@@ -774,6 +944,25 @@ export default function TracksPage() {
                     ))}
                 </div>
               ))}
+          </div>
+
+          {/* Batch generate row */}
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+            <div className="text-xs text-gray-500">
+              {selectedStems.size > 0
+                ? `${selectedStems.size} stem${selectedStems.size === 1 ? '' : 's'} selected`
+                : 'Tick stems above to queue multiple beatmap generations.'}
+            </div>
+            <div className="flex items-center gap-2">
+              {batchError && <span className="text-xs text-red-400">{batchError}</span>}
+              <button
+                onClick={generateSelected}
+                disabled={selectedStems.size === 0}
+                className="px-3 py-1.5 bg-jam-600 hover:bg-jam-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-md text-xs font-medium transition-colors"
+              >
+                Generate beatmap for {selectedStems.size || 'selected'} stem{selectedStems.size === 1 ? '' : 's'}
+              </button>
+            </div>
           </div>
 
           <div className="mt-6 bg-gray-950 border border-gray-800 rounded-xl p-5 space-y-4">

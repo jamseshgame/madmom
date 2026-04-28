@@ -10,6 +10,18 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.3',
+    date: '2026-04-28',
+    summary:
+      'One-click beatmap generation from the Studio Library, batch generation across multiple stems, and 5-lane drums on by default.',
+    entries: [
+      { kind: 'added', text: 'One-click "Generate Beatmap" button on every non-master stem card in the Studio Library detail view. Uses the track\'s current name / artist / album / genre / year — no modal, no settings dance — and shows inline progress with a Kill button right under the stem player.' },
+      { kind: 'added', text: 'A settings cog (⚙) sits next to the Generate button and opens the existing advanced song.ini panel for cases where you need to tweak per-difficulty ratings, HOPO frequency, or other gameplay flags.' },
+      { kind: 'added', text: 'Tickbox on each non-master stem card plus a "Generate beatmap for N stems" button below the grid. Queues up parallel beatmap generations across whichever stems you ticked — pick drums + guitar + bass and walk away.' },
+      { kind: 'changed', text: 'five_lane_drums now defaults to true in the song.ini schema and the /generate-beatmap endpoint. Quick-generate explicitly sets it for drums stems so the default is sticky regardless of any future schema change.' },
+    ],
+  },
+  {
     version: '1.2.5',
     date: '2026-04-28',
     summary:

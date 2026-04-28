@@ -196,7 +196,7 @@ SONG_INI_FIELDS = {
     # Gameplay
     'hopo_frequency': {'type': 'int', 'default': 0, 'label': 'HOPO Frequency'},
     'sustain_cutoff_threshold': {'type': 'int', 'default': 0, 'label': 'Sustain Cutoff Threshold'},
-    'five_lane_drums': {'type': 'bool', 'default': False, 'label': '5-Lane Drums'},
+    'five_lane_drums': {'type': 'bool', 'default': True, 'label': '5-Lane Drums'},
     'modchart': {'type': 'bool', 'default': False, 'label': 'Modchart'},
 }
 
@@ -231,7 +231,7 @@ async def generate_beatmap_from_track(
     diff_bassghl: int = Form(-1),
     hopo_frequency: int = Form(0),
     sustain_cutoff_threshold: int = Form(0),
-    five_lane_drums: bool = Form(False),
+    five_lane_drums: bool = Form(True),
     modchart: bool = Form(False),
 ):
     """Generate a beatmap from a saved track's stem with full song.ini control."""
