@@ -229,6 +229,64 @@ def get_beatmap_dir(track_id: str, beatmap_id: str) -> Path | None:
     return d if d.exists() else None
 
 
+def rename_beatmap_record(track_id: str, beatmap_id: str, song_name: str) -> dict | None:
+    """Rename a beatmap. Updates the beatmaps[] entry and rewrites the [Song]
+    name in the beatmap's song.ini and notes.chart so a downstream Clone Hero
+    consumer sees the new title too. Returns the updated record or None."""
+    name = (song_name or '').strip()
+    if not name:
+        return None
+    track = Track.load(track_id)
+    if not track:
+        return None
+    record: dict[str, Any] | None = None
+    for b in track.beatmaps:
+        if b.get('id') == beatmap_id:
+            b['song_name'] = name
+            record = b
+            break
+    if record is None:
+        return None
+    track.save()
+
+    bm_dir = track.beatmaps_dir / beatmap_id
+    if bm_dir.exists():
+        # song.ini — overwrite the name = ... line if present
+        ini_path = bm_dir / 'song.ini'
+        if ini_path.exists():
+            try:
+                lines = ini_path.read_text(encoding='utf-8', errors='replace').splitlines()
+                rewrote = False
+                for i, line in enumerate(lines):
+                    if line.strip().lower().startswith('name'):
+                        prefix, _, _ = line.partition('=')
+                        if '=' in line:
+                            lines[i] = f'{prefix.rstrip()} = {name}'
+                            rewrote = True
+                            break
+                if rewrote:
+                    ini_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+            except OSError as e:
+                print(f'[tracks] rename song.ini failed for beatmap {beatmap_id}: {e}')
+        # notes.chart — replace the Name = "..." line in [Song]
+        chart_path = bm_dir / 'notes.chart'
+        if chart_path.exists():
+            try:
+                import re as _re
+                text = chart_path.read_text(encoding='utf-8', errors='replace')
+                escaped = name.replace('"', "'")
+                new_text = _re.sub(
+                    r'(Name\s*=\s*)"[^"]*"',
+                    lambda m: f'{m.group(1)}"{escaped}"',
+                    text, count=1,
+                )
+                if new_text != text:
+                    chart_path.write_text(new_text, encoding='utf-8')
+            except OSError as e:
+                print(f'[tracks] rename notes.chart failed for beatmap {beatmap_id}: {e}')
+    return record
+
+
 def delete_beatmap_record(track_id: str, beatmap_id: str) -> bool:
     track = Track.load(track_id)
     if not track:

@@ -27,6 +27,7 @@ from ..services.tracks import (
     get_track,
     get_track_enriched,
     list_tracks,
+    rename_beatmap_record,
     update_track_meta,
 )
 
@@ -456,6 +457,21 @@ async def remove_beatmap(track_id: str, beatmap_id: str):
     if not delete_beatmap_record(track_id, beatmap_id):
         raise HTTPException(404, 'Beatmap not found')
     return {'ok': True}
+
+
+@router.patch('/{track_id}/beatmaps/{beatmap_id}')
+async def rename_beatmap(
+    track_id: str,
+    beatmap_id: str,
+    song_name: str = Form(...),
+):
+    """Rename a beatmap. Updates the song_name on the track record and the
+    [Song] name in the beatmap's song.ini + notes.chart so the new title
+    propagates into anything downstream that reads either file."""
+    record = rename_beatmap_record(track_id, beatmap_id, song_name)
+    if record is None:
+        raise HTTPException(404, 'Beatmap not found, or song_name was empty')
+    return record
 
 
 @router.post('/{track_id}/publish-game')

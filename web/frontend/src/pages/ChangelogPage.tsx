@@ -10,6 +10,16 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.5.1',
+    date: '2026-04-28',
+    summary:
+      'Rename finished beatmaps from the stats modal — handy when a track has multiple beatmaps for the same stem.',
+    entries: [
+      { kind: 'added', text: 'Click the song-name line in the beatmap stats modal to rename a finished beatmap. Saves through the new PATCH /api/tracks/:trackId/beatmaps/:beatmapId endpoint, which updates the track.json record and rewrites the [Song] name in the beatmap\'s song.ini and notes.chart so the new title propagates into anything downstream that reads either file.' },
+      { kind: 'changed', text: 'Stem-card beatmap chips now show the custom song name when one is set, falling back to the generation date otherwise. Hover tooltip carries both name and date.' },
+    ],
+  },
+  {
     version: '1.5',
     date: '2026-04-28',
     summary:

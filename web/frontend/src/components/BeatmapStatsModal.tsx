@@ -50,11 +50,13 @@ export default function BeatmapStatsModal({
   beatmap,
   onClose,
   onDeleted,
+  onRenamed,
 }: {
   trackId: string
   beatmap: BeatmapRecord
   onClose: () => void
   onDeleted?: () => void
+  onRenamed?: (record: BeatmapRecord) => void
 }) {
   const [data, setData] = useState<{
     sections: Record<string, Record<string, string>>
@@ -63,6 +65,41 @@ export default function BeatmapStatsModal({
   const [error, setError] = useState('')
   const [confirming, setConfirming] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [editingName, setEditingName] = useState(false)
+  const [draftName, setDraftName] = useState(beatmap.song_name)
+  const [savingName, setSavingName] = useState(false)
+  const [renameError, setRenameError] = useState('')
+  const [currentName, setCurrentName] = useState(beatmap.song_name)
+
+  const handleRename = async () => {
+    const next = draftName.trim()
+    if (!next || next === currentName) {
+      setEditingName(false)
+      return
+    }
+    setSavingName(true)
+    setRenameError('')
+    try {
+      const fd = new FormData()
+      fd.append('song_name', next)
+      const res = await fetch(`/api/tracks/${trackId}/beatmaps/${beatmap.id}`, {
+        method: 'PATCH',
+        body: fd,
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || `Rename failed (${res.status})`)
+      }
+      const updated = (await res.json()) as BeatmapRecord
+      setCurrentName(updated.song_name)
+      setEditingName(false)
+      if (onRenamed) onRenamed(updated)
+    } catch (e) {
+      setRenameError((e as Error).message)
+    } finally {
+      setSavingName(false)
+    }
+  }
 
   useEffect(() => {
     fetch(`/api/tracks/${trackId}/beatmaps/${beatmap.id}/stats`)
@@ -108,7 +145,60 @@ export default function BeatmapStatsModal({
                 {STEM_LABELS[beatmap.stem] || beatmap.stem}
               </span>
             </h3>
-            <p className="text-xs text-gray-500 mt-0.5 font-mono truncate">{beatmap.song_name}</p>
+            {editingName ? (
+              <div className="mt-1 flex items-center gap-2">
+                <input
+                  type="text"
+                  autoFocus
+                  value={draftName}
+                  onChange={(e) => setDraftName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleRename()
+                    if (e.key === 'Escape') {
+                      setDraftName(currentName)
+                      setEditingName(false)
+                      setRenameError('')
+                    }
+                  }}
+                  disabled={savingName}
+                  className="flex-1 min-w-0 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200 font-mono focus:outline-none focus:border-jam-500"
+                />
+                <button
+                  onClick={handleRename}
+                  disabled={savingName || !draftName.trim()}
+                  className="px-2 py-1 bg-jam-600 hover:bg-jam-500 disabled:opacity-40 text-white rounded text-[11px] font-medium transition-colors"
+                >
+                  {savingName ? 'Saving…' : 'Save'}
+                </button>
+                <button
+                  onClick={() => {
+                    setDraftName(currentName)
+                    setEditingName(false)
+                    setRenameError('')
+                  }}
+                  disabled={savingName}
+                  className="px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded text-[11px] transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => {
+                  setDraftName(currentName)
+                  setEditingName(true)
+                  setRenameError('')
+                }}
+                className="mt-0.5 group flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-300 font-mono truncate transition-colors"
+                title="Rename this beatmap"
+              >
+                <span className="truncate">{currentName}</span>
+                <span className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px]">✏</span>
+              </button>
+            )}
+            {renameError && (
+              <p className="text-[11px] text-red-400 mt-0.5">{renameError}</p>
+            )}
             <p className="text-xs text-gray-600 mt-0.5">Generated {formatBeatmapTimestamp(beatmap.generated_at)}</p>
           </div>
           <button onClick={onClose} className="text-gray-500 hover:text-gray-300 text-2xl leading-none">&times;</button>
