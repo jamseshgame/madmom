@@ -10,6 +10,18 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.2.5',
+    date: '2026-04-28',
+    summary:
+      'Fixes a regression where the post-separation result view was rendering a blank panel — no track title, no stem cards, no Generate Beatmap buttons. Plus an Auto-fetch cover art button driven off the typed name + artist.',
+    entries: [
+      { kind: 'fixed', text: 'Stem separation result view now actually shows the stems. The backend was emitting a "step: done" event at 95% as an in-progress milestone ("Stems ready: …"), which the SSE consumer mistook for the terminal event and closed the connection before the real send_done() arrived. Renamed the milestone step to "finalize"; ProgressTracker also now requires metadata before treating "done" as terminal.' },
+      { kind: 'added', text: 'Auto-fetch from name + artist button next to the album.png picker on both the post-separation result view and the Studio Library track detail. Hits iTunes Search, falls back to MusicBrainz / Cover Art Archive, and stages the resulting 512×512 PNG for save.' },
+      { kind: 'added', text: 'Backend POST /api/beatmap/cover-art-search endpoint — accepts artist/title/album form fields and returns a 512×512 PNG (or 204 if no match).' },
+      { kind: 'added', text: 'Result view now falls back to the upload filename for name + artist when the audio file had no embedded title/artist tags. "Artist - Track Name.mp3" splits into both fields; otherwise the whole filename becomes the name.' },
+    ],
+  },
+  {
     version: '1.2.4',
     date: '2026-04-28',
     summary:

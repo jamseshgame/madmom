@@ -35,9 +35,13 @@ export default function ProgressTracker({ jobId, statusUrl, onDone, onError }: P
       setEvents((prev) => [...prev, data])
       if (data.progress >= 0) setProgress(data.progress)
 
-      if (data.step === 'done') {
+      // Only treat 'done' as terminal when it carries metadata. Some workers
+      // emit progress events with step='done' as a non-terminal milestone
+      // (e.g. "stems ready"); without this guard the SSE closes early and
+      // the result view never sees the real send_done() metadata.
+      if (data.step === 'done' && data.metadata) {
         evtSource.close()
-        onDone(data.metadata || {})
+        onDone(data.metadata)
       } else if (data.step === 'error') {
         evtSource.close()
         onError(data.message)

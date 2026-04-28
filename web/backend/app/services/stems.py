@@ -355,7 +355,11 @@ async def separate_stems(
 
     if progress_callback:
         stem_list = ', '.join(f'{k} ({v})' for k, v in stem_files.items())
-        await progress_callback('done', 95, f'Stems ready: {stem_list}')
+        # NOTE: this is an in-progress milestone, not the terminal event. Using
+        # step='done' here would trip the SSE consumer into closing early —
+        # before the real Job.send_done() fires with the full metadata. Use a
+        # neutral step name instead.
+        await progress_callback('finalize', 95, f'Stems ready: {stem_list}')
 
     return {
         'stems': stem_files,

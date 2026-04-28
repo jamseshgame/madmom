@@ -51,6 +51,32 @@ async def extract_metadata(file: UploadFile):
     }
 
 
+@router.post('/cover-art-search')
+async def search_cover_by_tags(
+    artist: str = Form(''),
+    title: str = Form(''),
+    album: str = Form(''),
+):
+    """Look up a 512×512 PNG cover from iTunes / MusicBrainz using the typed
+    artist + title (+ optional album). No audio file required — this is what
+    the StemResult / Track detail views call after the user fills in the
+    metadata form by hand."""
+    from fastapi.responses import Response
+
+    if not (artist or title or album):
+        raise HTTPException(400, 'At least one of artist/title/album is required')
+
+    raw = await fetch_cover_from_web(artist=artist, album=album, title=title)
+    if not raw:
+        return Response(status_code=204, headers={'X-Cover-Source': 'none'})
+
+    try:
+        png = resize_to_square_png(raw, size=512)
+    except Exception as e:
+        raise HTTPException(500, f'Image resize failed: {e}')
+    return Response(content=png, media_type='image/png', headers={'X-Cover-Source': 'web'})
+
+
 @router.post('/cover-art')
 async def extract_cover(file: UploadFile):
     """Return a 512×512 PNG cover for the audio. Tries embedded art, then web search by tags."""

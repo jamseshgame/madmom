@@ -154,8 +154,22 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
     const raw = (metadata.song_ini || {}) as Record<string, unknown>
     const out: Record<string, string> = {}
     for (const [k, v] of Object.entries(raw)) out[k] = String(v ?? '')
+    // If song.ini didn't carry name/artist (no embedded tags), fall back to the
+    // upload filename. "Artist - Track Name.mp3" → artist + name; otherwise the
+    // whole stem becomes name with artist left blank.
+    const original = (metadata.original_name as string) || ''
+    if (original && (!out.name || !out.artist)) {
+      const parts = original.split(/\s*-\s*/)
+      if (parts.length >= 2) {
+        if (!out.artist) out.artist = parts[0].trim()
+        if (!out.name) out.name = parts.slice(1).join(' - ').trim()
+      } else if (!out.name) {
+        out.name = original
+      }
+    }
     return out
   })
+  const [coverFetchState, setCoverFetchState] = useState<'idle' | 'loading' | 'none' | 'error'>('idle')
   const [iniSaveState, setIniSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [iniError, setIniError] = useState('')
   const updateIni = (key: string, value: string) =>
@@ -174,6 +188,39 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
     if (albumPreview && albumPreview.startsWith('blob:')) URL.revokeObjectURL(albumPreview)
     setAlbumArtFile(f)
     setAlbumPreview(URL.createObjectURL(f))
+  }
+
+  const fetchCoverByTags = async () => {
+    const artist = (songIni.artist || '').trim()
+    const title = (songIni.name || '').trim()
+    const album = (songIni.album || '').trim()
+    if (!artist && !title && !album) {
+      setCoverFetchState('error')
+      return
+    }
+    setCoverFetchState('loading')
+    try {
+      const fd = new FormData()
+      fd.append('artist', artist)
+      fd.append('title', title)
+      fd.append('album', album)
+      const res = await fetch('/api/beatmap/cover-art-search', { method: 'POST', body: fd })
+      if (res.status === 204) {
+        setCoverFetchState('none')
+        return
+      }
+      if (!res.ok) throw new Error(`${res.status}`)
+      const blob = await res.blob()
+      if (blob.size === 0) {
+        setCoverFetchState('none')
+        return
+      }
+      const file = new File([blob], 'album.png', { type: 'image/png' })
+      handleAlbumPick(file)
+      setCoverFetchState('idle')
+    } catch {
+      setCoverFetchState('error')
+    }
   }
 
   const saveSongIni = async () => {
@@ -374,11 +421,28 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
             className="hidden"
             onChange={(e) => handleAlbumPick(e.target.files?.[0] ?? null)}
           />
-          <div className="text-xs text-gray-500 mt-1">
+          <div className="text-xs text-gray-500 mt-1 flex-1">
             <p>
               <span className="text-gray-400 font-mono">album.png</span> — included in the published game folder.
             </p>
             <p className="text-gray-600 mt-1">Any image is resized to 512×512 PNG on save.</p>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={fetchCoverByTags}
+                disabled={coverFetchState === 'loading' || (!songIni.name && !songIni.artist && !songIni.album)}
+                className="px-2.5 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 border border-gray-700 hover:border-gray-600 text-gray-200 rounded-md text-xs font-medium transition-colors"
+                title="Pull cover art from iTunes / MusicBrainz using the name + artist below"
+              >
+                {coverFetchState === 'loading' ? 'Searching…' : 'Auto-fetch from name + artist'}
+              </button>
+              {coverFetchState === 'none' && (
+                <span className="text-amber-400">No cover found for those tags</span>
+              )}
+              {coverFetchState === 'error' && (
+                <span className="text-red-400">Search failed — fill in name + artist first</span>
+              )}
+            </div>
           </div>
         </div>
 
