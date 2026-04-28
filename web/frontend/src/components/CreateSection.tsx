@@ -33,6 +33,204 @@ const STEM_META: Record<string, { label: string; color: string }> = {
   other: { label: 'Other', color: 'text-blue-400' },
 }
 
+interface YouTubeResult {
+  video_id: string
+  title: string
+  channel: string
+  duration: number
+  thumbnail: string
+  url: string
+}
+
+function YouTubeSearch({ onPicked }: { onPicked: (file: File) => void }) {
+  const [query, setQuery] = useState('')
+  const [results, setResults] = useState<YouTubeResult[] | null>(null)
+  const [searching, setSearching] = useState(false)
+  const [searchError, setSearchError] = useState('')
+  const [pulling, setPulling] = useState<{ videoId: string; jobId: string; progress: number; message: string } | null>(null)
+  const [pullError, setPullError] = useState('')
+
+  const runSearch = async () => {
+    const q = query.trim()
+    if (!q) return
+    setSearching(true)
+    setSearchError('')
+    setResults(null)
+    try {
+      const res = await fetch(`/api/youtube/search?q=${encodeURIComponent(q)}&limit=10`)
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || `Search failed (${res.status})`)
+      }
+      const data = (await res.json()) as YouTubeResult[]
+      setResults(data)
+    } catch (e) {
+      setSearchError((e as Error).message)
+    } finally {
+      setSearching(false)
+    }
+  }
+
+  const pickResult = async (r: YouTubeResult) => {
+    setPullError('')
+    setPulling({ videoId: r.video_id, jobId: '', progress: 0, message: 'Starting…' })
+    try {
+      const fd = new FormData()
+      fd.append('video_id', r.video_id)
+      const res = await fetch('/api/youtube/download', { method: 'POST', body: fd })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || `Download failed (${res.status})`)
+      }
+      const { job_id } = await res.json()
+      setPulling((p) => (p ? { ...p, jobId: job_id } : null))
+
+      const es = new EventSource(`/api/jobs/${job_id}/events`)
+      es.onmessage = async (e) => {
+        const d = JSON.parse(e.data)
+        if (d.progress >= 0) {
+          setPulling((p) => (p ? { ...p, progress: d.progress } : null))
+        }
+        if (d.message) {
+          setPulling((p) => (p ? { ...p, message: d.message } : null))
+        }
+        if (d.step === 'done' && d.metadata) {
+          es.close()
+          try {
+            const fileRes = await fetch(`/api/youtube/${job_id}/file`)
+            if (!fileRes.ok) throw new Error(`File fetch failed (${fileRes.status})`)
+            const blob = await fileRes.blob()
+            const safeTitle = (d.metadata.title as string || r.title)
+              .replace(/[\\/:*?"<>|]/g, '-')
+              .slice(0, 100)
+            const file = new File([blob], `${safeTitle}.mp3`, { type: 'audio/mpeg' })
+            setPulling(null)
+            setResults(null)
+            setQuery('')
+            onPicked(file)
+          } catch (fe) {
+            setPullError((fe as Error).message)
+            setPulling(null)
+          }
+        } else if (d.step === 'error' || d.step === 'cancelled') {
+          es.close()
+          setPullError(d.message || `Job ${d.step}`)
+          setPulling(null)
+        }
+      }
+      es.onerror = () => {
+        es.close()
+        setPullError('SSE connection lost')
+        setPulling(null)
+      }
+    } catch (e) {
+      setPullError((e as Error).message)
+      setPulling(null)
+    }
+  }
+
+  const fmtDuration = (s: number) => {
+    if (!s) return '–'
+    const m = Math.floor(s / 60)
+    const ss = Math.floor(s % 60)
+    return `${m}:${ss.toString().padStart(2, '0')}`
+  }
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
+      <div className="flex items-center gap-2">
+        <span className="text-red-500 text-lg leading-none">▶</span>
+        <span className="text-sm font-semibold text-gray-200">Search YouTube</span>
+        <span className="text-xs text-gray-600">Pull a track straight from a video — converted to MP3 and ready to split.</span>
+      </div>
+      <form
+        className="flex gap-2"
+        onSubmit={(e) => {
+          e.preventDefault()
+          runSearch()
+        }}
+      >
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Artist + title, e.g. Everfall Crashing Down"
+          className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-jam-500"
+        />
+        <button
+          type="submit"
+          disabled={searching || !query.trim() || !!pulling}
+          className="px-4 py-2 bg-jam-600 hover:bg-jam-500 disabled:opacity-40 text-white rounded-lg text-sm font-medium transition-colors"
+        >
+          {searching ? 'Searching…' : 'Search'}
+        </button>
+      </form>
+      {searchError && <div className="text-xs text-red-400">{searchError}</div>}
+      {pullError && <div className="text-xs text-red-400">{pullError}</div>}
+
+      {pulling && (
+        <div className="bg-gray-800/60 border border-gray-700 rounded-lg p-3 space-y-2">
+          <div className="text-xs text-gray-300">{pulling.message}</div>
+          <div className="w-full bg-gray-900 rounded-full h-1.5 overflow-hidden">
+            <div className="bg-jam-500 h-full rounded-full transition-all duration-500" style={{ width: `${Math.max(pulling.progress, 2)}%` }} />
+          </div>
+          {pulling.jobId && (
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] text-gray-500 font-mono">job {pulling.jobId}</span>
+              <button
+                type="button"
+                onClick={async () => {
+                  if (pulling.jobId) {
+                    try {
+                      await fetch(`/api/jobs/${pulling.jobId}/cancel`, { method: 'POST' })
+                    } catch {
+                      // best-effort
+                    }
+                  }
+                }}
+                className="px-2 py-0.5 bg-red-900/40 hover:bg-red-800/60 border border-red-800 text-red-300 hover:text-red-200 rounded text-[11px] font-medium transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {results && results.length === 0 && !pulling && (
+        <div className="text-xs text-gray-500">No results for "{query}".</div>
+      )}
+      {results && results.length > 0 && !pulling && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          {results.map((r) => (
+            <button
+              key={r.video_id}
+              type="button"
+              onClick={() => pickResult(r)}
+              className="text-left flex gap-2 p-2 bg-gray-800/40 hover:bg-gray-800 border border-gray-800 hover:border-gray-700 rounded-lg transition-colors"
+              title="Download MP3 and use as input"
+            >
+              <div className="w-24 h-14 shrink-0 rounded overflow-hidden bg-gray-900 flex items-center justify-center">
+                {r.thumbnail ? (
+                  <img src={r.thumbnail} alt="" className="w-full h-full object-cover" />
+                ) : (
+                  <span className="text-[10px] text-gray-600">no thumb</span>
+                )}
+              </div>
+              <div className="flex-1 min-w-0 flex flex-col justify-center gap-0.5">
+                <span className="text-xs font-medium text-gray-200 line-clamp-2 leading-tight">{r.title}</span>
+                <span className="text-[11px] text-gray-500 truncate">
+                  {r.channel} {r.duration ? `· ${fmtDuration(r.duration)}` : ''}
+                </span>
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}) {
   const [searchParams, setSearchParams] = useSearchParams()
   const resumeJobId = searchParams.get('job') || ''
@@ -341,6 +539,7 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
               </li>
             </ul>
           </div>
+          <YouTubeSearch onPicked={handleFile} />
           <FileUpload accept=".flac,.mp3,.ogg,.wav,.m4a,.aac,.wma" label="Drop your audio file here" onFile={handleFile} />
           <div className="text-center">
             <button

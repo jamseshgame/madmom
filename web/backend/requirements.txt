@@ -13,3 +13,7 @@ torch>=2.0
 # so torchcodec must be present or every separation crashes at the final
 # stem-write step with "TorchCodec is required for save_with_torchcodec".
 torchcodec
+# YouTube search + download for the "search YouTube" upload flow. yt-dlp uses
+# the system ffmpeg for the mp3 extraction post-processor, which we already
+# install at the OS level.
+yt-dlp>=2024.3

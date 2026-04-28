@@ -31,6 +31,7 @@ class JobKind(str, Enum):
     SEPARATE = 'separate'
     MANUAL_STEMS = 'manual_stems'
     BEATMAP = 'beatmap'
+    YOUTUBE = 'youtube'
     OTHER = 'other'
 
 

@@ -10,6 +10,17 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.4',
+    date: '2026-04-28',
+    summary:
+      'Search YouTube and pull a track straight into the separation flow — no more downloading, converting, and dragging files in by hand.',
+    entries: [
+      { kind: 'added', text: 'YouTube search bar above the upload dropzone. Type artist + title, get the top 10 results with thumbnails, channel and duration. Click a result and the backend downloads the audio with yt-dlp, extracts a 320 kbps MP3 with ffmpeg, and feeds it straight into the separation flow as if you had dragged it in by hand.' },
+      { kind: 'added', text: 'YouTube downloads are tracked as Jobs (kind: youtube), so progress streams through the same SSE infrastructure as separations and survives a tab close — and the auto-delete TTL cleans up the temporary MP3 once it has been promoted into a Track.' },
+      { kind: 'added', text: 'Backend endpoints: GET /api/youtube/search, POST /api/youtube/download (returns job_id), GET /api/youtube/{id}/file (the MP3 once the job is done). Hard cap of 30 minutes per video to keep disk and CPU bounded.' },
+    ],
+  },
+  {
     version: '1.3.4',
     date: '2026-04-28',
     summary:
