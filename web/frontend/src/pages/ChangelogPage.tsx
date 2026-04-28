@@ -10,6 +10,16 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.2.4',
+    date: '2026-04-28',
+    summary:
+      'Failed and cancelled jobs can be deleted from the Studio Library. The ghost rows used to be unremovable until the cleanup loop swept them away an hour later.',
+    entries: [
+      { kind: 'added', text: 'Delete button on every non-active job ghost row in Studio Library. One click removes the job from the in-memory store, deletes the persisted JSON, and nukes its transient upload directory.' },
+      { kind: 'added', text: 'Backend DELETE /api/jobs/:id endpoint. Refuses to delete a queued/running job (cancel first) so a click never silently kills work in flight.' },
+    ],
+  },
+  {
     version: '1.2.3',
     date: '2026-04-28',
     summary:

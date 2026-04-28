@@ -74,3 +74,28 @@ async def cancel_job(job_id: str):
         raise HTTPException(404, 'Job not found')
     await job.cancel()
     return {'cancelled': True, 'status': job.status.value}
+
+
+@router.delete('/{job_id}')
+async def delete_job(job_id: str):
+    """Remove a job record entirely — drops it from the in-memory store, deletes
+    the persisted JSON, and nukes the transient upload directory if it's still
+    around. Refuses to delete a still-running job (cancel first)."""
+    import shutil
+
+    from ..services.jobs import JobStatus, _jobs
+
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(404, 'Job not found')
+    if job.status in (JobStatus.QUEUED, JobStatus.RUNNING):
+        raise HTTPException(409, 'Cancel the job before deleting')
+
+    if job.output_dir and job.output_dir.exists():
+        shutil.rmtree(job.output_dir, ignore_errors=True)
+    try:
+        job._persist_path().unlink(missing_ok=True)
+    except OSError:
+        pass
+    _jobs.pop(job_id, None)
+    return {'deleted': True}

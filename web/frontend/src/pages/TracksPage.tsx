@@ -1071,6 +1071,24 @@ export default function TracksPage() {
                     {isActive && (
                       <span className="text-xs font-mono text-gray-500">{j.progress}%</span>
                     )}
+                    {!isActive && (
+                      <button
+                        type="button"
+                        onClick={async (e) => {
+                          e.stopPropagation()
+                          try {
+                            await fetch(`/api/jobs/${j.id}`, { method: 'DELETE' })
+                            loadJobs()
+                          } catch {
+                            // best-effort; the row will refresh on next poll
+                          }
+                        }}
+                        className="px-2.5 py-1 bg-red-900/30 hover:bg-red-800/60 border border-red-800/50 hover:border-red-700 text-red-300 hover:text-red-200 rounded-md text-xs font-medium transition-colors"
+                        aria-label={`Delete job ${j.title || j.id}`}
+                      >
+                        Delete
+                      </button>
+                    )}
                     <span className="text-gray-600">→</span>
                   </div>
                 </div>
