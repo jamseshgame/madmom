@@ -40,13 +40,117 @@ def _load_generator():
     return mod
 
 
-# DIFFICULTIES from JamseshMenu
+# Per-difficulty config: name, sustain threshold, chord threshold, quantize,
+# min onset gap (seconds). Earlier versions fed the full onset stream into
+# every difficulty, so Easy ended up just as note-dense as Expert. The
+# `min_gap` column drops onsets that fall inside a sliding window per
+# difficulty, giving an actual density staircase.
 DIFFICULTIES = [
-    ('ExpertSingle', 0.3, 0.55, 16),
-    ('HardSingle', 0.4, 0.75, 8),
-    ('MediumSingle', 0.5, 1.0, 8),
-    ('EasySingle', 0.6, 1.0, 4),
+    ('ExpertSingle', 0.3, 0.55, 16, 0.0),
+    ('HardSingle', 0.4, 0.75, 8, 0.20),
+    ('MediumSingle', 0.5, 1.0, 8, 0.35),
+    ('EasySingle', 0.6, 1.0, 4, 0.55),
 ]
+
+
+# Stem name → Clone Hero chart section suffix used by the publish flow when
+# merging multiple per-stem beatmaps into one notes_fixed_slides.chart.
+# Stems not in this map are skipped from the merged chart.
+STEM_TO_SECTION_SUFFIX: dict[str, str] = {
+    'guitar': 'Single',
+    'drums': 'Drums',
+    'bass': 'DoubleBass',
+    'rhythm': 'DoubleBass',
+    'piano': 'Keyboard',
+}
+
+
+def _normalise_bpm(bpm: float) -> float:
+    """Constrain wildly off tempo estimates back into a typical band.
+
+    Beat trackers often double- or half-track on stems with weak transients
+    (sustained guitar chords being the canonical case). Snap obvious octave
+    errors back inside [70, 180] BPM so downstream tick math doesn't drift.
+    """
+    if bpm <= 0:
+        return 120.0
+    while bpm < 70 and bpm * 2 <= 200:
+        bpm *= 2
+    while bpm > 200 and bpm / 2 >= 50:
+        bpm /= 2
+    return bpm
+
+
+def merge_beatmap_charts(
+    chart_paths_with_stems: list[tuple[str, str]],
+    output_path: str,
+) -> dict:
+    """Merge per-stem beatmap charts into a single notes_fixed_slides.chart.
+
+    Each input chart was produced by generate_full_chart and contains
+    [ExpertSingle], [HardSingle], [MediumSingle], [EasySingle] sections.
+    For each beatmap, those sections get renamed based on the source stem
+    (drums → ExpertDrums / HardDrums / …) and concatenated into one chart
+    that shares the [Song] / [SyncTrack] / [Events] header from the first
+    beatmap with a recognised stem.
+
+    Returns a dict with `included` (list of stems that contributed) and
+    `skipped` (list of stems with no section mapping or missing chart).
+    """
+    song_block: str | None = None
+    sync_block: str | None = None
+    events_block: str | None = None
+    sections_out: list[tuple[str, str]] = []
+    included: list[str] = []
+    skipped: list[str] = []
+
+    for chart_path, stem in chart_paths_with_stems:
+        suffix = STEM_TO_SECTION_SUFFIX.get(stem)
+        if suffix is None:
+            skipped.append(stem)
+            continue
+        try:
+            with open(chart_path, 'r', encoding='utf-8', errors='replace') as f:
+                content = f.read()
+        except OSError:
+            skipped.append(stem)
+            continue
+
+        if song_block is None:
+            sm = re.search(r'\[Song\]\s*\{([^}]*)\}', content)
+            tk = re.search(r'\[SyncTrack\]\s*\{([^}]*)\}', content)
+            ev = re.search(r'\[Events\]\s*\{([^}]*)\}', content)
+            if sm:
+                song_block = sm.group(1)
+            if tk:
+                sync_block = tk.group(1)
+            if ev:
+                events_block = ev.group(1)
+
+        any_section = False
+        for difficulty in ('Expert', 'Hard', 'Medium', 'Easy'):
+            m = re.search(
+                r'\[' + difficulty + r'Single\]\s*\{([^}]*)\}',
+                content,
+            )
+            if m:
+                sections_out.append((f'{difficulty}{suffix}', m.group(1)))
+                any_section = True
+        if any_section:
+            included.append(stem)
+        else:
+            skipped.append(stem)
+
+    if not sections_out or song_block is None or sync_block is None:
+        return {'included': [], 'skipped': [s for _, s in chart_paths_with_stems]}
+
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(f'[Song]\n{{{song_block}}}\n')
+        f.write(f'[SyncTrack]\n{{{sync_block}}}\n')
+        f.write(f'[Events]\n{{{events_block or ""}}}\n')
+        for name, content in sections_out:
+            f.write(f'[{name}]\n{{{content}}}\n')
+    return {'included': included, 'skipped': skipped}
 
 
 def merge_charts(chart_paths: list[str], section_names: list[str], output_path: str):
@@ -139,30 +243,67 @@ async def generate_full_chart(
 
     onsets, bpm, onset_centroids, onset_spreads = await asyncio.to_thread(_run_analysis)
 
-    await report('analyse', 40, f'Found {len(onsets)} onsets, {bpm:.1f} BPM')
+    raw_bpm = bpm
+    bpm = _normalise_bpm(bpm)
+    if abs(bpm - raw_bpm) > 0.5:
+        await report('analyse', 40, f'Found {len(onsets)} onsets, {bpm:.1f} BPM (snapped from {raw_bpm:.1f})')
+    else:
+        await report('analyse', 40, f'Found {len(onsets)} onsets, {bpm:.1f} BPM')
 
     if len(onsets) == 0:
         await report('error', -1, 'No onsets detected in audio')
         return None
+
+    def _filter_by_min_gap(onsets_arr, centroids_arr, spreads_arr, min_gap):
+        """Keep onsets that are at least `min_gap` seconds apart. Returns
+        same shape arrays/lists, indexed in lockstep so centroids/spreads
+        stay aligned with their onsets."""
+        if min_gap <= 0:
+            return onsets_arr, centroids_arr, spreads_arr
+        keep_idx = []
+        last_t = -1e9
+        for i, t in enumerate(onsets_arr):
+            if t - last_t >= min_gap:
+                keep_idx.append(i)
+                last_t = t
+        if hasattr(onsets_arr, '__getitem__') and hasattr(onsets_arr, 'shape'):
+            return (
+                onsets_arr[keep_idx],
+                centroids_arr[keep_idx],
+                spreads_arr[keep_idx],
+            )
+        # numpy fallback / list
+        return (
+            [onsets_arr[i] for i in keep_idx],
+            [centroids_arr[i] for i in keep_idx],
+            [spreads_arr[i] for i in keep_idx],
+        )
 
     # ── Step 2: Generate each difficulty ──
     resolution = 192
     temp_charts = []
     section_names = []
 
-    for idx, (difficulty, threshold, chord_thresh, quantize) in enumerate(DIFFICULTIES):
+    for idx, (difficulty, threshold, chord_thresh, quantize, min_gap) in enumerate(DIFFICULTIES):
         label = difficulty.replace('Single', '')
         pct = 45 + idx * 12
-        await report('generate', pct, f'Generating {label}...')
+        diff_onsets, diff_centroids, diff_spreads = _filter_by_min_gap(
+            onsets, onset_centroids, onset_spreads, min_gap,
+        )
+        await report('generate', pct, f'Generating {label} — {len(diff_onsets)} onsets (min gap {min_gap:.2f}s)')
 
-        def _gen_difficulty(difficulty=difficulty, threshold=threshold, chord_thresh=chord_thresh, quantize=quantize):
-            frets_per_onset = gen.centroid_to_frets(onset_centroids, onset_spreads, chord_thresh)
+        def _gen_difficulty(
+            difficulty=difficulty, threshold=threshold, chord_thresh=chord_thresh,
+            quantize=quantize,
+            diff_onsets=diff_onsets, diff_centroids=diff_centroids, diff_spreads=diff_spreads,
+        ):
+            frets_per_onset = gen.centroid_to_frets(diff_centroids, diff_spreads, chord_thresh)
             notes = []
-            for i, onset_time in enumerate(onsets):
+            for i, onset_time in enumerate(diff_onsets):
                 frets = gen.validate_frets(frets_per_onset[i])
                 tick = gen.seconds_to_ticks(onset_time, bpm, resolution)
                 tick = gen.quantize_tick(tick, resolution, quantize)
-                sustain = gen.compute_sustain_ticks(i, onsets, bpm, resolution, threshold)
+                sustain = gen.compute_sustain_ticks(i, diff_onsets, bpm, resolution, threshold)
                 for fret in frets:
                     notes.append((tick, fret, 0 if fret == 7 else sustain))
 

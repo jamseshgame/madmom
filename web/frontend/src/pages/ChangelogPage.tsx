@@ -10,6 +10,18 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.5',
+    date: '2026-04-28',
+    summary:
+      'Multi-instrument charts on publish (drums + guitar + bass in one notes_fixed_slides.chart), tighter difficulty staircase, and an octave-error guard on beat detection.',
+    entries: [
+      { kind: 'fixed', text: 'Publish to Game now merges every beatmap on the track into a single notes_fixed_slides.chart instead of shipping just the most recent one. Each per-stem beatmap is renamed into the correct Clone Hero section based on its source stem (guitar → [*Single], drums → [*Drums], bass → [*DoubleBass], piano → [*Keyboard]). Vocals and "other" stems are skipped from the merged chart. Old beatmaps already on a track work as-is.' },
+      { kind: 'fixed', text: 'Easy / Medium / Hard difficulties were as note-dense as Expert because every difficulty was fed the same onset list. Each tier now applies a min-onset-gap filter (Hard 0.20s, Medium 0.35s, Easy 0.55s) so the density actually scales — Easy ends up at roughly one note per beat instead of four.' },
+      { kind: 'fixed', text: 'Beat-tracker octave errors on weak-transient stems (sustained guitar chords are the canonical case) are now caught: any detected BPM under 70 is doubled, anything over 200 is halved. The progress log says "snapped from X" when a correction fires so you can spot it in the event log.' },
+      { kind: 'changed', text: 'Publish result panel reports which stems contributed to the merged chart and which were skipped, so you can see at a glance whether drums actually made it in.' },
+    ],
+  },
+  {
     version: '1.4',
     date: '2026-04-28',
     summary:

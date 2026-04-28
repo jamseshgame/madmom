@@ -314,7 +314,14 @@ function InlinePublish({ track }: { track: Track }) {
   const [result, setResult] = useState<{
     commitUrl: string
     folder: string
-    chart: { found: boolean; source: string | null; published_as?: string; beatmap_id?: string }
+    chart: {
+      found: boolean
+      source: string | null
+      published_as?: string
+      beatmap_id?: string
+      included_stems?: string[]
+      skipped_stems?: string[]
+    }
   } | null>(null)
   const [error, setError] = useState('')
 
@@ -489,8 +496,11 @@ function InlinePublish({ track }: { track: Track }) {
             {result.chart.found ? (
               <p className="text-xs text-gray-500">
                 Included <span className="font-mono text-gray-300">{result.chart.published_as || 'notes_fixed_slides.chart'}</span>
-                {result.chart.source && result.chart.source !== (result.chart.published_as || 'notes_fixed_slides.chart') && (
-                  <span className="text-gray-600"> (from {result.chart.source})</span>
+                {result.chart.included_stems && result.chart.included_stems.length > 0 && (
+                  <span className="text-gray-600"> · stems: {result.chart.included_stems.join(', ')}</span>
+                )}
+                {result.chart.skipped_stems && result.chart.skipped_stems.length > 0 && (
+                  <span className="text-amber-500/80"> · skipped: {result.chart.skipped_stems.join(', ')}</span>
                 )}
               </p>
             ) : (

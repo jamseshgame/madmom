@@ -524,17 +524,27 @@ async def publish_track_to_game(
             )
             await proc.communicate()
 
-        # Pull the latest beatmap's chart into the publish folder. The Jamsesh
-        # game expects the legacy "notes_fixed_slides.chart" filename — the
-        # one bin/JamseshMenu emits — so we always write under that name
-        # regardless of the source filename inside the beatmap directory.
-        chart_status: dict = {'found': False, 'source': None}
+        # Merge all of the track's beatmaps into one notes_fixed_slides.chart.
+        # Each beatmap was generated from a single stem and writes everything
+        # into [*Single] sections — for a multi-stem chart, we rename those
+        # sections per stem (drums → [*Drums], bass → [*DoubleBass], etc.) so
+        # the game can route each instrument correctly. Stems without a known
+        # mapping (vocals, other) get skipped from the merged chart.
+        from ..services.chart_generator import merge_beatmap_charts
+
+        chart_status: dict = {'found': False, 'source': None, 'included_stems': [], 'skipped_stems': []}
         if track.beatmaps:
-            latest = max(track.beatmaps, key=lambda b: b.get('generated_at', 0))
-            bm_dir = track.beatmaps_dir / latest.get('id', '')
-            if bm_dir.exists():
-                # Prefer notes.chart (web generator output), then notes_fixed_slides
-                # (legacy CLI output), then any *.chart file in the directory.
+            # Sort by generated_at so newer beatmaps win when stems repeat
+            ordered = sorted(track.beatmaps, key=lambda b: b.get('generated_at', 0), reverse=True)
+            seen_stems: set[str] = set()
+            charts_to_merge: list[tuple[str, str]] = []
+            for bm in ordered:
+                stem = bm.get('stem', '')
+                if stem in seen_stems:
+                    continue
+                bm_dir = track.beatmaps_dir / bm.get('id', '')
+                if not bm_dir.exists():
+                    continue
                 src_chart = None
                 for candidate in ('notes.chart', 'notes_fixed_slides.chart'):
                     p = bm_dir / candidate
@@ -543,13 +553,23 @@ async def publish_track_to_game(
                         break
                 if src_chart is None:
                     src_chart = next(iter(bm_dir.glob('*.chart')), None)
-                if src_chart is not None:
-                    shutil.copy2(str(src_chart), str(tmp_dir / 'notes_fixed_slides.chart'))
+                if src_chart is None:
+                    continue
+                seen_stems.add(stem)
+                charts_to_merge.append((str(src_chart), stem))
+
+            if charts_to_merge:
+                merge_result = merge_beatmap_charts(
+                    charts_to_merge,
+                    str(tmp_dir / 'notes_fixed_slides.chart'),
+                )
+                if merge_result['included']:
                     chart_status = {
                         'found': True,
-                        'source': src_chart.name,
                         'published_as': 'notes_fixed_slides.chart',
-                        'beatmap_id': latest.get('id'),
+                        'included_stems': merge_result['included'],
+                        'skipped_stems': merge_result['skipped'],
+                        'source': f'{len(merge_result["included"])}-stem merge',
                     }
 
         # Write song.ini
