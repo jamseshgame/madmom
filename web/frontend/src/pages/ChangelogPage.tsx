@@ -10,6 +10,17 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.6.1',
+    date: '2026-04-29',
+    summary:
+      'Create a fresh tutorial straight from the home page — no audio file or stem separation required.',
+    entries: [
+      { kind: 'added', text: 'Create a blank tutorial — no audio file link sits below the stems-only fallback on Studio Library home. Modal asks for title, charter, BPM (40–240) and duration (30–1800 s) and POSTs to the new /api/tracks/blank-tutorial endpoint.' },
+      { kind: 'added', text: 'Backend POST /api/tracks/blank-tutorial uses ffmpeg lavfi anullsrc to synthesise a silent OGG of the requested length, persists it as a Track + a single beatmap whose notes.chart already includes empty [Events] / [ExpertSingle] / [TutorialScript] sections and a SyncTrack with the chosen BPM. song.ini gets [tutorial] tutorial=True at the start.' },
+      { kind: 'added', text: 'On submit the user is navigated straight to /edit/<track>/<beatmap> — tutorial mode is already on and the runway is empty so they can drop VOs / STEPs and generate TTS without going through stem separation.' },
+    ],
+  },
+  {
     version: '1.6',
     date: '2026-04-28',
     summary:

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import FileUpload from './FileUpload.tsx'
 import ProgressTracker from './ProgressTracker.tsx'
 import StemResult from './StemResult.tsx'
@@ -31,6 +31,138 @@ const STEM_META: Record<string, { label: string; color: string }> = {
   guitar: { label: 'Guitar', color: 'text-orange-400' },
   piano: { label: 'Piano', color: 'text-violet-400' },
   other: { label: 'Other', color: 'text-blue-400' },
+}
+
+function BlankTutorialButton() {
+  const navigate = useNavigate()
+  const [open, setOpen] = useState(false)
+  const [name, setName] = useState('Tutorial')
+  const [artist, setArtist] = useState('Jamsesh')
+  const [bpm, setBpm] = useState(120)
+  const [duration, setDuration] = useState(300)
+  const [creating, setCreating] = useState(false)
+  const [error, setError] = useState('')
+
+  const submit = async () => {
+    setCreating(true)
+    setError('')
+    try {
+      const fd = new FormData()
+      fd.append('name', name.trim() || 'Tutorial')
+      fd.append('artist', artist.trim() || 'Jamsesh')
+      fd.append('bpm', String(bpm))
+      fd.append('duration_seconds', String(duration))
+      const res = await fetch('/api/tracks/blank-tutorial', { method: 'POST', body: fd })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || `Failed (${res.status})`)
+      }
+      const data = await res.json()
+      setOpen(false)
+      navigate(`/edit/${data.track_id}/${data.beatmap_id}`)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="text-sm text-gray-500 hover:text-purple-300 underline-offset-2 hover:underline transition-colors"
+      >
+        Create a blank tutorial — no audio file
+      </button>
+      <p className="text-[11px] text-gray-700 mt-1">
+        Empty chart with <span className="text-gray-500 font-mono">[TutorialScript]</span> ready for VOs and steps.
+      </p>
+
+      {open && (
+        <div
+          className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center px-4"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setOpen(false)
+          }}
+        >
+          <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-md p-5 space-y-4">
+            <div>
+              <h3 className="text-lg font-semibold text-purple-300">New blank tutorial</h3>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Creates a track with a silent placeholder song.ogg + an empty
+                beatmap. You'll land in the editor with tutorial mode on.
+              </p>
+            </div>
+            <label className="block">
+              <span className="text-xs text-gray-400">Title</span>
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Tutorial"
+                autoFocus
+                className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-purple-500"
+              />
+            </label>
+            <label className="block">
+              <span className="text-xs text-gray-400">Author / charter</span>
+              <input
+                type="text"
+                value={artist}
+                onChange={(e) => setArtist(e.target.value)}
+                placeholder="Jamsesh"
+                className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-purple-500"
+              />
+            </label>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="block">
+                <span className="text-xs text-gray-400">BPM</span>
+                <input
+                  type="number"
+                  min={40}
+                  max={240}
+                  value={bpm}
+                  onChange={(e) => setBpm(Math.max(40, Math.min(240, Number(e.target.value) || 120)))}
+                  className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-purple-500"
+                />
+              </label>
+              <label className="block">
+                <span className="text-xs text-gray-400">Duration (seconds)</span>
+                <input
+                  type="number"
+                  min={30}
+                  max={1800}
+                  step={30}
+                  value={duration}
+                  onChange={(e) => setDuration(Math.max(30, Math.min(1800, Number(e.target.value) || 300)))}
+                  className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-purple-500"
+                />
+              </label>
+            </div>
+            {error && <div className="text-xs text-red-400">{error}</div>}
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                onClick={() => setOpen(false)}
+                disabled={creating}
+                className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-md text-sm transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submit}
+                disabled={creating || !name.trim()}
+                className="px-4 py-1.5 bg-purple-700 hover:bg-purple-600 disabled:opacity-40 text-white rounded-md text-sm font-medium transition-colors"
+              >
+                {creating ? 'Creating…' : 'Create + open editor'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  )
 }
 
 interface YouTubeResult {
@@ -556,6 +688,9 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
             <p className="text-[11px] text-gray-700 mt-1">
               We'll mux the stems together to synthesise song.ogg.
             </p>
+            <div className="mt-4 pt-4 border-t border-gray-800/60">
+              <BlankTutorialButton />
+            </div>
           </div>
         </>
       )}

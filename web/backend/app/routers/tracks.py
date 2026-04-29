@@ -4,6 +4,7 @@ import asyncio
 import json
 import shutil
 import tempfile
+import uuid
 from pathlib import Path
 
 from typing import Optional
@@ -472,6 +473,127 @@ async def rename_beatmap(
     if record is None:
         raise HTTPException(404, 'Beatmap not found, or song_name was empty')
     return record
+
+
+@router.post('/blank-tutorial')
+async def create_blank_tutorial(
+    name: str = Form('Tutorial'),
+    artist: str = Form('Jamsesh'),
+    bpm: int = Form(120),
+    duration_seconds: int = Form(300),
+):
+    """Spin up an empty tutorial — a Track holding a single beatmap with a
+    silent placeholder song.ogg + an empty notes.chart whose [TutorialScript]
+    section is already wired. The user lands in the editor with nothing but
+    VO/STEP authoring to do.
+    """
+    name = (name or 'Tutorial').strip() or 'Tutorial'
+    artist = (artist or 'Jamsesh').strip() or 'Jamsesh'
+    bpm = max(40, min(int(bpm or 120), 240))
+    duration_seconds = max(30, min(int(duration_seconds or 300), 30 * 60))
+
+    upload_dir = Path(settings.upload_dir)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix='blank_tut_', dir=str(upload_dir)))
+
+    try:
+        # Silent placeholder so the editor's audio scrubber + ResizeObserver
+        # have something with a defined duration to bind to. Click-track was
+        # tempting but would ship in the published folder; silent keeps it
+        # neutral.
+        stems_src = staging / 'stems'
+        stems_src.mkdir()
+        silent_ogg = stems_src / 'song.ogg'
+        proc = await asyncio.create_subprocess_exec(
+            'ffmpeg', '-y',
+            '-f', 'lavfi', '-i', f'anullsrc=r=44100:cl=stereo',
+            '-t', str(duration_seconds),
+            '-c:a', 'libvorbis', '-q:a', '3',
+            str(silent_ogg),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _, err = await proc.communicate()
+        if proc.returncode != 0 or not silent_ogg.exists():
+            raise HTTPException(500, f'ffmpeg silent-ogg failed: {err.decode("utf-8", errors="replace")[-300:]}')
+
+        # Persist as a Track so it appears in the library list.
+        from ..services.tracks import create_track as _create_track
+        track = _create_track(
+            name=name,
+            stems={'song': 'song.ogg'},
+            source_stems_dir=stems_src,
+            model='manual',
+            output_format='ogg',
+            artist=artist,
+        )
+
+        # Build an empty chart + the same silent ogg + a starter song.ini
+        # under a fresh beatmap directory.
+        beatmap_id = uuid.uuid4().hex[:12]
+        bm_src = staging / 'bm'
+        bm_src.mkdir()
+        shutil.copy2(silent_ogg, bm_src / 'song.ogg')
+        bpm_milli = int(bpm * 1000)
+        chart_text = (
+            '[Song]\n{\n'
+            f'  Name = "{name}"\n'
+            f'  Artist = "{artist}"\n'
+            '  Charter = "Jamsesh"\n'
+            '  Offset = 0\n'
+            '  Resolution = 192\n'
+            '  Player2 = bass\n'
+            '  Difficulty = 0\n'
+            '  PreviewStart = 0\n'
+            '  PreviewEnd = 0\n'
+            '  Genre = "tutorial"\n'
+            '  MediaType = "cd"\n'
+            '  MusicStream = "song.ogg"\n'
+            '}\n'
+            '[SyncTrack]\n{\n'
+            '  0 = TS 4\n'
+            f'  0 = B {bpm_milli}\n'
+            '}\n'
+            '[Events]\n{\n}\n'
+            '[ExpertSingle]\n{\n}\n'
+            '[TutorialScript]\n{\n}\n'
+        )
+        (bm_src / 'notes.chart').write_text(chart_text, encoding='utf-8')
+
+        ini_lines = [
+            '[song]',
+            f'name = {name}',
+            f'artist = {artist}',
+            'album = ',
+            'genre = tutorial',
+            'year = ',
+            'song_length = ' + str(duration_seconds * 1000),
+            'charter = Jamsesh',
+            'preview_start_time = 0',
+            'delay = 0',
+            'loading_phrase =',
+            '',
+            '[tutorial]',
+            'tutorial = True',
+        ]
+        (bm_src / 'song.ini').write_text('\n'.join(ini_lines) + '\n', encoding='utf-8')
+
+        from ..services.tracks import add_beatmap_record as _add_bm
+        _add_bm(
+            track_id=track.id,
+            beatmap_id=beatmap_id,
+            stem='guitar',  # nominal — tutorial chart drives playback via [TutorialScript]
+            folder_name=f'{artist} - {name}',
+            song_name=name,
+            source_dir=bm_src,
+        )
+
+        return {
+            'track_id': track.id,
+            'beatmap_id': beatmap_id,
+            'editor_url': f'/edit/{track.id}/{beatmap_id}',
+        }
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 @router.post('/{track_id}/publish-game')
