@@ -3,7 +3,7 @@ import TracksPage from './pages/TracksPage.tsx'
 import GameSongsPage from './pages/GameSongsPage.tsx'
 import ChangelogPage from './pages/ChangelogPage.tsx'
 import BeatmapEditor from './components/BeatmapEditor.tsx'
-import { VersionBanner, VersionFooter } from './components/VersionStatus.tsx'
+import { VersionBanner } from './components/VersionStatus.tsx'
 import { logout } from './components/AuthGate.tsx'
 import { STUDIO_VERSION } from './version.ts'
 
@@ -93,10 +93,8 @@ export default function App() {
           {' '}&middot; Powered by madmom
         </span>
         <span className="text-gray-700">·</span>
-        <VersionFooter />
-        <span className="text-gray-700">·</span>
         <Link to="/changelog" className="text-gray-500 hover:text-jam-300 transition-colors">
-          Changelog
+          Changelog &amp; dependencies
         </Link>
       </footer>
     </div>

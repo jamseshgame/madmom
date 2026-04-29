@@ -1,3 +1,4 @@
+import { VersionsTable } from '../components/VersionStatus.tsx'
 import { STUDIO_VERSION } from '../version.ts'
 
 type Entry = { kind: 'added' | 'changed' | 'fixed'; text: string }
@@ -9,6 +10,17 @@ type Release = {
 }
 
 const RELEASES: Release[] = [
+  {
+    version: '1.6.4',
+    date: '2026-04-29',
+    summary:
+      'Open-source dependencies table on the Changelog page — every package, installed vs PyPI latest, license, and what we use it for.',
+    entries: [
+      { kind: 'added', text: 'Changelog page now opens with a live Open-source dependencies table covering madmom, demucs, chatterbox-tts, yt-dlp, torch / torchaudio / torchcodec, Pillow, fastapi, uvicorn, httpx, numpy, scipy. Each row pings PyPI for the latest release and renders Up to date / Update available / PyPI unreachable accordingly. Package names link to the PyPI page.' },
+      { kind: 'changed', text: 'Backend /api/versions returns a packages[] array driven by a single PACKAGES list in routers/versions.py — to track another dep, add one row there. Legacy madmom / demucs top-level keys retained so the existing VersionBanner keeps working.' },
+      { kind: 'changed', text: 'Footer no longer prints the madmom / demucs version line — it lived next to the Changelog link and duplicated info that now belongs to the dependencies table. Footer just links to "Changelog & dependencies" instead.' },
+    ],
+  },
   {
     version: '1.6.3',
     date: '2026-04-29',
@@ -293,6 +305,8 @@ export default function ChangelogPage() {
           What's new in Jamsesh Studio. You're on v{STUDIO_VERSION}.
         </p>
       </div>
+
+      <VersionsTable />
 
       {RELEASES.map((r) => (
         <section key={r.version} className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">
