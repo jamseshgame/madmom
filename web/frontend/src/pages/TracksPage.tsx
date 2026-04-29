@@ -80,9 +80,12 @@ function BeatmapPanel({
   onClose: () => void
   onGenerated?: () => void
 }) {
+  const navigate = useNavigate()
   const [schema, setSchema] = useState<Record<string, SongIniField>>({})
   const [values, setValues] = useState<Record<string, unknown>>({})
   const [generating, setGenerating] = useState(false)
+  const [creatingEmpty, setCreatingEmpty] = useState(false)
+  const [emptyError, setEmptyError] = useState('')
   const [jobId, setJobId] = useState('')
   const [progress, setProgress] = useState(0)
   const [message, setMessage] = useState('')
@@ -247,13 +250,46 @@ function BeatmapPanel({
 
         <div className="p-5 border-t border-gray-800 space-y-3">
           {!done && !error && (
-            <button
-              onClick={handleGenerate}
-              disabled={generating}
-              className="px-6 py-2.5 bg-jam-600 hover:bg-jam-500 disabled:opacity-50 text-white rounded-lg font-medium transition-colors"
-            >
-              {generating ? 'Generating...' : 'Generate Beatmap'}
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={handleGenerate}
+                disabled={generating || creatingEmpty}
+                className="px-6 py-2.5 bg-jam-600 hover:bg-jam-500 disabled:opacity-50 text-white rounded-lg font-medium transition-colors"
+              >
+                {generating ? 'Generating...' : 'Generate Beatmap'}
+              </button>
+              <button
+                onClick={async () => {
+                  setCreatingEmpty(true)
+                  setEmptyError('')
+                  try {
+                    const fd = new FormData()
+                    fd.append('stem', stem)
+                    const res = await fetch(`/api/tracks/${track.id}/empty-beatmap`, {
+                      method: 'POST',
+                      body: fd,
+                    })
+                    if (!res.ok) {
+                      const err = await res.json().catch(() => ({}))
+                      throw new Error(err.detail || `Failed (${res.status})`)
+                    }
+                    const data = await res.json()
+                    if (onGenerated) onGenerated()
+                    navigate(`/edit/${data.track_id}/${data.beatmap_id}`)
+                  } catch (e) {
+                    setEmptyError((e as Error).message)
+                  } finally {
+                    setCreatingEmpty(false)
+                  }
+                }}
+                disabled={generating || creatingEmpty}
+                className="px-4 py-2.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 border border-gray-700 hover:border-gray-600 text-gray-200 rounded-lg text-sm font-medium transition-colors"
+                title="Skip beat detection — open the editor with an empty chart"
+              >
+                {creatingEmpty ? 'Creating…' : 'Open empty editor →'}
+              </button>
+              {emptyError && <span className="text-xs text-red-400">{emptyError}</span>}
+            </div>
           )}
 
           {generating && jobId && (
@@ -1233,6 +1269,35 @@ export default function TracksPage() {
                       </>
                     )}
                   </div>
+                  {/* Discoverability hint: when this stem has no beatmaps
+                      yet and nothing is in flight, surface an inline link
+                      to the empty editor right where the user is looking. */}
+                  {stem !== 'song'
+                    && !inlineBmJobs[stem]
+                    && (selectedTrack.beatmaps || []).every((bm) => bm.stem !== stem) && (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            const fd = new FormData()
+                            fd.append('stem', stem)
+                            const res = await fetch(`/api/tracks/${selectedTrack.id}/empty-beatmap`, { method: 'POST', body: fd })
+                            if (!res.ok) {
+                              const err = await res.json().catch(() => ({}))
+                              throw new Error(err.detail || `Failed (${res.status})`)
+                            }
+                            const data = await res.json()
+                            navigate(`/edit/${data.track_id}/${data.beatmap_id}`)
+                          } catch (e) {
+                            setBatchError((e as Error).message)
+                          }
+                        }}
+                        className="text-[11px] text-gray-500 hover:text-jam-300 underline-offset-2 hover:underline transition-colors text-center"
+                        title="Skip beat detection — open the editor with an empty chart"
+                      >
+                        or open empty editor →
+                      </button>
+                    )}
                   {inlineBmJobs[stem] && (
                     <InlineBeatmapProgress
                       jobId={inlineBmJobs[stem]}

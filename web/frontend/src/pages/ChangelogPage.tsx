@@ -11,6 +11,17 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.6.6',
+    date: '2026-04-29',
+    summary:
+      'Open the beatmap editor on a track that has no beatmap yet — without first running auto chart generation.',
+    entries: [
+      { kind: 'added', text: 'Stem cards on the track detail view now show an "or open empty editor →" link when there are no beatmaps for that stem yet. One click creates a beatmap with an empty notes.chart (just [Song]/[SyncTrack] with the chosen BPM, empty [Events] and [ExpertSingle]) and lands you in /edit/<track>/<beatmap>.' },
+      { kind: 'added', text: 'Same option as a secondary button in the advanced settings (⚙) modal alongside Generate Beatmap.' },
+      { kind: 'added', text: 'Backend POST /api/tracks/:id/empty-beatmap form fields stem (default guitar), bpm (default 120), tutorial (bool). Reuses the requested stem\'s audio as the beatmap\'s song.ogg, transcoding to OGG when needed. The new beatmap appears as a chip on the stem card immediately.' },
+    ],
+  },
+  {
     version: '1.6.5',
     date: '2026-04-29',
     summary:

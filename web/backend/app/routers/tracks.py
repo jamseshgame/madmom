@@ -475,6 +475,138 @@ async def rename_beatmap(
     return record
 
 
+@router.post('/{track_id}/empty-beatmap')
+async def create_empty_beatmap_for_track(
+    track_id: str,
+    stem: str = Form('guitar'),
+    bpm: int = Form(120),
+    tutorial: bool = Form(False),
+):
+    """Create a beatmap on an existing track with no auto-generated notes —
+    just an empty notes.chart, so the user can land in the editor and author
+    from scratch (manual charting, tutorial-only beatmap, etc.).
+
+    The chosen stem's audio is reused as the beatmap's song.ogg.
+    """
+    track = get_track(track_id)
+    if not track:
+        raise HTTPException(404, 'Track not found')
+
+    bpm = max(40, min(int(bpm or 120), 240))
+    artist = (track.artist or 'Unknown').strip() or 'Unknown'
+    base_name = (track.name or 'Untitled').strip() or 'Untitled'
+    bm_name = f'{base_name} (empty)'
+
+    upload_dir = Path(settings.upload_dir)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix='empty_bm_', dir=str(upload_dir)))
+    try:
+        bm_src = staging / 'bm'
+        bm_src.mkdir()
+
+        # Resolve the stem's filename (or fall back to the master mix) and
+        # copy it in as the beatmap's song.ogg so the editor's audio scrubber
+        # has something to play.
+        candidate_stems = [stem, 'song']
+        src_audio: Path | None = None
+        for s in candidate_stems:
+            fname = track.stems.get(s)
+            if not fname:
+                continue
+            p = track.stems_dir / fname
+            if p.exists():
+                src_audio = p
+                break
+        if src_audio is None:
+            raise HTTPException(404, f'No audio found for stem "{stem}" on this track')
+
+        # If the stem isn't already an OGG, transcode on the way in
+        if src_audio.suffix.lower() == '.ogg':
+            shutil.copy2(str(src_audio), str(bm_src / 'song.ogg'))
+        else:
+            proc = await asyncio.create_subprocess_exec(
+                'ffmpeg', '-y', '-i', str(src_audio),
+                '-vn', '-c:a', 'libvorbis', '-q:a', '6',
+                str(bm_src / 'song.ogg'),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            _, err = await proc.communicate()
+            if proc.returncode != 0 or not (bm_src / 'song.ogg').exists():
+                raise HTTPException(500, f'ffmpeg transcode failed: {err.decode("utf-8", errors="replace")[-300:]}')
+
+        # Empty chart with the user's BPM. [TutorialScript] placeholder
+        # appears whenever tutorial=True so the editor lands with the
+        # tutorial sidebar already on.
+        bpm_milli = int(bpm * 1000)
+        chart_text = (
+            '[Song]\n{\n'
+            f'  Name = "{bm_name}"\n'
+            f'  Artist = "{artist}"\n'
+            '  Charter = "Jamsesh"\n'
+            '  Offset = 0\n'
+            '  Resolution = 192\n'
+            '  Player2 = bass\n'
+            '  Difficulty = 0\n'
+            '  PreviewStart = 0\n'
+            '  PreviewEnd = 0\n'
+            f'  Genre = "{(track.genre or "").strip()}"\n'
+            '  MediaType = "cd"\n'
+            '  MusicStream = "song.ogg"\n'
+            '}\n'
+            '[SyncTrack]\n{\n'
+            '  0 = TS 4\n'
+            f'  0 = B {bpm_milli}\n'
+            '}\n'
+            '[Events]\n{\n}\n'
+            '[ExpertSingle]\n{\n}\n'
+            + ('[TutorialScript]\n{\n}\n' if tutorial else '')
+        )
+        (bm_src / 'notes.chart').write_text(chart_text, encoding='utf-8')
+
+        ini_lines = [
+            '[song]',
+            f'name = {bm_name}',
+            f'artist = {artist}',
+            f'album = {(track.album or "").strip()}',
+            f'genre = {(track.genre or "").strip()}',
+            f'year = {(track.year or "").strip()}',
+            'charter = Jamsesh',
+            'preview_start_time = 0',
+            'delay = 0',
+            'loading_phrase =',
+        ]
+        if tutorial:
+            ini_lines += ['', '[tutorial]', 'tutorial = True']
+        (bm_src / 'song.ini').write_text('\n'.join(ini_lines) + '\n', encoding='utf-8')
+
+        beatmap_id = uuid.uuid4().hex[:12]
+        safe_artist = artist
+        for ch in ['/', '\\', ':', '"', '<', '>', '|', '?', '*']:
+            safe_artist = safe_artist.replace(ch, '-')
+        safe_title = bm_name
+        for ch in ['/', '\\', ':', '"', '<', '>', '|', '?', '*']:
+            safe_title = safe_title.replace(ch, '-')
+        folder_name = f'{safe_artist} - {safe_title}'
+
+        from ..services.tracks import add_beatmap_record as _add_bm
+        _add_bm(
+            track_id=track.id,
+            beatmap_id=beatmap_id,
+            stem=stem,
+            folder_name=folder_name,
+            song_name=bm_name,
+            source_dir=bm_src,
+        )
+
+        return {
+            'track_id': track.id,
+            'beatmap_id': beatmap_id,
+            'editor_url': f'/edit/{track.id}/{beatmap_id}',
+        }
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 @router.post('/blank-tutorial')
 async def create_blank_tutorial(
     name: str = Form('Tutorial'),
