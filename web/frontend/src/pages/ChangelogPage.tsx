@@ -10,6 +10,18 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.6.3',
+    date: '2026-04-29',
+    summary:
+      'Zoomable timeline strip in the editor header — every VO / STEP / MUSIC event as a colour-coded draggable block over the full song duration.',
+    entries: [
+      { kind: 'added', text: 'Editor header now hosts a full-song timeline filling the empty space between the title and Save. VO events render as cyan tick marks with a ▶ pill, STEP as purple ticks with a ⚑ pill, MUSIC as orange bands stretched across the segment\'s clip duration. Click anywhere on the strip to seek; the runway scrolls to that moment.' },
+      { kind: 'added', text: 'Wheel zooms (around the cursor); Shift+wheel pans. Click+drag the strip background to scrub. Click+drag a block to reposition its tick — snap is the same beat fraction the runway uses (1/4, 1/8, 1/16, 1/32 selected in the sidebar).' },
+      { kind: 'added', text: 'Beat grid drawn under the blocks; bar lines (every 4 beats) are stronger than beat lines. Time labels (m:ss) along the top adapt their stride to the current zoom so they don\'t overlap.' },
+      { kind: 'changed', text: 'Editor header height grew from 56px to 80px to fit the timeline. Title block compacted to a fixed 176px to leave maximum room for the strip.' },
+    ],
+  },
+  {
     version: '1.6.2',
     date: '2026-04-29',
     summary:

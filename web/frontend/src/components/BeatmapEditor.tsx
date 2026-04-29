@@ -350,6 +350,311 @@ interface BeatmapMeta {
   stem: string
 }
 
+// ── TutorialTimeline ────────────────────────────────────────────────────────
+// Horizontal strip in the editor header showing every tutorial event as a
+// colour-coded block over the song's full duration. Zoomable via wheel,
+// scrubbable by clicking the track, blocks draggable to reposition tick.
+//
+// Events are rendered in three layers visually:
+//   • MUSIC (orange) — wide, spans the segment's clip duration
+//   • STEP  (purple) — full-height marker with a flag icon
+//   • VO    (cyan)   — full-height marker with a ▶ icon
+
+interface TimelineProps {
+  duration: number
+  currentTime: number
+  bpm: number
+  resolution: number
+  events: TutorialEvent[]
+  snapDivisor: number
+  onSeek: (sec: number) => void
+  onMoveEvent: (id: string, tick: number) => void
+}
+
+function TutorialTimeline({
+  duration,
+  currentTime,
+  bpm,
+  resolution,
+  events,
+  snapDivisor,
+  onSeek,
+  onMoveEvent,
+}: TimelineProps) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [width, setWidth] = useState(600)
+  const [view, setView] = useState({ start: 0, end: Math.max(duration, 1) })
+  const dragRef = useRef<{ id: string; offset: number; lastTick: number } | null>(null)
+  const [scrubbing, setScrubbing] = useState(false)
+
+  // Sync view to duration whenever it changes (e.g. song.ogg loaded)
+  useEffect(() => {
+    setView((v) => {
+      const realEnd = Math.max(duration, 1)
+      // If we'd previously fit the whole song, keep showing the whole song.
+      if (v.end <= 0 || v.end > realEnd || (v.start === 0 && v.end <= realEnd && Math.abs((v.end - v.start) - realEnd) < 0.01)) {
+        return { start: 0, end: realEnd }
+      }
+      return v
+    })
+  }, [duration])
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const update = () => setWidth(el.clientWidth)
+    update()
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  const span = Math.max(0.001, view.end - view.start)
+  const tickToSec = (t: number) => (t / resolution) * (60 / bpm)
+  const secToTick = (s: number) => Math.max(0, Math.round((s * bpm * resolution) / 60))
+  const secToX = (s: number) => ((s - view.start) / span) * width
+  const xToSec = (x: number) => view.start + (x / Math.max(1, width)) * span
+
+  const handleClickTrack = (e: React.MouseEvent) => {
+    const rect = containerRef.current!.getBoundingClientRect()
+    onSeek(Math.max(0, Math.min(duration, xToSec(e.clientX - rect.left))))
+  }
+
+  const handleWheel = (e: React.WheelEvent) => {
+    e.preventDefault()
+    const rect = containerRef.current!.getBoundingClientRect()
+    const cursorSec = xToSec(e.clientX - rect.left)
+    if (e.shiftKey) {
+      // Shift+wheel → pan
+      const delta = (e.deltaY / 200) * span
+      let s = view.start + delta
+      let en = view.end + delta
+      if (s < 0) { en -= s; s = 0 }
+      if (en > duration) { s -= en - duration; en = duration }
+      setView({ start: Math.max(0, s), end: Math.min(duration, en) })
+      return
+    }
+    // Wheel → zoom around cursor
+    const factor = e.deltaY > 0 ? 1.25 : 0.8
+    const newSpan = Math.max(1.0, Math.min(duration, span * factor))
+    const ratio = (cursorSec - view.start) / span
+    const newStart = Math.max(0, Math.min(duration - newSpan, cursorSec - ratio * newSpan))
+    setView({ start: newStart, end: newStart + newSpan })
+  }
+
+  // Drag a block to reposition its tick. Listens at document level so the
+  // pointer can leave the strip without losing the drag.
+  useEffect(() => {
+    if (!dragRef.current && !scrubbing) return
+    const move = (ev: MouseEvent) => {
+      const rect = containerRef.current?.getBoundingClientRect()
+      if (!rect) return
+      const sec = xToSec(ev.clientX - rect.left)
+      if (scrubbing) {
+        onSeek(Math.max(0, Math.min(duration, sec)))
+        return
+      }
+      if (!dragRef.current) return
+      const targetSec = sec - dragRef.current.offset
+      const rawTick = secToTick(Math.max(0, targetSec))
+      const snapTicks = Math.max(1, Math.round(resolution / snapDivisor))
+      const snapped = Math.round(rawTick / snapTicks) * snapTicks
+      if (snapped !== dragRef.current.lastTick) {
+        dragRef.current.lastTick = snapped
+        onMoveEvent(dragRef.current.id, snapped)
+      }
+    }
+    const up = () => {
+      dragRef.current = null
+      setScrubbing(false)
+    }
+    document.addEventListener('mousemove', move)
+    document.addEventListener('mouseup', up)
+    return () => {
+      document.removeEventListener('mousemove', move)
+      document.removeEventListener('mouseup', up)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scrubbing, view.start, view.end, width, duration, resolution, snapDivisor, bpm])
+
+  // Beat-line ticks: draw a light line every beat when there's room.
+  const beatSpacingSec = 60 / Math.max(1, bpm)
+  const visibleBeats = Math.ceil(span / beatSpacingSec)
+  const beatStride = visibleBeats > 80 ? Math.ceil(visibleBeats / 80) : 1
+
+  // Time-labels stride (whole seconds, picked so labels don't overlap)
+  const desiredLabelSpacingPx = 70
+  const desiredLabelSpacingSec = desiredLabelSpacingPx * (span / Math.max(1, width))
+  const labelStrides = [1, 2, 5, 10, 15, 30, 60, 120, 300]
+  const labelStride = labelStrides.find((s) => s >= desiredLabelSpacingSec) || 600
+
+  const fmtSec = (s: number) => {
+    const m = Math.floor(s / 60)
+    const ss = Math.floor(s % 60)
+    return `${m}:${ss.toString().padStart(2, '0')}`
+  }
+
+  // Sort so MUSIC blocks render first (under), then STEP, then VO (on top)
+  const ordered = [...events].sort((a, b) => {
+    const w = (e: TutorialEvent) => (e.kind === 'music' ? 0 : e.kind === 'step' ? 1 : 2)
+    return w(a) - w(b)
+  })
+
+  return (
+    <div
+      ref={containerRef}
+      className="relative h-full bg-gray-950 border border-gray-800 rounded overflow-hidden select-none cursor-crosshair"
+      onMouseDown={(e) => {
+        // mousedown on track (not on a block) → seek + start scrubbing
+        if ((e.target as HTMLElement).dataset?.block) return
+        const rect = containerRef.current!.getBoundingClientRect()
+        onSeek(Math.max(0, Math.min(duration, xToSec(e.clientX - rect.left))))
+        setScrubbing(true)
+      }}
+      onClick={handleClickTrack}
+      onWheel={handleWheel}
+      title="Wheel to zoom · Shift+wheel to pan · click to seek · drag a block to move"
+    >
+      {/* beat grid */}
+      {Array.from({ length: visibleBeats + 2 }).map((_, i) => {
+        const beatIndex = Math.floor(view.start / beatSpacingSec) + i
+        if (beatIndex < 0 || beatIndex % beatStride !== 0) return null
+        const sec = beatIndex * beatSpacingSec
+        const x = secToX(sec)
+        if (x < -2 || x > width + 2) return null
+        const isBar = beatIndex % 4 === 0
+        return (
+          <div
+            key={beatIndex}
+            className={isBar ? 'absolute top-0 bottom-0 w-px bg-gray-800' : 'absolute top-0 bottom-0 w-px bg-gray-900'}
+            style={{ left: x }}
+          />
+        )
+      })}
+
+      {/* time labels */}
+      {Array.from({ length: Math.ceil(span / labelStride) + 2 }).map((_, i) => {
+        const s = Math.floor(view.start / labelStride) * labelStride + i * labelStride
+        if (s < 0 || s > duration) return null
+        const x = secToX(s)
+        if (x < -10 || x > width + 10) return null
+        return (
+          <div
+            key={s}
+            className="absolute top-0 text-[9px] text-gray-600 font-mono px-0.5 pointer-events-none"
+            style={{ left: x + 1 }}
+          >
+            {fmtSec(s)}
+          </div>
+        )
+      })}
+
+      {/* event blocks */}
+      {ordered.map((ev) => {
+        const startSec = tickToSec(ev.tick)
+        const x = secToX(startSec)
+        if (ev.kind === 'music') {
+          const w = Math.max(8, secToX(startSec + ev.durationSeconds) - x)
+          if (x + w < -10 || x > width + 10) return null
+          return (
+            <div
+              key={ev.id}
+              data-block="1"
+              className="absolute top-3 h-[calc(100%-12px)] bg-orange-700/50 hover:bg-orange-600/70 border border-orange-500/70 rounded text-[10px] text-orange-100 font-medium overflow-hidden cursor-grab active:cursor-grabbing"
+              style={{ left: x, width: w }}
+              onMouseDown={(e) => {
+                e.stopPropagation()
+                const rect = containerRef.current!.getBoundingClientRect()
+                const offset = xToSec(e.clientX - rect.left) - startSec
+                dragRef.current = { id: ev.id, offset, lastTick: ev.tick }
+              }}
+              onClick={(e) => {
+                e.stopPropagation()
+                onSeek(startSec)
+              }}
+              title={`MUSIC ${ev.file.split('/').pop()} · ${ev.notesCount} notes · ${ev.durationSeconds.toFixed(1)}s`}
+            >
+              <span className="px-1 truncate inline-block w-full leading-tight">♪ {(ev.file.split('/').pop() || 'music')}</span>
+            </div>
+          )
+        }
+        if (ev.kind === 'step') {
+          if (x < -10 || x > width + 10) return null
+          return (
+            <div
+              key={ev.id}
+              data-block="1"
+              className="absolute top-3 h-[calc(100%-12px)] flex items-center cursor-grab active:cursor-grabbing"
+              style={{ left: x - 1, width: 2 }}
+              onMouseDown={(e) => {
+                e.stopPropagation()
+                const rect = containerRef.current!.getBoundingClientRect()
+                const offset = xToSec(e.clientX - rect.left) - startSec
+                dragRef.current = { id: ev.id, offset, lastTick: ev.tick }
+              }}
+              onClick={(e) => {
+                e.stopPropagation()
+                onSeek(startSec)
+              }}
+              title={`STEP "${ev.stepId}" · ${ev.required} ${ev.timing}`}
+            >
+              <div className="absolute inset-0 bg-purple-500" />
+              <span
+                data-block="1"
+                className="absolute -top-0.5 -translate-x-1/2 text-[10px] text-purple-200 font-medium bg-purple-700/90 border border-purple-500 rounded px-1 py-0.5 leading-none whitespace-nowrap pointer-events-auto"
+              >
+                ⚑ {ev.stepId || 'step'}
+              </span>
+            </div>
+          )
+        }
+        // vo
+        if (x < -10 || x > width + 10) return null
+        return (
+          <div
+            key={ev.id}
+            data-block="1"
+            className="absolute top-3 h-[calc(100%-12px)] cursor-grab active:cursor-grabbing"
+            style={{ left: x - 1, width: 2 }}
+            onMouseDown={(e) => {
+              e.stopPropagation()
+              const rect = containerRef.current!.getBoundingClientRect()
+              const offset = xToSec(e.clientX - rect.left) - startSec
+              dragRef.current = { id: ev.id, offset, lastTick: ev.tick }
+            }}
+            onClick={(e) => {
+              e.stopPropagation()
+              onSeek(startSec)
+            }}
+            title={`VO ${ev.file || ''}${ev.text ? ' · ' + ev.text : ''}`}
+          >
+            <div className="absolute inset-0 bg-sky-400" />
+            <span
+              data-block="1"
+              className="absolute -top-0.5 -translate-x-1/2 text-[10px] text-sky-100 font-medium bg-sky-700/90 border border-sky-500 rounded px-1 py-0.5 leading-none whitespace-nowrap pointer-events-auto"
+            >
+              ▶ {ev.text ? ev.text.slice(0, 14) : 'vo'}
+            </span>
+          </div>
+        )
+      })}
+
+      {/* playhead */}
+      <div
+        className="absolute top-0 bottom-0 w-px bg-jam-400 pointer-events-none"
+        style={{ left: secToX(currentTime), boxShadow: '0 0 4px rgba(168, 85, 247, 0.6)' }}
+      />
+
+      {/* zoom hint when fully zoomed out */}
+      {span >= duration - 0.5 && (
+        <div className="absolute bottom-0.5 right-1 text-[9px] text-gray-600 pointer-events-none font-mono">
+          full song · scroll to zoom
+        </div>
+      )}
+    </div>
+  )
+}
+
 // Component -----------------------------------------------------------------
 
 export default function BeatmapEditor() {
@@ -1018,34 +1323,63 @@ export default function BeatmapEditor() {
 
   const noteCount = chart?.notes.length ?? 0
 
+  // Seek by seconds — used by the timeline. Updates audio + state in lockstep.
+  const seekSeconds = useCallback(
+    (sec: number) => {
+      const a = audioRef.current
+      if (a) a.currentTime = sec
+      setCurrentTime(sec)
+    },
+    [],
+  )
+
   return (
     <div className="fixed inset-0 bg-black flex flex-col z-[60]">
-      <header className="h-14 shrink-0 border-b border-gray-800 bg-gray-950 flex items-center px-4 gap-3">
+      <header className="h-20 shrink-0 border-b border-gray-800 bg-gray-950 flex items-center px-3 gap-3">
         <button
           onClick={handleClose}
-          className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-md text-sm font-medium transition-colors"
+          className="shrink-0 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-md text-sm font-medium transition-colors"
         >
           ← Back
         </button>
-        <div className="flex-1 min-w-0">
-          <h1 className="text-base font-semibold text-gray-100 truncate">
+        <div className="w-44 shrink-0 min-w-0">
+          <h1 className="text-sm font-semibold text-gray-100 truncate">
             {meta?.name || (loadError ? 'Failed to load' : 'Beatmap editor')}
           </h1>
-          <p className="text-xs text-gray-500 truncate">
+          <p className="text-[11px] text-gray-500 truncate leading-tight">
             {chart
-              ? `${chart.activeName} · ${noteCount} notes · ${chart.bpm.toFixed(1)} BPM · res ${chart.resolution}`
+              ? `${chart.activeName || '—'} · ${noteCount} notes · ${chart.bpm.toFixed(1)} BPM · res ${chart.resolution}`
               : loadError
                 ? `Error: ${loadError}`
                 : 'Loading…'}
           </p>
         </div>
+        {/* Full-song zoomable timeline. Sits between title and save button. */}
+        <div className="flex-1 min-w-0 h-12">
+          {chart && duration > 0 ? (
+            <TutorialTimeline
+              duration={duration}
+              currentTime={currentTime}
+              bpm={chart.bpm}
+              resolution={chart.resolution}
+              events={chart.tutorialEnabled ? chart.tutorial : []}
+              snapDivisor={snapDivisor}
+              onSeek={seekSeconds}
+              onMoveEvent={(id, tick) => updateTutorialEvent(id, { tick } as Partial<TutorialEvent>)}
+            />
+          ) : (
+            <div className="h-full bg-gray-950 border border-gray-800 rounded text-[11px] text-gray-700 flex items-center justify-center">
+              {loadError ? '—' : 'loading audio…'}
+            </div>
+          )}
+        </div>
         {saveMsg && (
-          <span className={`text-xs ${saveMsg === 'Saved' ? 'text-emerald-400' : 'text-red-400'}`}>{saveMsg}</span>
+          <span className={`text-xs shrink-0 ${saveMsg === 'Saved' ? 'text-emerald-400' : 'text-red-400'}`}>{saveMsg}</span>
         )}
         <button
           onClick={handleSave}
           disabled={saving || !chart || !dirty}
-          className="px-4 py-2 bg-jam-600 hover:bg-jam-500 disabled:opacity-40 text-white rounded-md text-sm font-medium transition-colors"
+          className="shrink-0 px-4 py-2 bg-jam-600 hover:bg-jam-500 disabled:opacity-40 text-white rounded-md text-sm font-medium transition-colors"
         >
           {saving ? 'Saving…' : dirty ? 'Save chart' : 'Saved'}
         </button>
