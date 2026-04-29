@@ -34,7 +34,23 @@ interface TutorialStepEvent {
   next: string           // step id to jump to on pass; empty = end-of-tutorial
 }
 
-type TutorialEvent = TutorialVoEvent | TutorialStepEvent
+interface TutorialMusicEvent {
+  kind: 'music'
+  id: string
+  tick: number             // parent-chart tick where the segment activates
+  file: string             // relative path under the beatmap dir, e.g. "segments/abc.ogg"
+  sectionName: string      // chart section that holds this segment's notes (e.g. "MusicSeg_abc")
+  bpm: number              // segment's own BPM (notes are timed against this)
+  resolution: number       // segment's tick resolution (usually 192)
+  durationSeconds: number  // clip duration, used for visual band length on runway
+  notesCount: number       // generated note count (display only)
+  required: number
+  timing: TimingMode
+  retryVo: string
+  next: string
+}
+
+type TutorialEvent = TutorialVoEvent | TutorialStepEvent | TutorialMusicEvent
 
 interface ChartState {
   fullText: string
@@ -47,6 +63,10 @@ interface ChartState {
   notes: ChartNote[]
   tutorialEnabled: boolean
   tutorial: TutorialEvent[]
+  // Body text of every [MusicSeg_*] section. Keyed by section name; values
+  // are the verbatim inner block (no braces). Round-tripped on save so
+  // segment notes survive even though we don't edit them inline.
+  musicSections: Record<string, string>
 }
 
 const DIFFICULTY_PREFERENCE = [
@@ -181,9 +201,42 @@ function parseTutorialSection(text: string): TutorialEvent[] {
         retryVo: fields.retry_vo || '',
         next: fields.next || '',
       })
+    } else if (kind === 'MUSIC') {
+      const file = tokens[1] || ''
+      const fields: Record<string, string> = {}
+      for (const t of tokens.slice(2)) {
+        const ix = t.indexOf('=')
+        if (ix > 0) fields[t.slice(0, ix)] = t.slice(ix + 1)
+      }
+      const timing: TimingMode = fields.timing === 'perfect' ? 'perfect' : 'any'
+      events.push({
+        kind: 'music',
+        id: `music-${tick}-${counter++}`,
+        tick,
+        file,
+        sectionName: fields.section || '',
+        bpm: Number(fields.bpm) || 120,
+        resolution: Number(fields.resolution) || 192,
+        durationSeconds: Number(fields.duration) || 0,
+        notesCount: Number(fields.notes) || 0,
+        required: Number(fields.required || 0) || 0,
+        timing,
+        retryVo: fields.retry_vo || '',
+        next: fields.next || '',
+      })
     }
   }
   return events.sort((a, b) => a.tick - b.tick)
+}
+
+function parseMusicSections(text: string): Record<string, string> {
+  const re = /\[(MusicSeg_[A-Za-z0-9_-]+)\]\s*\{([^}]*)\}/g
+  const out: Record<string, string> = {}
+  let m: RegExpExecArray | null
+  while ((m = re.exec(text)) !== null) {
+    out[m[1]] = m[2]
+  }
+  return out
 }
 
 function serializeTutorialSection(events: TutorialEvent[]): string {
@@ -194,8 +247,19 @@ function serializeTutorialSection(events: TutorialEvent[]): string {
       const t = e.text ? ` text="${e.text.replace(/"/g, "'")}"` : ''
       return `  ${e.tick} = VO "${e.file}"${t}`
     }
+    if (e.kind === 'step') {
+      return (
+        `  ${e.tick} = STEP "${e.stepId}" required=${e.required} timing=${e.timing}`
+        + (e.retryVo ? ` retry_vo="${e.retryVo}"` : '')
+        + (e.next ? ` next="${e.next}"` : '')
+      )
+    }
+    // music
     return (
-      `  ${e.tick} = STEP "${e.stepId}" required=${e.required} timing=${e.timing}`
+      `  ${e.tick} = MUSIC "${e.file}" section="${e.sectionName}"`
+      + ` bpm=${e.bpm.toFixed(2)} resolution=${e.resolution}`
+      + ` duration=${e.durationSeconds.toFixed(2)} notes=${e.notesCount}`
+      + ` required=${e.required} timing=${e.timing}`
       + (e.retryVo ? ` retry_vo="${e.retryVo}"` : '')
       + (e.next ? ` next="${e.next}"` : '')
     )
@@ -203,12 +267,34 @@ function serializeTutorialSection(events: TutorialEvent[]): string {
   return `[TutorialScript]\n{\n${lines.join('\n')}\n}\n`
 }
 
-function applyTutorialToFullText(fullText: string, events: TutorialEvent[], enabled: boolean): string {
-  const stripped = fullText.replace(/\[TutorialScript\]\s*\{[^}]*\}\s*/g, '')
+function serializeMusicSections(sections: Record<string, string>, events: TutorialEvent[]): string {
+  // Only emit sections referenced by an active MUSIC event, so deleting an
+  // event also drops its body on save instead of leaving orphans behind.
+  const referenced = new Set(
+    events.filter((e): e is TutorialMusicEvent => e.kind === 'music').map((e) => e.sectionName),
+  )
+  const blocks: string[] = []
+  for (const [name, body] of Object.entries(sections)) {
+    if (!referenced.has(name)) continue
+    blocks.push(`[${name}]\n{${body}}\n`)
+  }
+  return blocks.join('')
+}
+
+function applyTutorialToFullText(
+  fullText: string,
+  events: TutorialEvent[],
+  enabled: boolean,
+  musicSections: Record<string, string>,
+): string {
+  // Strip both [TutorialScript] and any [MusicSeg_*] sections — we re-emit
+  // them from the in-memory state so they stay in sync.
+  let stripped = fullText.replace(/\[TutorialScript\]\s*\{[^}]*\}\s*/g, '')
+  stripped = stripped.replace(/\[MusicSeg_[A-Za-z0-9_-]+\]\s*\{[^}]*\}\s*/g, '')
   if (!enabled || events.length === 0) return stripped
   const newSection = serializeTutorialSection(events)
-  // Append at the end of the file so it doesn't perturb the existing layout.
-  return stripped.trimEnd() + '\n' + newSection
+  const musicBlocks = serializeMusicSections(musicSections, events)
+  return stripped.trimEnd() + '\n' + newSection + (musicBlocks ? musicBlocks : '')
 }
 
 function parseChart(text: string, prefer?: string): ChartState {
@@ -232,11 +318,12 @@ function parseChart(text: string, prefer?: string): ChartState {
 
   const notes = activeName ? parseSectionNotes(text, activeName) : []
   const tutorial = parseTutorialSection(text)
+  const musicSections = parseMusicSections(text)
   const tutorialEnabled = tutorial.length > 0
   return {
     fullText: text, resolution, bpm, bpmRaw, songName,
     availableSections, activeName, notes,
-    tutorialEnabled, tutorial,
+    tutorialEnabled, tutorial, musicSections,
   }
 }
 
@@ -460,6 +547,31 @@ export default function BeatmapEditor() {
         const tag = `STEP ${ev.stepId || '?'} · ${ev.required || 0} ${ev.timing}`
         ctx.fillText(tag, 6, y - 2)
       }
+      // MUSIC segments — orange band spanning the segment's duration
+      for (const ev of chart.tutorial) {
+        if (ev.kind !== 'music') continue
+        const yStart = HIT - (t2s(ev.tick) - currentTime) * scrollSpeed
+        const bandHeight = Math.max(8, ev.durationSeconds * scrollSpeed)
+        const yTop = yStart - bandHeight
+        if (yStart < -40 || yTop > H + 40) continue
+        ctx.fillStyle = 'rgba(249, 115, 22, 0.13)'
+        ctx.fillRect(0, yTop, W, bandHeight)
+        ctx.strokeStyle = 'rgba(249, 115, 22, 0.55)'
+        ctx.lineWidth = 1
+        ctx.strokeRect(0.5, yTop + 0.5, W - 1, bandHeight - 1)
+        ctx.fillStyle = '#fdba74'
+        ctx.font = 'bold 10px sans-serif'
+        ctx.textAlign = 'left'
+        const filename = ev.file.split('/').pop() || ev.file
+        ctx.fillText(`♪ MUSIC ${filename}`, 6, yTop + 12)
+        ctx.fillStyle = '#fb923c'
+        ctx.font = '10px monospace'
+        ctx.fillText(
+          `${ev.notesCount} notes · ${ev.bpm.toFixed(0)} BPM · ${ev.required} ${ev.timing}`,
+          6, yTop + 24,
+        )
+      }
+
       // VOs — left-edge ▶ icon + thin line across the runway
       for (const ev of chart.tutorial) {
         if (ev.kind !== 'vo') continue
@@ -687,7 +799,7 @@ export default function BeatmapEditor() {
       return
     }
     let newFull = replaceSectionNotes(chart.fullText, chart.activeName, chart.notes)
-    newFull = applyTutorialToFullText(newFull, chart.tutorial, chart.tutorialEnabled)
+    newFull = applyTutorialToFullText(newFull, chart.tutorial, chart.tutorialEnabled, chart.musicSections)
     const newNotes = parseSectionNotes(newFull, name)
     // Tutorial section is shared across difficulties — just keep current state.
     setChart({ ...chart, fullText: newFull, activeName: name, notes: newNotes })
@@ -707,7 +819,7 @@ export default function BeatmapEditor() {
     setSaveMsg('')
     try {
       let newFull = replaceSectionNotes(chart.fullText, chart.activeName, chart.notes)
-      newFull = applyTutorialToFullText(newFull, chart.tutorial, chart.tutorialEnabled)
+      newFull = applyTutorialToFullText(newFull, chart.tutorial, chart.tutorialEnabled, chart.musicSections)
       const res = await fetch(`/api/tracks/${trackId}/beatmaps/${beatmapId}/chart`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -761,6 +873,79 @@ export default function BeatmapEditor() {
       text: '',
     }
     updateTutorial([...chart.tutorial, ev], true)
+  }
+
+  // ── Music segments — upload modal state + handler ────────────────────────
+  const [musicModal, setMusicModal] = useState<{ tick: number; difficulty: string } | null>(null)
+  const [musicBusy, setMusicBusy] = useState(false)
+  const [musicError, setMusicError] = useState('')
+  const musicInputRef = useRef<HTMLInputElement | null>(null)
+
+  const addMusicSegment = async (clip: File, difficulty: string) => {
+    if (!chart || !musicModal) return
+    setMusicBusy(true)
+    setMusicError('')
+    try {
+      const fd = new FormData()
+      fd.append('file', clip)
+      fd.append('difficulty', difficulty)
+      const res = await fetch(
+        `/api/tutorial/${trackId}/beatmaps/${beatmapId}/music-segment`,
+        { method: 'POST', body: fd },
+      )
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || `Music-segment upload failed (${res.status})`)
+      }
+      const data = await res.json()
+      const ev: TutorialMusicEvent = {
+        kind: 'music',
+        id: `music-${Date.now()}`,
+        tick: musicModal.tick,
+        file: data.rel_path,
+        sectionName: data.section_name,
+        bpm: Number(data.bpm) || 120,
+        resolution: Number(data.resolution) || 192,
+        durationSeconds: Number(data.duration_seconds) || 0,
+        notesCount: Number(data.notes_count) || 0,
+        required: Math.min(5, Number(data.notes_count) || 0),
+        timing: 'any',
+        retryVo: '',
+        next: '',
+      }
+      const nextSections = { ...chart.musicSections }
+      if (data.section_body) {
+        nextSections[data.section_name] = '\n' + data.section_body + '\n'
+      }
+      setChart({
+        ...chart,
+        tutorial: [...chart.tutorial, ev],
+        tutorialEnabled: true,
+        musicSections: nextSections,
+      })
+      setDirty(true)
+      setMusicModal(null)
+    } catch (e) {
+      setMusicError((e as Error).message)
+    } finally {
+      setMusicBusy(false)
+    }
+  }
+
+  const removeMusicEvent = async (ev: TutorialMusicEvent) => {
+    if (!chart) return
+    // Best-effort drop the audio file on disk too
+    const filename = ev.file.startsWith('segments/') ? ev.file.slice('segments/'.length) : ev.file
+    fetch(`/api/tutorial/${trackId}/beatmaps/${beatmapId}/segments/${filename}`, { method: 'DELETE' }).catch(() => undefined)
+    const nextEvents = chart.tutorial.filter((e) => e.id !== ev.id)
+    const nextSections = { ...chart.musicSections }
+    delete nextSections[ev.sectionName]
+    setChart({
+      ...chart,
+      tutorial: nextEvents,
+      musicSections: nextSections,
+    })
+    setDirty(true)
   }
 
   const addStep = () => {
@@ -1021,25 +1206,114 @@ export default function BeatmapEditor() {
               </div>
               {chart.tutorialEnabled && (
                 <>
-                  <div className="flex gap-1 mb-2">
+                  <div className="grid grid-cols-3 gap-1 mb-2">
                     <button
                       onClick={addVo}
-                      className="flex-1 px-2 py-1 bg-sky-700/40 hover:bg-sky-600/60 border border-sky-700/60 text-sky-200 rounded text-[11px] font-medium transition-colors"
-                      title={`Add VO event at playhead (tick ${playheadTick})`}
+                      className="px-1.5 py-1 bg-sky-700/40 hover:bg-sky-600/60 border border-sky-700/60 text-sky-200 rounded text-[11px] font-medium transition-colors"
+                      title={`Add VO at playhead (tick ${playheadTick})`}
                     >
-                      + VO at {fmtTick(playheadTick)}
+                      + VO
                     </button>
                     <button
                       onClick={addStep}
-                      className="flex-1 px-2 py-1 bg-purple-700/40 hover:bg-purple-600/60 border border-purple-700/60 text-purple-200 rounded text-[11px] font-medium transition-colors"
+                      className="px-1.5 py-1 bg-purple-700/40 hover:bg-purple-600/60 border border-purple-700/60 text-purple-200 rounded text-[11px] font-medium transition-colors"
                       title={`Add STEP boundary at playhead (tick ${playheadTick})`}
                     >
                       + STEP
                     </button>
+                    <button
+                      onClick={() => setMusicModal({ tick: playheadTick, difficulty: chart.activeName || 'ExpertSingle' })}
+                      className="px-1.5 py-1 bg-orange-700/40 hover:bg-orange-600/60 border border-orange-700/60 text-orange-200 rounded text-[11px] font-medium transition-colors"
+                      title={`Drop a music segment at playhead (tick ${playheadTick})`}
+                    >
+                      + MUSIC
+                    </button>
                   </div>
+                  <p className="text-[11px] text-gray-600 mb-1.5">
+                    Adding at <span className="font-mono text-gray-400">{fmtTick(playheadTick)}</span>
+                  </p>
                   <ul className="space-y-2">
-                    {[...chart.tutorial].sort((a, b) => a.tick - b.tick).map((ev) =>
-                      ev.kind === 'vo' ? (
+                    {[...chart.tutorial].sort((a, b) => a.tick - b.tick).map((ev) => {
+                      if (ev.kind === 'music') {
+                        return (
+                          <li
+                            key={ev.id}
+                            className="bg-orange-900/20 border border-orange-800/40 rounded p-2 space-y-1.5"
+                          >
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                onClick={() => seekToTick(ev.tick)}
+                                className="text-[10px] font-mono text-orange-300 hover:text-orange-200"
+                              >
+                                {fmtTick(ev.tick)}
+                              </button>
+                              <span className="text-[10px] text-orange-400/80">MUSIC</span>
+                              <span className="text-[10px] text-gray-500 truncate flex-1" title={ev.file}>
+                                {(ev.file.split('/').pop() || ev.file)}
+                              </span>
+                              <button
+                                onClick={() => removeMusicEvent(ev)}
+                                className="text-[10px] text-red-400 hover:text-red-200"
+                                title="Delete this music segment"
+                              >
+                                ×
+                              </button>
+                            </div>
+                            <div className="text-[10px] text-gray-500 font-mono">
+                              {ev.notesCount} notes · {ev.bpm.toFixed(1)} BPM · {ev.durationSeconds.toFixed(1)}s
+                            </div>
+                            <audio
+                              controls
+                              src={`/api/tutorial/${trackId}/beatmaps/${beatmapId}/${ev.file}`}
+                              className="w-full h-7"
+                            />
+                            <div className="grid grid-cols-2 gap-1">
+                              <label className="block">
+                                <span className="text-[10px] text-gray-500">required</span>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  value={ev.required}
+                                  onChange={(e) => updateTutorialEvent(ev.id, { required: Math.max(0, Number(e.target.value) || 0) })}
+                                  className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-[11px] text-gray-200"
+                                />
+                              </label>
+                              <label className="block">
+                                <span className="text-[10px] text-gray-500">timing</span>
+                                <select
+                                  value={ev.timing}
+                                  onChange={(e) => updateTutorialEvent(ev.id, { timing: e.target.value as TimingMode })}
+                                  className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-[11px] text-gray-200"
+                                >
+                                  <option value="any">any</option>
+                                  <option value="perfect">perfect</option>
+                                </select>
+                              </label>
+                            </div>
+                            <label className="block">
+                              <span className="text-[10px] text-gray-500">retry_vo (file path)</span>
+                              <input
+                                type="text"
+                                value={ev.retryVo}
+                                onChange={(e) => updateTutorialEvent(ev.id, { retryVo: e.target.value })}
+                                placeholder="vo/retry.ogg"
+                                className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-[11px] text-gray-200"
+                              />
+                            </label>
+                            <label className="block">
+                              <span className="text-[10px] text-gray-500">next (step id)</span>
+                              <input
+                                type="text"
+                                value={ev.next}
+                                onChange={(e) => updateTutorialEvent(ev.id, { next: e.target.value })}
+                                placeholder="next_step"
+                                className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-[11px] text-gray-200"
+                              />
+                            </label>
+                          </li>
+                        )
+                      }
+                      return ev.kind === 'vo' ? (
                         <li
                           key={ev.id}
                           className="bg-sky-900/20 border border-sky-800/40 rounded p-2 space-y-1.5"
@@ -1166,8 +1440,8 @@ export default function BeatmapEditor() {
                             />
                           </label>
                         </li>
-                      ),
-                    )}
+                      )
+                    })}
                   </ul>
                   {chart.tutorial.length === 0 && (
                     <p className="text-[11px] text-gray-600 mt-1">
@@ -1194,6 +1468,76 @@ export default function BeatmapEditor() {
         onPause={() => setPlaying(false)}
         onEnded={() => setPlaying(false)}
       />
+
+      {musicModal && (
+        <div
+          className="fixed inset-0 bg-black/70 backdrop-blur-sm z-[70] flex items-center justify-center px-4"
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !musicBusy) setMusicModal(null)
+          }}
+        >
+          <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-md p-5 space-y-4">
+            <div>
+              <h3 className="text-lg font-semibold text-orange-300">Drop a music segment</h3>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Upload a short clip. The chart generator runs on it and produces
+                notes for the chosen difficulty. Your VO/STEP timeline gains
+                a MUSIC event at the playhead.
+              </p>
+            </div>
+            <div>
+              <span className="text-xs text-gray-400 block mb-1">Position</span>
+              <span className="text-xs font-mono text-gray-300">tick {musicModal.tick}</span>
+            </div>
+            <label className="block">
+              <span className="text-xs text-gray-400">Generate notes for</span>
+              <select
+                value={musicModal.difficulty}
+                onChange={(e) => setMusicModal({ ...musicModal, difficulty: e.target.value })}
+                className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-orange-500"
+              >
+                <option value="ExpertSingle">Expert</option>
+                <option value="HardSingle">Hard</option>
+                <option value="MediumSingle">Medium</option>
+                <option value="EasySingle">Easy</option>
+              </select>
+              <span className="text-[11px] text-gray-600 mt-1 block">
+                Density staircase applies — Easy will be ~1 note/beat, Expert all detected onsets.
+              </span>
+            </label>
+            <label className="block px-3 py-3 bg-gray-800 hover:bg-gray-700 border border-dashed border-gray-700 rounded-lg cursor-pointer text-center text-sm text-gray-300">
+              Click to choose audio (OGG / WAV / MP3 / FLAC / M4A)
+              <input
+                ref={musicInputRef}
+                type="file"
+                accept=".ogg,.wav,.mp3,.flac,.m4a"
+                className="hidden"
+                disabled={musicBusy}
+                onChange={(e) => {
+                  const f = e.target.files?.[0]
+                  if (f) addMusicSegment(f, musicModal.difficulty)
+                }}
+              />
+            </label>
+            {musicError && <div className="text-xs text-red-400">{musicError}</div>}
+            {musicBusy && (
+              <div className="flex items-center gap-2 text-xs text-gray-400">
+                <div className="animate-spin h-4 w-4 border-2 border-orange-400 border-t-transparent rounded-full" />
+                Running chart generator on the clip…
+              </div>
+            )}
+            <div className="flex justify-end">
+              <button
+                onClick={() => setMusicModal(null)}
+                disabled={musicBusy}
+                className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-gray-200 rounded-md text-sm transition-colors"
+              >
+                {musicBusy ? 'Working…' : 'Cancel'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

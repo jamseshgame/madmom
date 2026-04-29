@@ -298,6 +298,158 @@ async def delete_vo(track_id: str, beatmap_id: str, name: str):
     return {'ok': True}
 
 
+@router.post('/{track_id}/beatmaps/{beatmap_id}/music-segment')
+async def create_music_segment(
+    track_id: str,
+    beatmap_id: str,
+    file: UploadFile = File(...),
+    difficulty: str = Form('ExpertSingle'),
+):
+    """Upload a short music clip, run the chart generator on it, return the
+    notes + BPM + duration so the editor can stitch a MUSIC event + a
+    [MusicSeg_<id>] section into the active beatmap's chart on next save.
+
+    The audio is persisted under `<beatmap>/segments/<uuid>.ogg`. The clip
+    can be any length but is capped at 5 minutes to keep generation snappy.
+    """
+    bm_dir = get_beatmap_dir(track_id, beatmap_id)
+    if bm_dir is None:
+        raise HTTPException(404, 'Beatmap not found')
+    raw_ext = Path(file.filename or '').suffix.lower()
+    if raw_ext not in {'.ogg', '.wav', '.mp3', '.flac', '.m4a'}:
+        raise HTTPException(400, f'Unsupported audio format: {raw_ext}')
+    if difficulty not in ('ExpertSingle', 'HardSingle', 'MediumSingle', 'EasySingle'):
+        raise HTTPException(400, f'Unknown difficulty: {difficulty}')
+
+    seg_dir = bm_dir / 'segments'
+    seg_dir.mkdir(parents=True, exist_ok=True)
+    seg_id = uuid.uuid4().hex[:10]
+
+    # Stage the upload, transcode to ogg if needed
+    raw_path = seg_dir / f'_raw_{seg_id}{raw_ext}'
+    raw_path.write_bytes(await file.read())
+    out_ogg = seg_dir / f'{seg_id}.ogg'
+    import subprocess
+    if raw_ext == '.ogg':
+        raw_path.replace(out_ogg)
+    else:
+        proc = subprocess.run(
+            ['ffmpeg', '-y', '-i', str(raw_path), '-vn', '-c:a', 'libvorbis', '-q:a', '5', str(out_ogg)],
+            capture_output=True,
+        )
+        raw_path.unlink(missing_ok=True)
+        if proc.returncode != 0:
+            raise HTTPException(500, f'ffmpeg failed: {proc.stderr.decode("utf-8", errors="replace")[-300:]}')
+
+    # Probe duration via ffprobe so the editor knows how long the segment plays
+    duration = 0.0
+    try:
+        probe = subprocess.run(
+            [
+                'ffprobe', '-v', 'quiet', '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1', str(out_ogg),
+            ],
+            capture_output=True, text=True,
+        )
+        duration = float(probe.stdout.strip() or 0)
+    except (ValueError, OSError):
+        pass
+
+    if duration > 300:
+        out_ogg.unlink(missing_ok=True)
+        raise HTTPException(400, f'Segment too long ({duration:.0f}s) — cap is 5 minutes')
+
+    # Run the existing chart generator on the clip in an isolated temp dir.
+    # We only care about the notes for the chosen difficulty.
+    import tempfile as _tf
+    from ..services.chart_generator import generate_full_chart
+
+    work = Path(_tf.mkdtemp(prefix='tutseg_'))
+    try:
+        result = await generate_full_chart(
+            audio_path=str(out_ogg),
+            output_dir=str(work),
+            song_name=f'segment_{seg_id}',
+            artist='Tutorial',
+            album='',
+            year='',
+            genre='tutorial',
+        )
+        if result is None:
+            return {
+                'id': seg_id,
+                'file': out_ogg.name,
+                'rel_path': f'segments/{out_ogg.name}',
+                'section_name': f'MusicSeg_{seg_id}',
+                'section_body': '',
+                'bpm': 120.0,
+                'resolution': 192,
+                'duration_seconds': duration,
+                'notes_count': 0,
+                'difficulty': difficulty,
+                'warning': 'No onsets detected — segment plays without notes',
+            }
+
+        chart_text = (work / 'notes.chart').read_text(encoding='utf-8', errors='replace')
+        # Pull the chosen difficulty's body
+        import re as _re
+        m = _re.search(r'\[' + difficulty + r'\]\s*\{([^}]*)\}', chart_text)
+        section_body = (m.group(1).strip() if m else '')
+
+        # BPM and resolution come from the segment's own [SyncTrack]/[Song]
+        bpm_match = _re.search(r'=\s*B\s+(\d+)', chart_text)
+        bpm = (int(bpm_match.group(1)) / 1000.0) if bpm_match else 120.0
+        res_match = _re.search(r'Resolution\s*=\s*(\d+)', chart_text)
+        resolution = int(res_match.group(1)) if res_match else 192
+
+        notes_count = len(_re.findall(r'^\s*\d+\s*=\s*N\s+', section_body, flags=_re.M))
+
+        return {
+            'id': seg_id,
+            'file': out_ogg.name,
+            'rel_path': f'segments/{out_ogg.name}',
+            'section_name': f'MusicSeg_{seg_id}',
+            'section_body': section_body,
+            'bpm': bpm,
+            'resolution': resolution,
+            'duration_seconds': duration,
+            'notes_count': notes_count,
+            'difficulty': difficulty,
+        }
+    except Exception as e:  # noqa: BLE001
+        out_ogg.unlink(missing_ok=True)
+        raise HTTPException(500, f'Segment chart generation failed: {e}')
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+@router.get('/{track_id}/beatmaps/{beatmap_id}/segments/{name}')
+async def download_segment(track_id: str, beatmap_id: str, name: str):
+    """Stream a saved music segment for in-editor playback."""
+    if '/' in name or '\\' in name or name.startswith('.'):
+        raise HTTPException(400, 'Invalid filename')
+    bm_dir = get_beatmap_dir(track_id, beatmap_id)
+    if bm_dir is None:
+        raise HTTPException(404, 'Beatmap not found')
+    p = bm_dir / 'segments' / name
+    if not p.exists():
+        raise HTTPException(404, 'Segment not found')
+    return FileResponse(p, media_type='audio/ogg')
+
+
+@router.delete('/{track_id}/beatmaps/{beatmap_id}/segments/{name}')
+async def delete_segment(track_id: str, beatmap_id: str, name: str):
+    if '/' in name or '\\' in name or name.startswith('.'):
+        raise HTTPException(400, 'Invalid filename')
+    bm_dir = get_beatmap_dir(track_id, beatmap_id)
+    if bm_dir is None:
+        raise HTTPException(404, 'Beatmap not found')
+    p = bm_dir / 'segments' / name
+    if p.exists():
+        p.unlink(missing_ok=True)
+    return {'ok': True}
+
+
 @router.post('/{track_id}/beatmaps/{beatmap_id}/vo/upload')
 async def upload_vo(track_id: str, beatmap_id: str, file: UploadFile = File(...)):
     """User-supplied VO clip — converted to OGG and stored under vo/."""

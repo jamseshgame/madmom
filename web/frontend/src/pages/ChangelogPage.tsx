@@ -10,6 +10,19 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.6.2',
+    date: '2026-04-29',
+    summary:
+      'Music segments — drop a short clip at any timestamp, the chart generator runs on it, and you get a self-contained mini-lesson with pass/fail.',
+    entries: [
+      { kind: 'added', text: 'New + MUSIC button next to + VO and + STEP in the editor sidebar. Opens a modal that uploads a clip (any audio format), runs generate_full_chart on it, and stitches a MUSIC event into [TutorialScript] plus a [MusicSeg_<id>] block of generated notes into the same chart. Pass/fail uses the same required / timing / retry_vo / next fields as STEP.' },
+      { kind: 'added', text: 'Backend POST /api/tutorial/:track/beatmaps/:bm/music-segment — saves the upload under <beatmap>/segments/<id>.ogg, transcodes non-OGG inputs via ffmpeg, runs the existing chart generator, returns the chosen difficulty section verbatim plus the segment\'s native BPM, resolution, duration and note count. 5-minute hard cap.' },
+      { kind: 'added', text: 'Editor canvas renders music segments as orange bands spanning the clip duration with file name + note count + BPM + pass criteria stamped on the band. Saves round-trip the [MusicSeg_*] sections so segment notes survive across difficulty switches and re-saves.' },
+      { kind: 'added', text: 'Per-segment audio preview directly in the sidebar event row. Delete on the row also DELETEs the OGG on disk best-effort.' },
+      { kind: 'added', text: 'Tutorial spec (web/docs/TUTORIAL_SPEC.md) gains a MUSIC section documenting the line grammar, segment-section layout, and recommended runtime behaviour for the Unity dev — same execution model as STEP, just with embedded clip audio + notes.' },
+    ],
+  },
+  {
     version: '1.6.1',
     date: '2026-04-29',
     summary:

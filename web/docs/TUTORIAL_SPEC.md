@@ -143,6 +143,53 @@ the publisher (one per source stem) and can be skipped.
 **Runtime behaviour:** at this tick, play `<file>`. The chart's normal note
 flow during a VO is up to the game (see "Game-design hooks" below).
 
+#### `MUSIC` event
+
+```
+<tick> = MUSIC "<file>" section="<section_name>" bpm=<float> resolution=<int> duration=<float> notes=<int> required=<int> timing=any|perfect [retry_vo="<file>"] [next="<id>"]
+```
+
+A music segment is a self-contained mini-lesson: at `tick` the runtime
+plays the clip while displaying notes from the named section. When the
+clip ends (or the player hits the next event), pass/fail is evaluated
+exactly like a `STEP`.
+
+| Field | Required | Notes |
+|---|---|---|
+| `<file>` | yes | path to clip, normally `segments/<id>.ogg` |
+| `section` | yes | name of the `[<section>]` block in this same chart that holds the segment's notes |
+| `bpm` | yes | segment's own BPM (notes are timed against this, not against the parent chart's `[SyncTrack]`) |
+| `resolution` | yes | tick resolution within the segment section (usually `192`) |
+| `duration` | yes | clip length in seconds — used for visualisation and as the segment's pass/fail evaluation point |
+| `notes` | yes | note count, informational |
+| `required`, `timing`, `retry_vo`, `next` | — | identical semantics to `STEP` |
+
+The segment's notes live in their own block, e.g.:
+
+```
+[MusicSeg_abc123]
+{
+  0   = N 0 0
+  192 = N 1 0
+  384 = N 2 0
+  ...
+}
+```
+
+Note ticks here are **segment-relative** — `0` is the start of the clip.
+Convert to seconds via `(tick / resolution) * (60 / bpm)` using the BPM /
+resolution declared on the parent `MUSIC` line.
+
+**Runtime behaviour:** at parent tick = `<tick>`,
+1. start playing `<file>`,
+2. render notes from `[<section>]` against the clip's local timeline using
+   `bpm` + `resolution`,
+3. count player hits per `timing` rule for the duration of the clip,
+4. at `tick + (duration_in_parent_ticks)` (or when the clip ends —
+   whichever comes first), evaluate pass/fail:
+   - pass → advance per `next` like `STEP`,
+   - fail → play `retry_vo` if set, then replay the segment.
+
 #### `STEP` event
 
 ```
