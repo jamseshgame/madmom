@@ -11,6 +11,15 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.6.7',
+    date: '2026-04-29',
+    summary:
+      'Tutorial sidebar checkbox is pre-ticked when the chart was authored as a tutorial — no more clicking enabled before adding the first VO.',
+    entries: [
+      { kind: 'fixed', text: 'Editor sidebar Tutorial → enabled was only flipped on when the chart carried at least one parsed VO/STEP/MUSIC event. Charts created via Create blank tutorial / Open empty editor (tutorial=true) ship with an empty [TutorialScript] {} block, so the box stayed off and the user had to tick it before authoring. Now any non-empty OR empty [TutorialScript] section in the chart pre-flips the checkbox on.' },
+    ],
+  },
+  {
     version: '1.6.6',
     date: '2026-04-29',
     summary:

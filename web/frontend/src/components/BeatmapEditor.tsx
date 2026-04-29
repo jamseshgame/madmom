@@ -153,6 +153,10 @@ function _shellSplit(line: string): string[] {
   return out
 }
 
+function hasTutorialSection(text: string): boolean {
+  return /\[TutorialScript\]\s*\{[^}]*\}/.test(text)
+}
+
 function parseTutorialSection(text: string): TutorialEvent[] {
   const m = text.match(/\[TutorialScript\]\s*\{([^}]*)\}/)
   if (!m) return []
@@ -319,7 +323,12 @@ function parseChart(text: string, prefer?: string): ChartState {
   const notes = activeName ? parseSectionNotes(text, activeName) : []
   const tutorial = parseTutorialSection(text)
   const musicSections = parseMusicSections(text)
-  const tutorialEnabled = tutorial.length > 0
+  // Pre-flip tutorial mode on whenever the chart already carries a
+  // [TutorialScript] section (even an empty one). The blank-tutorial flow
+  // and the empty-beatmap-with-tutorial flow both emit an empty section
+  // for exactly this reason — so the user doesn't have to tick the
+  // sidebar checkbox before adding their first VO/STEP.
+  const tutorialEnabled = tutorial.length > 0 || hasTutorialSection(text)
   return {
     fullText: text, resolution, bpm, bpmRaw, songName,
     availableSections, activeName, notes,
