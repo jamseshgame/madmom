@@ -8,12 +8,16 @@ dep, just append to ``PACKAGES``.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
+import sys
 from importlib.metadata import PackageNotFoundError, version as installed_version
 from pathlib import Path
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+
+from ..services.jobs import JobKind, create_job
 
 router = APIRouter(prefix='/api/versions', tags=['versions'])
 
@@ -27,6 +31,9 @@ PACKAGES: list[dict[str, str | bool]] = [
         'name': 'madmom',
         'used_for': 'Beat tracking, onset detection, chart generation',
         'license': 'BSD',
+        # Local editable install (`pip install -e ../../`). Upgrading from
+        # PyPI would clobber the local fork, so the UI hides the button.
+        'pinned': True,
     },
     {
         'name': 'demucs',
@@ -154,6 +161,7 @@ async def get_versions():
             'used_for': cfg.get('used_for', ''),
             'license': cfg.get('license', ''),
             'optional': bool(cfg.get('optional', False)),
+            'pinned': bool(cfg.get('pinned', False)),
         })
 
     by_name = {p['name']: p for p in packages}
@@ -167,3 +175,108 @@ async def get_versions():
         if 'demucs' in by_name
         else {'installed': None, 'latest': None, 'up_to_date': None},
     }
+
+
+# ── Upgrade + restart ──────────────────────────────────────────────────────
+
+# Block any package not in this allow-list — both as a sanity check on the
+# request body and as a guard against arbitrary remote pip-install execution.
+_ALLOWED_NAMES: set[str] = {str(p['name']) for p in PACKAGES}
+
+
+@router.post('/{package}/upgrade')
+async def upgrade_package(package: str):
+    """Run ``pip install --upgrade <package>`` in the backend's venv as a
+    tracked Job. Streams pip's stdout/stderr through the universal SSE
+    endpoint (/api/jobs/{id}/events) so the UI can show live progress.
+
+    Refuses to upgrade pinned packages (madmom — local editable install) or
+    anything not declared in PACKAGES."""
+    if package not in _ALLOWED_NAMES:
+        raise HTTPException(404, f'Unknown package: {package}')
+    cfg = next((p for p in PACKAGES if p['name'] == package), None)
+    if cfg and cfg.get('pinned'):
+        raise HTTPException(409, f'{package} is pinned (local install) — upgrade manually')
+
+    job = create_job(kind=JobKind.OTHER, title=f'pip upgrade {package}')
+
+    async def _run() -> None:
+        try:
+            await job.send('pip', 5, f'Resolving latest {package} on PyPI…')
+            cmd = [sys.executable, '-m', 'pip', 'install', '--upgrade', '--no-input', package]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            job.process = proc
+            assert proc.stdout is not None
+            line_count = 0
+            while True:
+                raw = await proc.stdout.readline()
+                if not raw:
+                    break
+                line = raw.decode('utf-8', errors='replace').rstrip()
+                if not line:
+                    continue
+                line_count += 1
+                # Map progress to a vague 5–95 band as pip output streams in.
+                # Real progress would need parsing; this is a usable proxy.
+                pct = min(95, 5 + line_count)
+                await job.send('pip', pct, line[:240])
+            rc = await proc.wait()
+            if rc != 0:
+                await job.send_error(f'pip exited {rc}')
+                return
+            # Re-read installed version
+            new_version: str | None
+            try:
+                new_version = installed_version(package)
+            except PackageNotFoundError:
+                new_version = None
+            await job.send_done({
+                'package': package,
+                'new_version': new_version,
+                'restart_required': True,
+            })
+        except asyncio.CancelledError:
+            return
+        except Exception as e:  # noqa: BLE001
+            if not job.cancelled:
+                await job.send_error(str(e) or 'pip upgrade failed')
+
+    job.task = asyncio.create_task(_run())
+    return {'job_id': job.id}
+
+
+@router.post('/restart-backend')
+async def restart_backend():
+    """Schedule a detached ``systemctl restart beatmap-backend`` so the new
+    pip-installed code becomes live. Returns immediately so the response can
+    land before the service drops. The frontend polls /api/health to know
+    when the backend is back."""
+    if sys.platform != 'linux':
+        raise HTTPException(
+            501,
+            f'Auto-restart only implemented on Linux (current: {sys.platform}). '
+            f'Restart the dev server manually.',
+        )
+    if not Path('/usr/bin/systemctl').exists() and not Path('/bin/systemctl').exists():
+        raise HTTPException(501, 'systemctl not on $PATH — restart manually')
+    # Detach via setsid + nohup so the restart survives this process going
+    # away. Schedule a 1s sleep so this response can reach the client.
+    cmd = 'sleep 1 && systemctl restart beatmap-backend'
+    try:
+        # Popen with detached flags. We DON'T await this.
+        import subprocess
+
+        subprocess.Popen(
+            ['nohup', 'sh', '-c', cmd],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            preexec_fn=os.setsid,
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f'Could not schedule restart: {e}')
+    return {'scheduled': True}

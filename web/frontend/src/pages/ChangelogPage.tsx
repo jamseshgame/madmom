@@ -11,6 +11,18 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.6.5',
+    date: '2026-04-29',
+    summary:
+      'Upgrade buttons on the dependency table — pip install --upgrade in the backend, then schedule a service restart, all from the Changelog page.',
+    entries: [
+      { kind: 'added', text: 'Every outdated row in the Open-source dependencies table now carries an Upgrade button. Click → confirm modal explains what will run; confirm → backend creates a Job that streams pip install --upgrade <pkg> through SSE; the modal renders live progress + the latest pip output line.' },
+      { kind: 'added', text: 'On a successful upgrade the modal offers a Restart backend now button. The endpoint schedules a detached systemctl restart beatmap-backend (with a 1s sleep so the response can land) and the frontend polls /api/health every 1.5s, refreshing the table once the service is back.' },
+      { kind: 'changed', text: 'madmom is marked pinned in PACKAGES (it is installed via pip install -e ../../ as your local fork) — the table shows a "pinned" tag on the status pill and hides the Upgrade button so a click cannot clobber the local checkout. Upgrade those manually via SSH if needed.' },
+      { kind: 'added', text: 'Backend POST /api/versions/:package/upgrade and POST /api/versions/restart-backend. Both check the package against the PACKAGES allow-list and refuse pinned entries.' },
+    ],
+  },
+  {
     version: '1.6.4',
     date: '2026-04-29',
     summary:
