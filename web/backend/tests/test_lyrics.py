@@ -369,6 +369,27 @@ def test_lyrics_delete(monkeypatch, tmp_path, _no_auth):
     assert r.status_code == 404
 
 
+@pytest.mark.asyncio
+async def test_lrclib_5xx_raises(monkeypatch):
+    """5xx from LRClib should propagate so the router can translate to 502."""
+    class MockResponse:
+        status_code = 503
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("503", request=None, response=self)
+
+    class MockClient:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            pass
+        async def get(self, *a, **kw):
+            return MockResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: MockClient())
+    with pytest.raises(httpx.HTTPError):
+        await fetch_from_lrclib(artist="X", title="Y", album=None, duration_s=None)
+
+
 @pytest.mark.skipif(
     os.environ.get('LYRICS_WHISPER_SMOKE') != '1',
     reason='set LYRICS_WHISPER_SMOKE=1 to run (downloads the medium model)',

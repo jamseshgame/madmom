@@ -93,15 +93,12 @@ async def fetch_from_lrclib(
     if duration_s is not None:
         params["duration"] = str(int(round(duration_s)))
 
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.get(LRCLIB_URL, params=params, timeout=10.0)
-            if r.status_code == 404:
-                return None
-            r.raise_for_status()
-            data = r.json()
-    except httpx.HTTPError:
-        return None
+    async with httpx.AsyncClient() as client:
+        r = await client.get(LRCLIB_URL, params=params, timeout=10.0)
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        data = r.json()
 
     synced = (data or {}).get("syncedLyrics") or ""
     if not synced.strip():

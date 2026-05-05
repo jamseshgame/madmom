@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import httpx
 from fastapi import APIRouter, Body, HTTPException, Query
 
 from app.services import lyrics as lyrics_service
@@ -83,11 +84,14 @@ async def post_lrclib(
     title = (body.get('title') or '').strip()
     if not artist or not title:
         raise HTTPException(400, 'artist and title are required')
-    result = await lyrics_service.fetch_from_lrclib(
-        artist=artist, title=title,
-        album=body.get('album'),
-        duration_s=body.get('duration_s'),
-    )
+    try:
+        result = await lyrics_service.fetch_from_lrclib(
+            artist=artist, title=title,
+            album=body.get('album'),
+            duration_s=body.get('duration_s'),
+        )
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f'LRClib upstream error: {e}')
     if result is None:
         return {'source': None}
     target.mkdir(parents=True, exist_ok=True)
