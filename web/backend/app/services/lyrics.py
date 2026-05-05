@@ -248,3 +248,64 @@ def inject_into_chart(chart_path: Path, lyrics: dict) -> int:
     chart_path.write_text('\n'.join(new_lines) + '\n')
 
     return sum(1 for _ in lyrics.get('words', []))
+
+
+_WHISPER_MODEL = None  # Lazy singleton
+
+
+def _get_whisper_model(model_size: str = 'medium'):
+    """Load the faster-whisper model on first call. CPU int8 keeps RAM low."""
+    global _WHISPER_MODEL
+    if _WHISPER_MODEL is None:
+        from faster_whisper import WhisperModel
+        _WHISPER_MODEL = WhisperModel(model_size, device='cpu', compute_type='int8')
+    return _WHISPER_MODEL
+
+
+def transcribe_with_whisper(
+    audio_path: Path,
+    progress_callback=None,
+    model_size: str = 'medium',
+) -> dict:
+    """Transcribe a vocals stem with faster-whisper, returning the normalized
+    lyrics shape. Each VAD segment becomes one phrase. `progress_callback` is
+    callable(step: str, percent: int, msg: str) — same shape as elsewhere."""
+    if progress_callback:
+        progress_callback('model-load', 5, f'Loading Whisper {model_size}...')
+    model = _get_whisper_model(model_size)
+    if progress_callback:
+        progress_callback('transcribe', 15, 'Transcribing vocals...')
+
+    segments_iter, info = model.transcribe(
+        str(audio_path),
+        word_timestamps=True,
+        vad_filter=True,
+    )
+
+    words: list[dict] = []
+    for seg in segments_iter:
+        seg_words = list(seg.words or [])
+        if not seg_words:
+            continue
+        for i, w in enumerate(seg_words):
+            entry: dict = {
+                'time_s': round(float(w.start or 0.0), 3),
+                'text': w.word.strip(),
+            }
+            if i == 0:
+                entry['phrase_start'] = True
+            if i == len(seg_words) - 1:
+                entry['phrase_end'] = True
+            if entry['text']:
+                words.append(entry)
+
+    if progress_callback:
+        progress_callback('done', 100, f'Transcribed {len(words)} words')
+
+    return {
+        'source': 'whisper',
+        'language': info.language or 'en',
+        'model': model_size,
+        'fetched_at': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'words': words,
+    }

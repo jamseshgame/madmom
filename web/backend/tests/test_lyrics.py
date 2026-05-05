@@ -1,12 +1,13 @@
 """Unit tests for the lyrics service."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import httpx
 import pytest
 
-from app.services.lyrics import fetch_from_lrclib, inject_into_chart, interpolate_words, parse_lrc, parse_sync_track, seconds_to_tick
+from app.services.lyrics import fetch_from_lrclib, inject_into_chart, interpolate_words, parse_lrc, parse_sync_track, seconds_to_tick, transcribe_with_whisper
 
 
 def test_parse_lrc_basic():
@@ -306,3 +307,25 @@ def test_inject_into_chart_empty_words_clears_lyrics(tmp_path):
     assert 'phrase_start' not in text
     # Original section event still there
     assert '192 = E "section Intro"' in text
+
+
+@pytest.mark.skipif(
+    os.environ.get('LYRICS_WHISPER_SMOKE') != '1',
+    reason='set LYRICS_WHISPER_SMOKE=1 to run (downloads the medium model)',
+)
+def test_whisper_smoke_on_short_clip(tmp_path):
+    """Generate a 2-second silent clip via ffmpeg and run faster-whisper.
+    Asserts the result has the expected normalized-shape keys."""
+    import subprocess
+    wav = tmp_path / "tiny.wav"
+    subprocess.run(
+        ['ffmpeg', '-y', '-f', 'lavfi', '-i', 'anullsrc=duration=2',
+         '-loglevel', 'error', str(wav)],
+        check=True,
+    )
+
+    result = transcribe_with_whisper(wav, progress_callback=None)
+    assert result["source"] == "whisper"
+    assert result["model"] == "medium"
+    assert "fetched_at" in result
+    assert isinstance(result["words"], list)
