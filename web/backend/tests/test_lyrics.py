@@ -324,6 +324,51 @@ def test_load_lyrics_missing(tmp_path):
     assert load_lyrics(tmp_path) is None
 
 
+from fastapi.testclient import TestClient
+from app.main import app
+from app.routers.auth import require_auth
+
+
+@pytest.fixture(autouse=False)
+def _no_auth():
+    """Override the require_auth dependency so TestClient calls succeed without a cookie."""
+    app.dependency_overrides[require_auth] = lambda: None
+    yield
+    app.dependency_overrides.pop(require_auth, None)
+
+
+def test_lyrics_get_404_when_missing(monkeypatch, tmp_path, _no_auth):
+    from app.routers import lyrics as lyrics_router
+    monkeypatch.setattr(lyrics_router, '_resolve_dir', lambda **kw: tmp_path)
+    client = TestClient(app)
+    r = client.get('/api/lyrics?track_id=does-not-matter')
+    assert r.status_code == 404
+
+
+def test_lyrics_put_then_get(monkeypatch, tmp_path, _no_auth):
+    from app.routers import lyrics as lyrics_router
+    monkeypatch.setattr(lyrics_router, '_resolve_dir', lambda **kw: tmp_path)
+    client = TestClient(app)
+    body = {"source": "lrclib", "language": "en", "words": []}
+    r = client.put('/api/lyrics?track_id=t1', json=body)
+    assert r.status_code == 200
+    r = client.get('/api/lyrics?track_id=t1')
+    assert r.status_code == 200
+    assert r.json() == body
+
+
+def test_lyrics_delete(monkeypatch, tmp_path, _no_auth):
+    from app.routers import lyrics as lyrics_router
+    monkeypatch.setattr(lyrics_router, '_resolve_dir', lambda **kw: tmp_path)
+    client = TestClient(app)
+    body = {"source": "lrclib", "language": "en", "words": []}
+    client.put('/api/lyrics?track_id=t1', json=body)
+    r = client.delete('/api/lyrics?track_id=t1')
+    assert r.status_code == 200
+    r = client.get('/api/lyrics?track_id=t1')
+    assert r.status_code == 404
+
+
 @pytest.mark.skipif(
     os.environ.get('LYRICS_WHISPER_SMOKE') != '1',
     reason='set LYRICS_WHISPER_SMOKE=1 to run (downloads the medium model)',
