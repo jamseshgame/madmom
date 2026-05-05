@@ -7,7 +7,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app.services.lyrics import fetch_from_lrclib, inject_into_chart, interpolate_words, parse_lrc, parse_sync_track, seconds_to_tick, transcribe_with_whisper
+from app.services.lyrics import fetch_from_lrclib, inject_into_chart, interpolate_words, load_lyrics, parse_lrc, parse_sync_track, seconds_to_tick, transcribe_with_whisper, write_lyrics
 
 
 def test_parse_lrc_basic():
@@ -307,6 +307,21 @@ def test_inject_into_chart_empty_words_clears_lyrics(tmp_path):
     assert 'phrase_start' not in text
     # Original section event still there
     assert '192 = E "section Intro"' in text
+
+
+def test_write_then_load_lyrics(tmp_path):
+    lyrics = {
+        "source": "lrclib", "language": "en", "words": [
+            {"time_s": 1.0, "text": "Hi", "phrase_start": True, "phrase_end": True},
+        ],
+    }
+    path = write_lyrics(tmp_path, lyrics)
+    assert path == tmp_path / "lyrics.json"
+    assert load_lyrics(tmp_path) == lyrics
+
+
+def test_load_lyrics_missing(tmp_path):
+    assert load_lyrics(tmp_path) is None
 
 
 @pytest.mark.skipif(

@@ -5,6 +5,7 @@ See docs/superpowers/specs/2026-05-05-timestamped-lyrics-design.md.
 from __future__ import annotations
 
 import datetime
+import json
 import re
 from pathlib import Path
 
@@ -248,6 +249,22 @@ def inject_into_chart(chart_path: Path, lyrics: dict) -> int:
     chart_path.write_text('\n'.join(new_lines) + '\n')
 
     return sum(1 for _ in lyrics.get('words', []))
+
+
+def write_lyrics(target_dir: Path, lyrics: dict) -> Path:
+    """Persist `lyrics.json` in target_dir. Caller is responsible for ensuring
+    target_dir exists."""
+    path = target_dir / 'lyrics.json'
+    path.write_text(json.dumps(lyrics, ensure_ascii=False, indent=2))
+    return path
+
+
+def load_lyrics(target_dir: Path) -> dict | None:
+    """Read lyrics.json from target_dir. Returns None if absent."""
+    path = target_dir / 'lyrics.json'
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())
 
 
 _WHISPER_MODEL = None  # Lazy singleton
