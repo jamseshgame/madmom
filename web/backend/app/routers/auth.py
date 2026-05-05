@@ -6,6 +6,8 @@ seed admin user (see services/users.py::resolve_session)."""
 
 from __future__ import annotations
 
+from contextvars import ContextVar
+
 from fastapi import APIRouter, Cookie, Depends, Form, HTTPException, Response, status
 from fastapi.responses import JSONResponse
 
@@ -16,6 +18,11 @@ router = APIRouter(prefix='/api/auth', tags=['auth'])
 COOKIE_NAME = 'auth'
 COOKIE_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
 
+# Set by require_auth on every authenticated request so create_job can
+# attribute jobs to the actually authenticated user without every route
+# having to thread the user dict through.
+current_user: ContextVar[dict | None] = ContextVar('current_user', default=None)
+
 
 def require_auth(auth: str | None = Cookie(default=None, alias=COOKIE_NAME)) -> dict:
     """FastAPI dependency: returns the authenticated user dict
@@ -23,6 +30,7 @@ def require_auth(auth: str | None = Cookie(default=None, alias=COOKIE_NAME)) -> 
     user = users_service.resolve_session(auth)
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Not authenticated')
+    current_user.set(user)
     return user
 
 

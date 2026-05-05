@@ -241,10 +241,16 @@ def create_job(
     if isinstance(kind, str):
         kind = JobKind(kind)
     if user is None:
-        # Auth is single-user via studio_username today. Capture it as the
-        # job creator so the Logs UI can attribute work — when multi-user
-        # lands, callers will pass the real authenticated identity instead.
-        user = settings.studio_username or 'local'
+        # Pull from the request-scoped ContextVar set by require_auth so the
+        # Logs UI attributes work to the actually authenticated user, not
+        # the seed studio_username. Falls back to the seed if there's no
+        # authenticated user (e.g. background tasks at startup).
+        from ..routers.auth import current_user as _current_user
+        ctx = _current_user.get()
+        if ctx and ctx.get('username'):
+            user = ctx['username']
+        else:
+            user = settings.studio_username or 'local'
     job = Job(id=uuid.uuid4().hex[:12], kind=kind, title=title, user=user)
     _jobs[job.id] = job
     job._persist()
