@@ -45,13 +45,21 @@ async function fetchPeaks(src: string, signal: AbortSignal): Promise<Float32Arra
   return peaks
 }
 
-export default function StemPlayer({ src }: { src: string }) {
+export default function StemPlayer({
+  src,
+  peaks: peaksProp,
+}: {
+  src: string
+  peaks?: number[] | null
+}) {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const [playing, setPlaying] = useState(false)
   const [duration, setDuration] = useState(0)
   const [currentTime, setCurrentTime] = useState(0)
-  const [peaks, setPeaks] = useState<Float32Array | null>(null)
+  const [peaks, setPeaks] = useState<Float32Array | null>(
+    peaksProp ? Float32Array.from(peaksProp) : null,
+  )
   const [peaksError, setPeaksError] = useState(false)
 
   // Pause this player whenever a different <audio> starts playing on the page,
@@ -68,8 +76,13 @@ export default function StemPlayer({ src }: { src: string }) {
     return () => document.removeEventListener('play', onPlayElsewhere, true)
   }, [])
 
-  // Decode peaks once per src.
+  // Prefer backend-precomputed peaks when available; otherwise decode in-browser.
   useEffect(() => {
+    if (peaksProp) {
+      setPeaks(Float32Array.from(peaksProp))
+      setPeaksError(false)
+      return
+    }
     const ctrl = new AbortController()
     setPeaks(null)
     setPeaksError(false)
@@ -79,7 +92,7 @@ export default function StemPlayer({ src }: { src: string }) {
         if ((e as Error).name !== 'AbortError') setPeaksError(true)
       })
     return () => ctrl.abort()
-  }, [src])
+  }, [src, peaksProp])
 
   // Draw waveform + playhead.
   useEffect(() => {

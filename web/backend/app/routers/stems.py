@@ -472,6 +472,18 @@ async def download_stem(job_id: str, stem: str):
     return FileResponse(filepath, filename=filename)
 
 
+@router.get('/{job_id}/peaks')
+async def get_peaks(job_id: str):
+    """Precomputed waveform peaks per stem so the frontend can skip Web Audio."""
+    job = get_job(job_id)
+    if not job or job.status != JobStatus.DONE:
+        raise HTTPException(404, 'Job not found or not complete')
+    peaks_path = job.output_dir / 'stems' / 'peaks.json'
+    if not peaks_path.exists():
+        raise HTTPException(404, 'Peaks not available')
+    return FileResponse(peaks_path, media_type='application/json')
+
+
 @router.post('/{job_id}/publish')
 async def publish_stems_to_github(job_id: str):
     """Push game-ready stems + song.ini to GitHub SongInbox."""

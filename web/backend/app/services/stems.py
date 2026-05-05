@@ -1,10 +1,57 @@
 """Stem separation using Demucs (htdemucs model family)."""
 
 import asyncio
+import json
 import re
 import shutil
 import sys
 from pathlib import Path
+
+import numpy as np
+
+
+PEAK_BUCKETS = 240
+
+
+async def _compute_peaks(audio_path: Path, buckets: int = PEAK_BUCKETS) -> list[float]:
+    """Decode `audio_path` via ffmpeg → s16le mono and reduce to per-bucket
+    max-abs amplitude in [0, 1]. Returns `buckets` floats. Lets the frontend
+    skip the Web Audio decode of every stem on the result page."""
+    proc = await asyncio.create_subprocess_exec(
+        'ffmpeg', '-nostdin', '-loglevel', 'error',
+        '-i', str(audio_path), '-vn', '-ac', '1', '-ar', '22050',
+        '-f', 's16le', '-',
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    pcm, _ = await proc.communicate()
+    n = len(pcm) // 2
+    if n == 0:
+        return [0.0] * buckets
+    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+    abs_samples = np.abs(samples)
+    idx = np.minimum(np.arange(n) * buckets // n, buckets - 1).astype(np.int32)
+    out = np.zeros(buckets, dtype=np.float32)
+    np.maximum.at(out, idx, abs_samples)
+    return out.tolist()
+
+
+async def _write_peaks_file(stem_files: dict, output_dir: Path, progress_callback=None) -> None:
+    """Compute waveform peaks for every output stem and write peaks.json."""
+    peaks_data: dict[str, list[float]] = {}
+    total = max(len(stem_files), 1)
+    for idx, (stem, filename) in enumerate(stem_files.items(), 1):
+        path = output_dir / filename
+        if not path.exists():
+            continue
+        if progress_callback:
+            pct = 96 + int(3 * idx / total)
+            await progress_callback('peaks', pct, f'Waveform peaks {idx}/{total} ({stem})')
+        try:
+            peaks_data[stem] = await _compute_peaks(path)
+        except Exception:
+            peaks_data[stem] = []
+    (output_dir / 'peaks.json').write_text(json.dumps(peaks_data))
 
 
 # Model → available stems
@@ -381,6 +428,8 @@ async def separate_stems(
         # before the real Job.send_done() fires with the full metadata. Use a
         # neutral step name instead.
         await progress_callback('finalize', 95, f'Stems ready: {stem_list}')
+
+    await _write_peaks_file(stem_files, out, progress_callback)
 
     return {
         'stems': stem_files,

@@ -172,6 +172,19 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
   const [coverFetchState, setCoverFetchState] = useState<'idle' | 'loading' | 'none' | 'error'>('idle')
   const [iniSaveState, setIniSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [iniError, setIniError] = useState('')
+  const [stemPeaks, setStemPeaks] = useState<Record<string, number[]> | null>(null)
+
+  // Fetch backend-precomputed waveform peaks once. If 404 (older job), each
+  // StemPlayer falls back to its in-browser Web Audio decode.
+  useEffect(() => {
+    if (!jobId) return
+    const ctrl = new AbortController()
+    fetch(`/api/stems/${jobId}/peaks`, { signal: ctrl.signal })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => { if (data) setStemPeaks(data) })
+      .catch(() => { /* ignore — fallback to client decode */ })
+    return () => ctrl.abort()
+  }, [jobId])
   const updateIni = (key: string, value: string) =>
     setSongIni((prev) => ({ ...prev, [key]: value }))
 
@@ -310,7 +323,7 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                 className="bg-gray-800 border border-gray-700 rounded-lg p-4 flex flex-col items-stretch gap-2"
               >
                 <span className={`text-sm font-semibold text-center ${info.color}`}>{info.label}</span>
-                <StemPlayer src={`/api/stems/${jobId}/download/${stem}`} />
+                <StemPlayer src={`/api/stems/${jobId}/download/${stem}`} peaks={stemPeaks?.[stem] ?? null} />
 
                 {/* Beatmap generation */}
                 {!bm && stem !== 'song' && (
