@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import StemPlayer from './StemPlayer.tsx'
 import BeatmapStatsModal, { BeatmapRecord } from './BeatmapStatsModal.tsx'
 import LyricsButtons from './LyricsButtons'
+import VocalBeatmapTracker from './VocalBeatmapTracker'
 
 interface StemResultProps {
   jobId: string
@@ -304,6 +305,32 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
     }
   }
 
+  const generateVocalBeatmap = async () => {
+    setBeatmaps((prev) => ({ ...prev, vocals: { jobId: '', state: 'generating' } }))
+    const meta = {
+      artist: songIni.artist || '',
+      title: songIni.name || '',
+      album: songIni.album || undefined,
+      duration_s: typeof metadata.duration === 'number' ? metadata.duration : undefined,
+    }
+    try {
+      const res = await fetch(`/api/vocals/generate?job_id=${jobId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(meta),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || `HTTP ${res.status}`)
+      }
+      const { job_id } = await res.json()
+      setBeatmaps((prev) => ({ ...prev, vocals: { jobId: job_id, state: 'generating' } }))
+    } catch (e) {
+      console.error('vocal beatmap start failed:', e)
+      setBeatmaps((prev) => ({ ...prev, vocals: { jobId: '', state: 'error' } }))
+    }
+  }
+
   return (
     <div className="space-y-6">
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-6">
@@ -342,7 +369,7 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                 {/* Beatmap generation */}
                 {!bm && stem !== 'song' && (
                   <button
-                    onClick={() => generateBeatmap(stem)}
+                    onClick={() => stem === 'vocals' ? generateVocalBeatmap() : generateBeatmap(stem)}
                     className="px-3 py-1.5 bg-green-700/60 hover:bg-green-600/70 text-green-200 rounded text-xs font-medium transition-colors w-full"
                   >
                     Generate Beatmap
@@ -356,7 +383,24 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                   </div>
                 )}
 
-                {bm?.state === 'generating' && bm.jobId && (
+                {bm?.state === 'generating' && bm.jobId && stem === 'vocals' && (
+                  <div className="w-full">
+                    <VocalBeatmapTracker
+                      beatmapJobId={bm.jobId}
+                      onCancelled={() => setBeatmaps((prev) => {
+                        const next = { ...prev }
+                        delete next.vocals
+                        return next
+                      })}
+                      onDone={() => setBeatmaps((prev) => ({
+                        ...prev,
+                        vocals: { ...(prev.vocals ?? { jobId: bm.jobId }), state: 'done' },
+                      }))}
+                    />
+                  </div>
+                )}
+
+                {bm?.state === 'generating' && bm.jobId && stem !== 'vocals' && (
                   <div className="w-full">
                     <StemBeatmapTracker
                       beatmapJobId={bm.jobId}

@@ -4,6 +4,7 @@ import CreateSection from '../components/CreateSection.tsx'
 import LyricsButtons from '../components/LyricsButtons'
 import StemPlayer from '../components/StemPlayer.tsx'
 import BeatmapStatsModal, { BeatmapRecord as BeatmapStatsRecord } from '../components/BeatmapStatsModal.tsx'
+import VocalBeatmapTracker from '../components/VocalBeatmapTracker'
 
 type BeatmapRecord = BeatmapStatsRecord
 
@@ -1126,17 +1127,36 @@ export default function TracksPage() {
     async (stem: string): Promise<string | null> => {
       const track = tracks.find((t) => t.id === selectedId)
       if (!track) return null
-      const fd = new FormData()
-      fd.append('stem', stem)
-      fd.append('name', (songIni.name || track.name || '').trim())
-      fd.append('artist', (songIni.artist || track.artist || 'Unknown').trim())
-      fd.append('album', (songIni.album || track.album || 'Unknown').trim())
-      fd.append('genre', (songIni.genre || track.genre || 'Unknown').trim())
-      fd.append('year', (songIni.year || track.year || '').trim())
-      // The backend now defaults five_lane_drums=true. Pass it explicitly for
-      // drums stems so it sticks regardless of any future schema flip.
-      if (stem === 'drums') fd.append('five_lane_drums', 'true')
       try {
+        if (stem === 'vocals') {
+          const meta = {
+            artist: (songIni.artist || track.artist || '').trim(),
+            title: (songIni.name || track.name || '').trim(),
+            album: (songIni.album || track.album || '').trim() || undefined,
+          }
+          const res = await fetch(`/api/vocals/generate?track_id=${track.id}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(meta),
+          })
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}))
+            throw new Error(err.detail || `Failed (${res.status})`)
+          }
+          const { job_id } = await res.json()
+          setInlineBmJobs((prev) => ({ ...prev, [stem]: job_id }))
+          return job_id
+        }
+        const fd = new FormData()
+        fd.append('stem', stem)
+        fd.append('name', (songIni.name || track.name || '').trim())
+        fd.append('artist', (songIni.artist || track.artist || 'Unknown').trim())
+        fd.append('album', (songIni.album || track.album || 'Unknown').trim())
+        fd.append('genre', (songIni.genre || track.genre || 'Unknown').trim())
+        fd.append('year', (songIni.year || track.year || '').trim())
+        // The backend now defaults five_lane_drums=true. Pass it explicitly for
+        // drums stems so it sticks regardless of any future schema flip.
+        if (stem === 'drums') fd.append('five_lane_drums', 'true')
         const res = await fetch(`/api/tracks/${track.id}/generate-beatmap`, {
           method: 'POST',
           body: fd,
@@ -1311,7 +1331,27 @@ export default function TracksPage() {
                         or open empty editor →
                       </button>
                     )}
-                  {inlineBmJobs[stem] && (
+                  {inlineBmJobs[stem] && stem === 'vocals' && (
+                    <VocalBeatmapTracker
+                      beatmapJobId={inlineBmJobs[stem]}
+                      onDone={() => {
+                        setInlineBmJobs((prev) => {
+                          const next = { ...prev }
+                          delete next[stem]
+                          return next
+                        })
+                        loadTracks()
+                      }}
+                      onCancelled={() => {
+                        setInlineBmJobs((prev) => {
+                          const next = { ...prev }
+                          delete next[stem]
+                          return next
+                        })
+                      }}
+                    />
+                  )}
+                  {inlineBmJobs[stem] && stem !== 'vocals' && (
                     <InlineBeatmapProgress
                       jobId={inlineBmJobs[stem]}
                       onDone={() => {
