@@ -1,4 +1,3 @@
-import { VersionsTable } from '../components/VersionStatus.tsx'
 import { STUDIO_VERSION } from '../version.ts'
 
 type Entry = { kind: 'added' | 'changed' | 'fixed'; text: string }
@@ -337,8 +336,6 @@ export default function ChangelogPage() {
           What's new in Jamsesh Studio. You're on v{STUDIO_VERSION}.
         </p>
       </div>
-
-      <VersionsTable />
 
       {RELEASES.map((r) => (
         <section key={r.version} className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">

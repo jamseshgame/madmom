@@ -3,6 +3,7 @@ import { Link, NavLink, Route, Routes, useLocation, useNavigate } from 'react-ro
 import TracksPage from './pages/TracksPage.tsx'
 import GameSongsPage from './pages/GameSongsPage.tsx'
 import ChangelogPage from './pages/ChangelogPage.tsx'
+import DependenciesPage from './pages/DependenciesPage.tsx'
 import LogsPage from './pages/LogsPage.tsx'
 import UsersPage from './pages/UsersPage.tsx'
 import BeatmapEditor from './components/BeatmapEditor.tsx'
@@ -130,6 +131,7 @@ export default function App() {
           <Route path="/logs" element={<LogsPage />} />
           <Route path="/users" element={<UsersPage />} />
           <Route path="/changelog" element={<ChangelogPage />} />
+          <Route path="/dependencies" element={<DependenciesPage />} />
         </Routes>
       </main>
       <footer className="border-t border-gray-800 py-4 text-center text-xs text-gray-600 space-x-2">
@@ -142,7 +144,11 @@ export default function App() {
         </span>
         <span className="text-gray-700">·</span>
         <Link to="/changelog" className="text-gray-500 hover:text-jam-300 transition-colors">
-          Changelog &amp; dependencies
+          Changelog
+        </Link>
+        <span className="text-gray-700">·</span>
+        <Link to="/dependencies" className="text-gray-500 hover:text-jam-300 transition-colors">
+          Dependencies
         </Link>
       </footer>
     </div>
