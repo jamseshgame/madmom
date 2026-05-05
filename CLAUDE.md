@@ -86,8 +86,8 @@ The `web/` directory contains a separate web application built on top of madmom 
 
 ### Web Architecture
 
-- **Backend** (`web/backend/`): FastAPI app with pydantic-settings config. Routers: `analyse`, `beatmap`, `stems`, `tracks`. Services handle audio processing (calling madmom CLI tools from `bin/`), chart generation, stem separation (via Demucs), and GitHub publishing. Config in `web/backend/app/config.py` reads from `.env` (see `web/.env.example`).
-- **Frontend** (`web/frontend/`): React 18 + TypeScript + Vite + Tailwind CSS. Pages: Analyse, Create, Remix, Tracks. SPA with react-router-dom.
+- **Backend** (`web/backend/`): FastAPI app with pydantic-settings config. Routers: `auth`, `beatmap`, `game_songs`, `jobs`, `stems`, `tracks`, `tutorial`, `versions`, `youtube`. Services handle audio processing (calling madmom CLI tools from `bin/`), chart generation, stem separation (via Demucs), YouTube ingest, and GitHub publishing. Config in `web/backend/app/config.py` reads from `.env` (see `web/.env.example`).
+- **Frontend** (`web/frontend/`): React 18 + TypeScript + Vite + Tailwind CSS. Pages: `TracksPage`, `GameSongsPage`, `ChangelogPage`. SPA with react-router-dom.
 - **Deployment**: DigitalOcean droplet with nginx + systemd. `web/deploy.sh` provisions a fresh Ubuntu instance. nginx config in `web/nginx/`, systemd unit in `web/systemd/`.
 
 ### Web Development Commands
