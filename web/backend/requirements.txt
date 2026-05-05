@@ -21,3 +21,7 @@ yt-dlp>=2024.3
 # VO generation. Lazy-loaded on first /api/tts/synth call. ~3 GB model
 # download + ~3 GB RSS while loaded.
 chatterbox-tts
+# Whisper transcription (CTranslate2-backed, CPU-friendly, MIT). Lazy-loaded
+# on first /api/lyrics/whisper call. Default model "medium" is ~1.5 GB and
+# downloads on first use.
+faster-whisper>=1.0
