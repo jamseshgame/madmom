@@ -253,17 +253,21 @@ export default function LyricsButtons({ scope, hasVocals, meta, onLyricsChange }
               }`}
               title={`${v.word_count} words${v.language ? ` · ${v.language}` : ''}${v.model ? ` · ${v.model}` : ''}`}
             >
+              <input
+                type="radio"
+                name="active-lyrics"
+                checked={v.active}
+                onChange={() => { if (!v.active) activate(v) }}
+                className="shrink-0 h-3.5 w-3.5 accent-jam-500 cursor-pointer"
+                title={v.active ? 'Active — used by Generate Beatmap and Publish-to-Game' : 'Make this the active lyrics version'}
+                aria-label={v.active ? 'Active lyrics version' : 'Use this version'}
+              />
               <span className={`shrink-0 inline-block px-1 py-0.5 rounded border text-[9px] font-semibold uppercase ${SOURCE_BADGE[v.source]}`}>
                 {SOURCE_LABEL[v.source]}
               </span>
               <span className="text-gray-400 truncate flex-1">
                 {fmtFetchedAt(v.fetched_at)}
               </span>
-              {v.active && (
-                <span className="shrink-0 text-jam-300 font-semibold uppercase tracking-wider">
-                  active
-                </span>
-              )}
               <button
                 onClick={() => openPreview(v)}
                 disabled={loadingPreview}
@@ -271,15 +275,6 @@ export default function LyricsButtons({ scope, hasVocals, meta, onLyricsChange }
               >
                 preview
               </button>
-              {!v.active && (
-                <button
-                  onClick={() => activate(v)}
-                  className="shrink-0 px-1 py-0.5 bg-jam-700/60 hover:bg-jam-600/80 text-jam-100 rounded text-[10px]"
-                  title="Make this the active lyrics.json used by Generate Beatmap and Publish-to-Game"
-                >
-                  use
-                </button>
-              )}
             </div>
           ))}
         </div>
