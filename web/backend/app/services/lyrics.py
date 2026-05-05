@@ -264,6 +264,114 @@ def load_lyrics(target_dir: Path) -> dict | None:
     return json.loads(path.read_text(encoding='utf-8'))
 
 
+# ---------------------------------------------------------------------------
+# Versioned lyrics history. Each successful LRClib fetch / Whisper run snapshots
+# its result into target_dir/lyrics_versions/<ts>_<source>.json so the user can
+# compare runs side-by-side and pick which one becomes the "active" lyrics.json.
+# lyrics.json itself remains the canonical input for downstream consumers
+# (build_vocal_notes, publish-to-game, the editor) — versions are an
+# orthogonal history layer.
+
+import datetime
+import re
+
+
+_VERSIONS_SUBDIR = 'lyrics_versions'
+_VERSION_FILE_RE = re.compile(r'^(\d{8}T\d{6}Z)_(lrclib|whisper)\.json$')
+
+
+def _versions_dir(target_dir: Path) -> Path:
+    return target_dir / _VERSIONS_SUBDIR
+
+
+def _utc_stamp() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+
+
+def save_lyrics_version(target_dir: Path, lyrics: dict) -> Path:
+    """Snapshot a fetched/transcribed lyrics dict into the versions folder.
+
+    Filename pattern: <UTC timestamp>_<source>.json (e.g.
+    20260505T174921Z_lrclib.json). Both lyrics.json (active) and the version
+    snapshot get the same content; this lets the UI list every run and let
+    the user pick which one becomes active without re-running anything.
+
+    Source is taken from lyrics['source']; if missing, the snapshot is
+    skipped (we don't want to record opaque PUTs from the editor as
+    "fetches"). Returns the snapshot path, or None if skipped.
+    """
+    source = (lyrics or {}).get('source')
+    if source not in ('lrclib', 'whisper'):
+        return None  # type: ignore[return-value]
+    vdir = _versions_dir(target_dir)
+    vdir.mkdir(parents=True, exist_ok=True)
+    path = vdir / f'{_utc_stamp()}_{source}.json'
+    path.write_text(json.dumps(lyrics, ensure_ascii=False, indent=2), encoding='utf-8')
+    return path
+
+
+def list_lyrics_versions(target_dir: Path) -> list[dict]:
+    """Return version metadata, newest first. Each entry:
+    {file, source, fetched_at_iso, word_count, active}."""
+    vdir = _versions_dir(target_dir)
+    if not vdir.exists():
+        return []
+    active = load_lyrics(target_dir) or {}
+    active_etag = active.get('fetched_at')
+    out: list[dict] = []
+    for p in vdir.iterdir():
+        if not p.is_file():
+            continue
+        m = _VERSION_FILE_RE.match(p.name)
+        if not m:
+            continue
+        ts_str, source = m.groups()
+        try:
+            data = json.loads(p.read_text(encoding='utf-8'))
+        except (OSError, json.JSONDecodeError):
+            continue
+        try:
+            ts = datetime.datetime.strptime(ts_str, '%Y%m%dT%H%M%SZ').replace(
+                tzinfo=datetime.timezone.utc,
+            )
+            fetched_iso = ts.strftime('%Y-%m-%dT%H:%M:%SZ')
+        except ValueError:
+            fetched_iso = ts_str
+        out.append({
+            'file': p.name,
+            'source': source,
+            'fetched_at': fetched_iso,
+            'word_count': len(data.get('words') or []),
+            'language': data.get('language'),
+            'model': data.get('model'),
+            'active': active_etag is not None and data.get('fetched_at') == active_etag,
+        })
+    out.sort(key=lambda x: x['file'], reverse=True)
+    return out
+
+
+def load_lyrics_version(target_dir: Path, filename: str) -> dict | None:
+    """Read a specific version file. Returns None if filename doesn't exist
+    or doesn't match the safe pattern."""
+    if not _VERSION_FILE_RE.match(filename):
+        return None
+    p = _versions_dir(target_dir) / filename
+    if not p.exists():
+        return None
+    return json.loads(p.read_text(encoding='utf-8'))
+
+
+def activate_lyrics_version(target_dir: Path, filename: str) -> dict | None:
+    """Copy the named version to lyrics.json so downstream consumers
+    (build_vocal_notes, publish-to-game) pick it up. Returns the activated
+    dict, or None if the version doesn't exist."""
+    data = load_lyrics_version(target_dir, filename)
+    if data is None:
+        return None
+    write_lyrics(target_dir, data)
+    return data
+
+
 _WHISPER_MODEL = None  # Lazy singleton
 
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 
 export type LyricsScope = { jobId: string } | { trackId: string }
 
@@ -10,72 +10,123 @@ type Lyrics = {
   words: Array<{ time_s: number; text: string; phrase_start?: boolean; phrase_end?: boolean }>
 }
 
+type LyricsVersion = {
+  file: string
+  source: 'lrclib' | 'whisper'
+  fetched_at: string
+  word_count: number
+  language?: string
+  model?: string
+  active: boolean
+}
+
 type Props = {
   scope: LyricsScope
   hasVocals: boolean
-  // Used by the LRClib search; pass the song.ini fields the parent already has.
   meta: { artist: string; title: string; album?: string; duration_s?: number }
-  // Optional: parent can listen for lyrics changes to update its own state.
   onLyricsChange?: (lyrics: Lyrics | null) => void
 }
 
-type Phase =
+type WhisperState =
   | { kind: 'idle' }
-  | { kind: 'lrclib-loading' }
-  | { kind: 'lrclib-miss' }
-  | { kind: 'whisper-running'; jobId: string; progress: number; message: string }
-  | { kind: 'have-lyrics'; lyrics: Lyrics }
-  | { kind: 'error'; message: string }
+  | { kind: 'running'; jobId: string; progress: number; message: string }
+type LrclibState =
+  | { kind: 'idle' }
+  | { kind: 'loading' }
+  | { kind: 'miss' }
+type ErrorState = { kind: 'none' } | { kind: 'error'; message: string }
 
 function scopeQuery(scope: LyricsScope): string {
   return 'jobId' in scope ? `job_id=${scope.jobId}` : `track_id=${scope.trackId}`
 }
 
-export default function LyricsButtons({ scope, hasVocals, meta, onLyricsChange }: Props) {
-  const [phase, setPhase] = useState<Phase>({ kind: 'idle' })
-  const [previewOpen, setPreviewOpen] = useState(false)
+const fmtFetchedAt = (iso: string): string => {
+  // "2026-05-05T17:49:21Z" -> "5 May, 18:49"
+  try {
+    const d = new Date(iso)
+    if (isNaN(d.getTime())) return iso
+    return d.toLocaleString(undefined, {
+      day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
+    })
+  } catch {
+    return iso
+  }
+}
 
-  // Hydrate from the server on mount.
+const SOURCE_LABEL: Record<LyricsVersion['source'], string> = {
+  lrclib: 'LRClib',
+  whisper: 'Whisper',
+}
+
+const SOURCE_BADGE: Record<LyricsVersion['source'], string> = {
+  lrclib: 'bg-purple-700/40 text-purple-200 border-purple-700/60',
+  whisper: 'bg-sky-700/40 text-sky-200 border-sky-700/60',
+}
+
+export default function LyricsButtons({ scope, hasVocals, meta, onLyricsChange }: Props) {
+  const [lrclib, setLrclib] = useState<LrclibState>({ kind: 'idle' })
+  const [whisper, setWhisper] = useState<WhisperState>({ kind: 'idle' })
+  const [error, setError] = useState<ErrorState>({ kind: 'none' })
+  const [versions, setVersions] = useState<LyricsVersion[]>([])
+  const [previewVersion, setPreviewVersion] = useState<{ meta: LyricsVersion; lyrics: Lyrics } | null>(null)
+  const [loadingPreview, setLoadingPreview] = useState(false)
+
+  const refreshVersions = useCallback(async () => {
+    try {
+      const r = await fetch(`/api/lyrics/versions?${scopeQuery(scope)}`)
+      if (!r.ok) return
+      const data: LyricsVersion[] = await r.json()
+      setVersions(data)
+    } catch {
+      /* swallow — list is non-critical */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(scope)])
+
+  // Hydrate active lyrics + versions on mount.
   useEffect(() => {
     let cancelled = false
     fetch(`/api/lyrics?${scopeQuery(scope)}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (cancelled) return
-        if (data && data.words) {
-          setPhase({ kind: 'have-lyrics', lyrics: data })
-          onLyricsChange?.(data)
-        }
+        if (data && data.words) onLyricsChange?.(data)
       })
       .catch(() => {})
-    return () => {
-      cancelled = true
-    }
+    refreshVersions()
+    return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [JSON.stringify(scope)])
 
   const fetchLrclib = async () => {
-    setPhase({ kind: 'lrclib-loading' })
+    setError({ kind: 'none' })
+    setLrclib({ kind: 'loading' })
     try {
       const res = await fetch(`/api/lyrics/lrclib?${scopeQuery(scope)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(meta),
       })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({}))
+        throw new Error(e.detail || `HTTP ${res.status}`)
+      }
       const data: Lyrics = await res.json()
       if (!data.source) {
-        setPhase({ kind: 'lrclib-miss' })
+        setLrclib({ kind: 'miss' })
         return
       }
-      setPhase({ kind: 'have-lyrics', lyrics: data })
       onLyricsChange?.(data)
+      setLrclib({ kind: 'idle' })
+      refreshVersions()
     } catch (e) {
-      setPhase({ kind: 'error', message: (e as Error).message })
+      setLrclib({ kind: 'idle' })
+      setError({ kind: 'error', message: (e as Error).message })
     }
   }
 
   const startWhisper = async () => {
+    setError({ kind: 'none' })
     try {
       const res = await fetch(`/api/lyrics/whisper?${scopeQuery(scope)}`, { method: 'POST' })
       if (!res.ok) {
@@ -83,100 +134,193 @@ export default function LyricsButtons({ scope, hasVocals, meta, onLyricsChange }
         throw new Error(err.detail || `HTTP ${res.status}`)
       }
       const { job_id } = await res.json()
-      setPhase({ kind: 'whisper-running', jobId: job_id, progress: 0, message: 'Starting…' })
+      setWhisper({ kind: 'running', jobId: job_id, progress: 0, message: 'Starting…' })
 
       const es = new EventSource(`/api/jobs/${job_id}/events`)
       es.onmessage = async (ev) => {
         const d = JSON.parse(ev.data)
         if (typeof d.progress === 'number' && d.progress >= 0) {
-          setPhase((p) => (p.kind === 'whisper-running' ? { ...p, progress: d.progress, message: d.message ?? p.message } : p))
+          setWhisper((p) => (
+            p.kind === 'running' ? { ...p, progress: d.progress, message: d.message ?? p.message } : p
+          ))
         }
         if (d.step === 'done') {
           es.close()
-          // Reload the saved lyrics now that they're persisted server-side
+          setWhisper({ kind: 'idle' })
+          // Reload active lyrics + versions
           const got = await fetch(`/api/lyrics?${scopeQuery(scope)}`)
           if (got.ok) {
             const lyrics: Lyrics = await got.json()
-            setPhase({ kind: 'have-lyrics', lyrics })
             onLyricsChange?.(lyrics)
-          } else {
-            setPhase({ kind: 'error', message: 'Transcription finished but lyrics could not be loaded' })
           }
+          refreshVersions()
         } else if (d.step === 'error' || d.step === 'cancelled') {
           es.close()
-          setPhase({ kind: 'error', message: d.message || 'Whisper failed' })
+          setWhisper({ kind: 'idle' })
+          setError({ kind: 'error', message: d.message || 'Whisper failed' })
         }
       }
       es.onerror = () => {
-        es.close()
-        setPhase({ kind: 'error', message: 'SSE connection lost' })
+        if (es.readyState === EventSource.CLOSED) {
+          setError({ kind: 'error', message: 'SSE connection lost' })
+          setWhisper({ kind: 'idle' })
+        }
       }
     } catch (e) {
-      setPhase({ kind: 'error', message: (e as Error).message })
+      setWhisper({ kind: 'idle' })
+      setError({ kind: 'error', message: (e as Error).message })
     }
   }
 
-  const lrclibLabel =
-    phase.kind === 'lrclib-loading'
-      ? 'Searching…'
-      : phase.kind === 'lrclib-miss'
-        ? 'No match — try again'
-        : phase.kind === 'have-lyrics'
-          ? 'Preview Lyrics'
-          : 'Get Lyrics'
+  const openPreview = async (v: LyricsVersion) => {
+    setLoadingPreview(true)
+    try {
+      const r = await fetch(`/api/lyrics/versions/${encodeURIComponent(v.file)}?${scopeQuery(scope)}`)
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      const data: Lyrics = await r.json()
+      setPreviewVersion({ meta: v, lyrics: data })
+    } catch (e) {
+      setError({ kind: 'error', message: (e as Error).message })
+    } finally {
+      setLoadingPreview(false)
+    }
+  }
 
-  const lrclibDisabled = phase.kind === 'lrclib-loading' || phase.kind === 'whisper-running'
-  const lrclibAction = phase.kind === 'have-lyrics' ? () => setPreviewOpen(true) : fetchLrclib
+  const activate = async (v: LyricsVersion) => {
+    try {
+      const r = await fetch(`/api/lyrics/versions/${encodeURIComponent(v.file)}/activate?${scopeQuery(scope)}`, {
+        method: 'POST',
+      })
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}))
+        throw new Error(e.detail || `HTTP ${r.status}`)
+      }
+      const got = await fetch(`/api/lyrics?${scopeQuery(scope)}`)
+      if (got.ok) {
+        const lyrics: Lyrics = await got.json()
+        onLyricsChange?.(lyrics)
+      }
+      refreshVersions()
+    } catch (e) {
+      setError({ kind: 'error', message: (e as Error).message })
+    }
+  }
+
+  const lrclibBusy = lrclib.kind === 'loading' || whisper.kind === 'running'
+  const whisperBusy = whisper.kind === 'running' || lrclib.kind === 'loading'
 
   return (
-    <>
+    <div className="space-y-1.5 w-full">
       <button
-        onClick={lrclibAction}
-        disabled={lrclibDisabled}
+        onClick={fetchLrclib}
+        disabled={lrclibBusy}
         className="px-3 py-1.5 bg-purple-700/60 hover:bg-purple-600/70 disabled:opacity-50 text-purple-100 rounded text-xs font-medium transition-colors w-full"
       >
-        {lrclibLabel}
+        {lrclib.kind === 'loading'
+          ? 'Searching LRClib…'
+          : lrclib.kind === 'miss'
+            ? 'No LRClib match — try again'
+            : 'Get lyrics from LRClib'}
       </button>
       {hasVocals && (
         <button
           onClick={startWhisper}
-          disabled={phase.kind === 'whisper-running' || phase.kind === 'lrclib-loading'}
-          className="px-3 py-1.5 bg-gray-700/70 hover:bg-gray-600/80 disabled:opacity-50 text-gray-200 rounded text-xs font-medium transition-colors w-full"
+          disabled={whisperBusy}
+          className="px-3 py-1.5 bg-sky-700/60 hover:bg-sky-600/70 disabled:opacity-50 text-sky-100 rounded text-xs font-medium transition-colors w-full"
           title="Local Whisper transcription. ~2 min on CPU; first run downloads ~1.5 GB."
         >
-          {phase.kind === 'whisper-running'
-            ? `Transcribing… ${phase.progress}%`
-            : phase.kind === 'have-lyrics' && phase.lyrics.source === 'whisper'
-              ? 'Re-transcribe'
-              : 'Transcribe Vocals'}
+          {whisper.kind === 'running'
+            ? `Transcribing… ${whisper.progress}%`
+            : 'Transcribe with Whisper'}
         </button>
       )}
-      {previewOpen && phase.kind === 'have-lyrics' && (
-        <PreviewModal lyrics={phase.lyrics} onClose={() => setPreviewOpen(false)} />
+
+      {error.kind === 'error' && (
+        <div className="text-[10px] text-red-300 truncate" title={error.message}>
+          {error.message}
+        </div>
       )}
-    </>
+
+      {versions.length > 0 && (
+        <div className="pt-1 space-y-1">
+          {versions.map((v) => (
+            <div
+              key={v.file}
+              className={`flex items-center gap-1 text-[10px] rounded border px-1.5 py-1 ${
+                v.active
+                  ? 'border-jam-600/60 bg-jam-700/20'
+                  : 'border-gray-800 bg-gray-900/40'
+              }`}
+              title={`${v.word_count} words${v.language ? ` · ${v.language}` : ''}${v.model ? ` · ${v.model}` : ''}`}
+            >
+              <span className={`shrink-0 inline-block px-1 py-0.5 rounded border text-[9px] font-semibold uppercase ${SOURCE_BADGE[v.source]}`}>
+                {SOURCE_LABEL[v.source]}
+              </span>
+              <span className="text-gray-400 truncate flex-1">
+                {fmtFetchedAt(v.fetched_at)}
+              </span>
+              {v.active && (
+                <span className="shrink-0 text-jam-300 font-semibold uppercase tracking-wider">
+                  active
+                </span>
+              )}
+              <button
+                onClick={() => openPreview(v)}
+                disabled={loadingPreview}
+                className="shrink-0 px-1 py-0.5 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded text-[10px]"
+              >
+                preview
+              </button>
+              {!v.active && (
+                <button
+                  onClick={() => activate(v)}
+                  className="shrink-0 px-1 py-0.5 bg-jam-700/60 hover:bg-jam-600/80 text-jam-100 rounded text-[10px]"
+                  title="Make this the active lyrics.json used by Generate Beatmap and Publish-to-Game"
+                >
+                  use
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {previewVersion && (
+        <PreviewModal
+          version={previewVersion.meta}
+          lyrics={previewVersion.lyrics}
+          onClose={() => setPreviewVersion(null)}
+        />
+      )}
+    </div>
   )
 }
 
-function PreviewModal({ lyrics, onClose }: { lyrics: Lyrics; onClose: () => void }) {
-  const sourceLabel =
-    lyrics.source === 'lrclib'
-      ? 'LRClib'
-      : lyrics.source === 'whisper'
-        ? `Whisper · ${lyrics.model || 'medium'}`
-        : 'unknown'
+function PreviewModal({
+  version,
+  lyrics,
+  onClose,
+}: {
+  version: LyricsVersion
+  lyrics: Lyrics
+  onClose: () => void
+}) {
   return (
     <div
       className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center px-4"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose()
-      }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
     >
       <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-lg p-5 space-y-3 max-h-[80vh] flex flex-col">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2">
           <h3 className="text-lg font-semibold text-gray-100">Lyrics</h3>
           <span className="text-xs text-gray-500">
-            {sourceLabel} · {lyrics.words.length} words
+            <span className={`inline-block px-1.5 py-0.5 rounded border text-[10px] font-semibold uppercase mr-2 ${SOURCE_BADGE[version.source]}`}>
+              {SOURCE_LABEL[version.source]}
+            </span>
+            {fmtFetchedAt(version.fetched_at)} · {lyrics.words.length} words
+            {lyrics.language ? ` · ${lyrics.language}` : ''}
+            {lyrics.model ? ` · ${lyrics.model}` : ''}
+            {version.active ? ' · active' : ''}
           </span>
         </div>
         <div className="flex-1 overflow-auto font-mono text-xs space-y-0.5 bg-black/30 rounded p-3">

@@ -96,6 +96,7 @@ async def post_lrclib(
         return {'source': None}
     target.mkdir(parents=True, exist_ok=True)
     lyrics_service.write_lyrics(target, result)
+    lyrics_service.save_lyrics_version(target, result)
     return result
 
 
@@ -138,6 +139,7 @@ async def post_whisper(
             )
             target.mkdir(parents=True, exist_ok=True)
             lyrics_service.write_lyrics(target, result)
+            lyrics_service.save_lyrics_version(target, result)
             await work_job.send_done({'word_count': len(result['words']), 'source': 'whisper'})
         except asyncio.CancelledError:
             return
@@ -147,3 +149,46 @@ async def post_whisper(
 
     work_job.task = asyncio.create_task(_run())
     return {'job_id': work_job.id}
+
+
+# --- Versioned lyrics history -------------------------------------------------
+
+@router.get('/versions')
+async def list_versions(
+    job_id: str | None = Query(default=None),
+    track_id: str | None = Query(default=None),
+):
+    """List every saved LRClib fetch / Whisper run for this scope, newest
+    first. Each entry tells the UI which one is currently the active
+    lyrics.json (`active=true`) so the user can pick a different version
+    via POST /versions/activate."""
+    target = _resolve_dir(job_id=job_id, track_id=track_id)
+    return lyrics_service.list_lyrics_versions(target)
+
+
+@router.get('/versions/{filename}')
+async def get_version(
+    filename: str,
+    job_id: str | None = Query(default=None),
+    track_id: str | None = Query(default=None),
+):
+    target = _resolve_dir(job_id=job_id, track_id=track_id)
+    data = lyrics_service.load_lyrics_version(target, filename)
+    if data is None:
+        raise HTTPException(404, 'Version not found')
+    return data
+
+
+@router.post('/versions/{filename}/activate')
+async def activate_version(
+    filename: str,
+    job_id: str | None = Query(default=None),
+    track_id: str | None = Query(default=None),
+):
+    """Copy the named version into lyrics.json so downstream consumers
+    (build_vocal_notes, publish-to-game) use it."""
+    target = _resolve_dir(job_id=job_id, track_id=track_id)
+    data = lyrics_service.activate_lyrics_version(target, filename)
+    if data is None:
+        raise HTTPException(404, 'Version not found')
+    return {'ok': True, 'source': data.get('source'), 'word_count': len(data.get('words') or [])}
