@@ -311,12 +311,6 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
               >
                 <span className={`text-sm font-semibold text-center ${info.color}`}>{info.label}</span>
                 <StemPlayer src={`/api/stems/${jobId}/download/${stem}`} />
-                <a
-                  href={`/api/stems/${jobId}/download/${stem}`}
-                  className="px-2.5 py-1.5 bg-gray-700 text-gray-300 hover:bg-gray-600 rounded text-xs font-medium transition-colors text-center"
-                >
-                  Download
-                </a>
 
                 {/* Beatmap generation */}
                 {!bm && stem !== 'song' && (
