@@ -25,3 +25,4 @@ chatterbox-tts
 # on first /api/lyrics/whisper call. Default model "medium" is ~1.5 GB and
 # downloads on first use.
 faster-whisper>=1.0
+pytest-asyncio>=0.23

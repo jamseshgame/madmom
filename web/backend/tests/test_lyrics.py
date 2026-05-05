@@ -1,7 +1,10 @@
 """Unit tests for the lyrics service."""
 from __future__ import annotations
 
-from app.services.lyrics import parse_lrc
+import httpx
+import pytest
+
+from app.services.lyrics import fetch_from_lrclib, interpolate_words, parse_lrc
 
 
 def test_parse_lrc_basic():
@@ -42,9 +45,6 @@ def test_parse_lrc_empty_input():
     assert parse_lrc("") == []
 
 
-from app.services.lyrics import interpolate_words
-
-
 def _approx(a: float, b: float, tol: float = 0.01) -> bool:
     return abs(a - b) <= tol
 
@@ -82,3 +82,88 @@ def test_interpolate_zero_duration_falls_back_to_line_start():
     assert all(_approx(w["time_s"], 2.0) for w in words)
     assert words[0]["phrase_start"] is True
     assert words[-1]["phrase_end"] is True
+
+
+@pytest.mark.asyncio
+async def test_lrclib_synced_hit(monkeypatch):
+    sample = {
+        "id": 1,
+        "syncedLyrics": "[00:01.00]Hello world\n[00:03.00]Goodbye\n",
+        "plainLyrics": "Hello world\nGoodbye",
+        "duration": 4.0,
+    }
+
+    class MockResponse:
+        status_code = 200
+        def json(self):
+            return sample
+        def raise_for_status(self):
+            pass
+
+    class MockClient:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            pass
+        async def get(self, url, params, timeout):
+            return MockResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: MockClient())
+
+    result = await fetch_from_lrclib(
+        artist="X", title="Y", album=None, duration_s=4.0,
+    )
+    assert result is not None
+    assert result["source"] == "lrclib"
+    assert result["language"] == "en"   # default; we don't ask LRClib for language
+    # Two lines → at least 2 phrases. "Hello world" → 2 words, "Goodbye" → 1.
+    texts = [w["text"] for w in result["words"]]
+    assert texts == ["Hello", "world", "Goodbye"]
+    assert result["words"][0]["phrase_start"] is True
+    assert result["words"][1]["phrase_end"] is True
+    assert result["words"][2]["phrase_start"] is True
+    assert result["words"][2]["phrase_end"] is True
+
+
+@pytest.mark.asyncio
+async def test_lrclib_text_only_returns_none(monkeypatch):
+    sample = {"syncedLyrics": "", "plainLyrics": "no timing here"}
+
+    class MockResponse:
+        status_code = 200
+        def json(self):
+            return sample
+        def raise_for_status(self):
+            pass
+
+    class MockClient:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            pass
+        async def get(self, *a, **kw):
+            return MockResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: MockClient())
+    result = await fetch_from_lrclib(artist="X", title="Y", album=None, duration_s=None)
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_lrclib_404_returns_none(monkeypatch):
+    class MockResponse:
+        status_code = 404
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("404", request=None, response=self)
+
+    class MockClient:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            pass
+        async def get(self, *a, **kw):
+            return MockResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: MockClient())
+    result = await fetch_from_lrclib(artist="X", title="Y", album=None, duration_s=None)
+    assert result is None
