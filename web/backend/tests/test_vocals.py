@@ -162,7 +162,7 @@ def test_build_vocal_notes_orchestrates_syllabify_and_pitch_alignment(monkeypatc
     fake_conf = [0.9] * n_frames
 
     from app.services import vocals as vocals_service
-    monkeypatch.setattr(vocals_service, 'detect_pitches', lambda p: (fake_f0, fake_conf))
+    monkeypatch.setattr(vocals_service, 'detect_pitches', lambda p, **_kw: (fake_f0, fake_conf))
 
     # Lyrics: two LRClib-style words spanning 0..1.0 and 1.0..2.0
     lyrics = {

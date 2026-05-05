@@ -147,12 +147,27 @@ def _load_crepe_model():
     return torchcrepe
 
 
-def detect_pitches(vocals_path: Path) -> tuple[list[float], list[float]]:
+def detect_pitches(
+    vocals_path: Path,
+    *,
+    model_size: str = 'full',
+    fmin: float = 50.0,
+    fmax: float = 1000.0,
+    periodicity_threshold: float = 0.21,
+) -> tuple[list[float], list[float]]:
     """Detect per-frame pitch (Hz) and confidence on a vocals stem.
 
     Returns (f0_hz, confidence). Frames where the model is unsure
-    (periodicity < 0.21) have f0_hz set to NaN. 10 ms hop. Loads the model
-    on first call.
+    (periodicity < `periodicity_threshold`) have f0_hz set to NaN.
+    10 ms hop. Loads the model on first call.
+
+    Tunables exposed to the UI:
+      model_size               'full' (default, accurate, slow) or 'tiny'
+                               (~50× faster, less accurate).
+      fmin / fmax              CREPE pitch search window in Hz. Narrow to
+                               the singer's range to ignore instrument bleed.
+      periodicity_threshold    Below this CREPE periodicity value, frames
+                               are masked as unvoiced (NaN).
     """
     import torch
     import torchaudio
@@ -178,21 +193,23 @@ def detect_pitches(vocals_path: Path) -> tuple[list[float], list[float]]:
     hop_samples = round(sr * 0.010)
     torchcrepe = _load_crepe_model()
 
+    safe_model = model_size if model_size in ('full', 'tiny') else 'full'
     pitch, periodicity = torchcrepe.predict(
         audio,
         sr,
         hop_length=hop_samples,
-        model='full',
+        fmin=float(fmin),
+        fmax=float(fmax),
+        model=safe_model,
         batch_size=128,
         device='cpu',
         decoder=torchcrepe.decode.viterbi,
         return_periodicity=True,
     )
 
-    threshold = 0.21
     f0 = pitch.squeeze(0).numpy().astype(float)
     conf = periodicity.squeeze(0).numpy().astype(float)
-    f0_masked = np.where(conf < threshold, np.nan, f0)
+    f0_masked = np.where(conf < float(periodicity_threshold), np.nan, f0)
     return f0_masked.tolist(), conf.tolist()
 
 
@@ -240,13 +257,26 @@ def build_vocal_notes(
     vocals_path: Path,
     lyrics: dict,
     progress_callback=None,
+    *,
+    model_size: str = 'full',
+    fmin: float = 50.0,
+    fmax: float = 1000.0,
+    periodicity_threshold: float = 0.21,
+    transpose_semitones: int = 0,
+    min_note_duration_s: float = 0.0,
 ) -> dict:
     """Run pitch detection on the vocals stem, syllabify the lyrics, and
     align pitch frames to syllable windows. Returns the normalized
     `vocal_notes.json` shape."""
     if progress_callback:
         progress_callback('crepe', 70, 'Detecting pitch...')
-    f0, conf = detect_pitches(vocals_path)
+    f0, conf = detect_pitches(
+        vocals_path,
+        model_size=model_size,
+        fmin=fmin,
+        fmax=fmax,
+        periodicity_threshold=periodicity_threshold,
+    )
     hop_s = 0.010
 
     if progress_callback:
@@ -271,6 +301,10 @@ def build_vocal_notes(
             midi_pitch = out_sylls[-1]['midi_pitch'] if out_sylls else 60
             median_conf = 0.0
             curve_midi = []
+        # Transpose: applied after detection so pitch_curve_st reflects the
+        # raw recording, but midi_pitch (the playable note) is shifted.
+        if transpose_semitones:
+            midi_pitch = max(0, min(127, midi_pitch + int(transpose_semitones)))
 
         # Synthetic dB envelope from confidence until RMS is wired through.
         dyn_proxy = [-30.0 + 30.0 * c for c in (conf_voiced or [median_conf])]
@@ -300,6 +334,11 @@ def build_vocal_notes(
     if progress_callback:
         progress_callback('write', 96, 'Building vocal notes...')
 
+    # Drop syllables shorter than the minimum (after all assembly so adjacent
+    # syllables can still inherit pitch from a dropped neighbour earlier).
+    if min_note_duration_s and min_note_duration_s > 0:
+        out_sylls = [s for s in out_sylls if s.get('duration_s', 0.0) >= min_note_duration_s]
+
     is_english = bool(language) and language.lower().startswith('en')
     # Capture the torchcrepe package version so the UI can flag stale
     # vocalmaps the same way it does for lyrics + faster-whisper.
@@ -311,12 +350,20 @@ def build_vocal_notes(
     return {
         'version': 1,
         'syllabified_from': lyrics.get('source') or 'unknown',
-        'pitch_model': 'torchcrepe-full',
+        'pitch_model': f'torchcrepe-{model_size}' if model_size in ('full', 'tiny') else 'torchcrepe-full',
         'pitch_model_version': pitch_model_version,
         'syllabifier': f'ssp-{language}' if is_english else 'per-word',
         'frame_hop_s': hop_s,
         'lyrics_etag': lyrics_etag,
         'fetched_at': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'params': {
+            'model_size': model_size,
+            'fmin': fmin,
+            'fmax': fmax,
+            'periodicity_threshold': periodicity_threshold,
+            'transpose_semitones': transpose_semitones,
+            'min_note_duration_s': min_note_duration_s,
+        },
         'syllables': out_sylls,
     }
 
@@ -408,7 +455,9 @@ def list_vocal_notes_versions(target_dir: Path) -> list[dict]:
             'fetched_at': fetched_iso,
             'syllable_count': len(data.get('syllables') or []),
             'pitch_model_version': data.get('pitch_model_version'),
+            'pitch_model': data.get('pitch_model'),
             'syllabified_from': data.get('syllabified_from'),
+            'params': data.get('params'),
             'active': active_etag is not None and data.get('fetched_at') == active_etag,
         })
     out.sort(key=lambda x: x['file'], reverse=True)

@@ -130,6 +130,18 @@ async def post_generate(
     if vocals is None or not vocals.exists():
         raise HTTPException(404, 'No vocals stem available for this scope')
 
+    # Pull tunables out of the body so build_vocal_notes gets them through
+    # run_in_executor below. Validation is light — the service already
+    # clamps model_size and falls back to defaults on bad floats.
+    gen_params = {
+        'model_size': str(body.get('model_size') or 'full'),
+        'fmin': float(body.get('fmin') or 50.0),
+        'fmax': float(body.get('fmax') or 1000.0),
+        'periodicity_threshold': float(body.get('periodicity_threshold') or 0.21),
+        'transpose_semitones': int(body.get('transpose_semitones') or 0),
+        'min_note_duration_s': float(body.get('min_note_duration_s') or 0.0),
+    }
+
     work_job = create_job(kind=JobKind.OTHER, title='Vocal beatmap generation')
 
     async def _run() -> None:
@@ -192,7 +204,9 @@ async def post_generate(
             try:
                 notes = await loop.run_in_executor(
                     None,
-                    lambda: vocals_service.build_vocal_notes(vocals, lyrics, sync_build_progress),
+                    lambda: vocals_service.build_vocal_notes(
+                        vocals, lyrics, sync_build_progress, **gen_params,
+                    ),
                 )
             finally:
                 hb.cancel()
