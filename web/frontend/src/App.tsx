@@ -4,6 +4,7 @@ import GameSongsPage from './pages/GameSongsPage.tsx'
 import ChangelogPage from './pages/ChangelogPage.tsx'
 import LogsPage from './pages/LogsPage.tsx'
 import BeatmapEditor from './components/BeatmapEditor.tsx'
+import VocalEditor from './components/VocalEditor.tsx'
 import { VersionBanner } from './components/VersionStatus.tsx'
 import { logout } from './components/AuthGate.tsx'
 import { STUDIO_VERSION } from './version.ts'
@@ -21,6 +22,13 @@ export default function App() {
     return (
       <Routes>
         <Route path="/edit/:trackId/:beatmapId" element={<BeatmapEditor />} />
+      </Routes>
+    )
+  }
+  if (location.pathname.startsWith('/edit-vocals/')) {
+    return (
+      <Routes>
+        <Route path="/edit-vocals/:trackId" element={<VocalEditor />} />
       </Routes>
     )
   }

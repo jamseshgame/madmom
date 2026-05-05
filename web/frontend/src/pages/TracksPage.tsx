@@ -1262,16 +1262,25 @@ export default function TracksPage() {
                   </span>
                   <StemPlayer src={`/api/tracks/${selectedTrack.id}/stems/${stem}`} />
                   {stem === 'vocals' && (
-                    <LyricsButtons
-                      scope={{ trackId: selectedTrack.id }}
-                      hasVocals={true}
-                      meta={{
-                        artist: (songIni.artist || '').trim() || selectedTrack.artist,
-                        title: (songIni.name || '').trim() || selectedTrack.name,
-                        album: (songIni.album || '').trim() || selectedTrack.album,
-                        duration_s: undefined,
-                      }}
-                    />
+                    <>
+                      <LyricsButtons
+                        scope={{ trackId: selectedTrack.id }}
+                        hasVocals={true}
+                        meta={{
+                          artist: (songIni.artist || '').trim() || selectedTrack.artist,
+                          title: (songIni.name || '').trim() || selectedTrack.name,
+                          album: (songIni.album || '').trim() || selectedTrack.album,
+                          duration_s: undefined,
+                        }}
+                      />
+                      <button
+                        onClick={() => navigate(`/edit-vocals/${selectedTrack.id}`)}
+                        className="px-2 py-1 bg-pink-700/40 hover:bg-pink-600/60 border border-pink-700/60 text-pink-200 rounded text-xs font-medium transition-colors"
+                        title="Open the vocal beatmap editor for this track"
+                      >
+                        Edit vocals
+                      </button>
+                    </>
                   )}
                   <div className="flex flex-wrap gap-1.5 justify-center items-center">
                     {stem === 'song' ? (
