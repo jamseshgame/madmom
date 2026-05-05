@@ -387,6 +387,7 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
   const [albumArt, setAlbumArt] = useState<File | null>(null)
   const [albumPreview, setAlbumPreview] = useState<string | null>(null)
   const albumInputRef = useRef<HTMLInputElement | null>(null)
+  const [coverFetchState, setCoverFetchState] = useState<'idle' | 'loading' | 'none' | 'error'>('idle')
   const [mode, setMode] = useState<'generate' | 'manual'>('generate')
   const [manualStems, setManualStems] = useState<Record<string, File | null>>({
     vocals: null,
@@ -522,6 +523,39 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
     setAlbumArt(f)
     if (albumPreview) URL.revokeObjectURL(albumPreview)
     setAlbumPreview(URL.createObjectURL(f))
+  }
+
+  const fetchCoverByTags = async () => {
+    const artist = (songIni.artist || '').trim()
+    const title = (songIni.name || '').trim()
+    const album = (songIni.album || '').trim()
+    if (!artist && !title && !album) {
+      setCoverFetchState('error')
+      return
+    }
+    setCoverFetchState('loading')
+    try {
+      const fd = new FormData()
+      fd.append('artist', artist)
+      fd.append('title', title)
+      fd.append('album', album)
+      const res = await fetch('/api/beatmap/cover-art-search', { method: 'POST', body: fd })
+      if (res.status === 204) {
+        setCoverFetchState('none')
+        return
+      }
+      if (!res.ok) throw new Error(`${res.status}`)
+      const blob = await res.blob()
+      if (blob.size === 0) {
+        setCoverFetchState('none')
+        return
+      }
+      const file = new File([blob], 'album.png', { type: 'image/png' })
+      handleAlbumArtSelect(file)
+      setCoverFetchState('idle')
+    } catch {
+      setCoverFetchState('error')
+    }
   }
 
   const handleModelChange = (m: string) => {
@@ -950,11 +984,28 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
                         className="hidden"
                         onChange={(e) => handleAlbumArtSelect(e.target.files?.[0] ?? null)}
                       />
-                      <div className="text-xs text-gray-500 mt-1">
+                      <div className="text-xs text-gray-500 mt-1 flex-1">
                         <p>
                           <span className="text-gray-400 font-mono">album.png</span> — embedded in the game folder. Auto-pulled from the audio file when present.
                         </p>
                         <p className="text-gray-600 mt-1">Any image is resized to 512×512 PNG.</p>
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={fetchCoverByTags}
+                            disabled={coverFetchState === 'loading' || (!songIni.name && !songIni.artist && !songIni.album)}
+                            className="px-2.5 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 border border-gray-700 hover:border-gray-600 text-gray-200 rounded-md text-xs font-medium transition-colors"
+                            title="Pull cover art from iTunes / MusicBrainz using the name + artist below"
+                          >
+                            {coverFetchState === 'loading' ? 'Searching…' : 'Auto-fetch from name + artist'}
+                          </button>
+                          {coverFetchState === 'none' && (
+                            <span className="text-amber-400">No cover found for those tags</span>
+                          )}
+                          {coverFetchState === 'error' && (
+                            <span className="text-red-400">Search failed — fill in name + artist first</span>
+                          )}
+                        </div>
                       </div>
                     </div>
 
