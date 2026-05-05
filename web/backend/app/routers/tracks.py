@@ -875,22 +875,47 @@ async def publish_track_to_game(
                         'selected_beatmaps': beatmap_selection,
                     }
 
-        # Lyrics: copy lyrics.json into the published folder and rewrite the
-        # chart's [Events] block. Looks at the track dir first; no job-level
-        # fallback is available here (publish_track_to_game has no demucs job
-        # in scope — track.stems_dir is the canonical lyrics location).
+        # Vocals (preferred) / lyrics (fallback): if vocal_notes.json exists,
+        # write a [JamseshVocals] block (and clear stale [Events] lyric/phrase
+        # entries from Plan A). Otherwise fall back to Plan A's lyric event
+        # injection. lyrics.json is always copied alongside if present.
+        from app.services import vocals as vocals_service
+
+        vocal_notes_data = vocals_service.load_vocal_notes(track.stems_dir)
         lyrics_data = lyrics_service.load_lyrics(track.stems_dir)
+
+        vocals_summary: dict = {
+            'source': None, 'syllable_count': 0, 'voicing': {},
+            'pitch_model': None, 'included': False,
+        }
         lyrics_summary: dict = {'source': None, 'word_count': 0, 'included': False}
-        if lyrics_data:
-            chart_path = tmp_dir / 'notes_fixed_slides.chart'
-            if chart_path.exists():
-                inserted = lyrics_service.inject_into_chart(chart_path, lyrics_data)
+
+        chart_path = tmp_dir / 'notes_fixed_slides.chart'
+
+        if vocal_notes_data and chart_path.exists():
+            inserted = vocals_service.inject_vocals_into_chart(chart_path, vocal_notes_data)
+            vocals_service.write_vocal_notes(tmp_dir, vocal_notes_data)
+            voicing: dict[str, int] = {'sung': 0, 'spoken': 0, 'whispered': 0}
+            for s in vocal_notes_data.get('syllables', []):
+                v = s.get('voicing', 'sung')
+                voicing[v] = voicing.get(v, 0) + 1
+            vocals_summary = {
+                'source': vocal_notes_data.get('syllabified_from'),
+                'syllable_count': inserted,
+                'voicing': voicing,
+                'pitch_model': vocal_notes_data.get('pitch_model'),
+                'included': True,
+            }
+            if lyrics_data:
                 lyrics_service.write_lyrics(tmp_dir, lyrics_data)
-                lyrics_summary = {
-                    'source': lyrics_data.get('source'),
-                    'word_count': inserted,
-                    'included': True,
-                }
+        elif lyrics_data and chart_path.exists():
+            inserted = lyrics_service.inject_into_chart(chart_path, lyrics_data)
+            lyrics_service.write_lyrics(tmp_dir, lyrics_data)
+            lyrics_summary = {
+                'source': lyrics_data.get('source'),
+                'word_count': inserted,
+                'included': True,
+            }
 
         # ── Tutorial mode: copy instrument samples, VO clips, and append a
         # [TutorialScript] section to notes_fixed_slides.chart if the picked
@@ -914,6 +939,7 @@ async def publish_track_to_game(
             'chart': chart_status,
             'tutorial': tutorial_status,
             'lyrics': lyrics_summary,
+            'vocals': vocals_summary,
         }
     except Exception as e:
         raise HTTPException(500, f'Publish failed: {e}')
