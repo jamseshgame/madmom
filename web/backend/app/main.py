@@ -14,15 +14,17 @@ if sys.platform == 'win32':
 from fastapi import Depends
 
 from .config import settings
-from .routers import auth, beatmap, game_songs, jobs, lyrics, stems, tracks, tutorial, versions, vocals, youtube
+from .routers import auth, beatmap, game_songs, jobs, lyrics, stems, tracks, tutorial, users, versions, vocals, youtube
 from .routers.auth import require_auth
 from .services.jobs import cleanup_old_jobs, load_jobs_from_disk
+from .services.users import ensure_seed_admin
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Restore persisted jobs and run a periodic cleanup loop."""
     load_jobs_from_disk()
+    ensure_seed_admin()
 
     async def _cleanup_loop():
         while True:
@@ -61,6 +63,8 @@ app.include_router(youtube.router, dependencies=_auth_dep)
 app.include_router(tutorial.router, dependencies=_auth_dep)
 app.include_router(lyrics.router, dependencies=_auth_dep)
 app.include_router(vocals.router, dependencies=_auth_dep)
+# users router has its own require_admin / require_auth Depends per route
+app.include_router(users.router)
 
 
 @app.get('/api/health')

@@ -33,3 +33,5 @@ torchcrepe>=0.0.23
 # Sequencing Principle (SSP) — orthographic syllable splits where pyphen's
 # typographic-hyphen output left short words like "Hello" unsplit.
 syllabipy>=0.2
+# Password hashing for the multi-user account store.
+bcrypt>=4.0

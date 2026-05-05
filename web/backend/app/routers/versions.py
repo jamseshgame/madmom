@@ -61,6 +61,11 @@ PACKAGES: list[dict[str, str | bool]] = [
         'license': 'MIT',
     },
     {
+        'name': 'bcrypt',
+        'used_for': 'Password hashing for the multi-user account store',
+        'license': 'Apache-2.0',
+    },
+    {
         'name': 'yt-dlp',
         'used_for': 'YouTube search + audio-as-MP3 download',
         'license': 'Unlicense',

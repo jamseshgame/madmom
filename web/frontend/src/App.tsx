@@ -1,23 +1,43 @@
+import { useEffect, useState } from 'react'
 import { Link, NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import TracksPage from './pages/TracksPage.tsx'
 import GameSongsPage from './pages/GameSongsPage.tsx'
 import ChangelogPage from './pages/ChangelogPage.tsx'
 import LogsPage from './pages/LogsPage.tsx'
+import UsersPage from './pages/UsersPage.tsx'
 import BeatmapEditor from './components/BeatmapEditor.tsx'
 import VocalEditor from './components/VocalEditor.tsx'
 import { VersionBanner } from './components/VersionStatus.tsx'
 import { logout } from './components/AuthGate.tsx'
 import { STUDIO_VERSION } from './version.ts'
 
-const navItems = [
+type Role = 'admin' | 'user'
+
+const baseNavItems: { to: string; label: string; adminOnly?: boolean }[] = [
   { to: '/', label: 'Studio Library' },
   { to: '/game-songs', label: 'Game Library' },
   { to: '/logs', label: 'Logs' },
+  { to: '/users', label: 'Users', adminOnly: true },
 ]
 
 export default function App() {
   const navigate = useNavigate()
   const location = useLocation()
+  const [me, setMe] = useState<{ username: string; role: Role; has_avatar: boolean } | null>(null)
+
+  useEffect(() => {
+    fetch('/api/auth/me')
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.authenticated) {
+          setMe({ username: d.username, role: d.role, has_avatar: !!d.has_avatar })
+        }
+      })
+      .catch(() => {})
+  }, [])
+
+  const navItems = baseNavItems.filter((n) => !n.adminOnly || me?.role === 'admin')
+
   if (location.pathname.startsWith('/edit/')) {
     return (
       <Routes>
@@ -76,9 +96,25 @@ export default function App() {
                 {label}
               </NavLink>
             ))}
+            {me && (
+              <div className="ml-2 flex items-center gap-2 px-2 py-0.5 rounded-md text-xs text-gray-400" title={`Signed in as ${me.username} (${me.role})`}>
+                {me.has_avatar ? (
+                  <img
+                    src={`/api/users/${encodeURIComponent(me.username)}/avatar`}
+                    alt=""
+                    className="w-6 h-6 rounded-full object-cover border border-gray-700"
+                  />
+                ) : (
+                  <div className="w-6 h-6 rounded-full bg-gray-800 border border-gray-700 flex items-center justify-center text-[10px] font-semibold text-gray-400">
+                    {me.username.slice(0, 2).toUpperCase()}
+                  </div>
+                )}
+                <span className="font-mono text-gray-300 hidden sm:inline">{me.username}</span>
+              </div>
+            )}
             <button
               onClick={logout}
-              className="ml-2 px-3 py-1.5 rounded-md text-sm font-medium text-gray-500 hover:text-gray-300 hover:bg-gray-800 transition-colors"
+              className="ml-1 px-3 py-1.5 rounded-md text-sm font-medium text-gray-500 hover:text-gray-300 hover:bg-gray-800 transition-colors"
             >
               Sign out
             </button>
@@ -92,6 +128,7 @@ export default function App() {
           <Route path="/tracks" element={<TracksPage />} />
           <Route path="/game-songs" element={<GameSongsPage />} />
           <Route path="/logs" element={<LogsPage />} />
+          <Route path="/users" element={<UsersPage />} />
           <Route path="/changelog" element={<ChangelogPage />} />
         </Routes>
       </main>
