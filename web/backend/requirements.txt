@@ -26,3 +26,8 @@ chatterbox-tts
 # downloads on first use.
 faster-whisper>=1.0
 pytest-asyncio>=0.23
+# Pitch detection for vocal beatmaps. CPU-runnable; first call downloads
+# the ~30 MB CREPE 'full' model from HuggingFace.
+torchcrepe>=0.0.23
+# English syllable splitter for vocal beatmap note granularity.
+pyphen>=0.14

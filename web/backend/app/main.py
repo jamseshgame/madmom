@@ -14,7 +14,7 @@ if sys.platform == 'win32':
 from fastapi import Depends
 
 from .config import settings
-from .routers import auth, beatmap, game_songs, jobs, lyrics, stems, tracks, tutorial, versions, youtube
+from .routers import auth, beatmap, game_songs, jobs, lyrics, stems, tracks, tutorial, versions, vocals, youtube
 from .routers.auth import require_auth
 from .services.jobs import cleanup_old_jobs, load_jobs_from_disk
 
