@@ -291,3 +291,102 @@ def load_vocal_notes(target_dir: Path) -> dict | None:
     if not path.exists():
         return None
     return json.loads(path.read_text(encoding='utf-8'))
+
+
+def _escape_chart_text(text: str) -> str:
+    return text.replace('\\', '\\\\').replace('"', '\\"')
+
+
+def _format_curve(curve: list[float]) -> str:
+    return ','.join(f'{v:.2f}' for v in curve)
+
+
+def _format_dynamics(dyn: list[float]) -> str:
+    return ','.join(f'{v:.1f}' for v in dyn)
+
+
+def inject_vocals_into_chart(chart_path: Path, notes: dict) -> int:
+    """Rewrite the [JamseshVocals] block in `chart_path`. Idempotent: strips
+    any prior [JamseshVocals] block plus any prior [Events] lyric/phrase
+    events from Plan A (single source of truth). Returns syllable count."""
+    from app.services.lyrics import (
+        _is_lyric_event_line,
+        parse_sync_track,
+        seconds_to_tick,
+    )
+
+    text = chart_path.read_text(encoding='utf-8')
+    resolution, segments = parse_sync_track(text)
+
+    syllables = notes.get('syllables', [])
+
+    new_body: list[str] = [
+        f'  Version = {int(notes.get("version", 1))}',
+        f'  PitchModel = "{notes.get("pitch_model", "torchcrepe-full")}"',
+        f'  HopMs = {int(round(notes.get("frame_hop_s", 0.010) * 1000))}',
+    ]
+    for s in syllables:
+        tick = seconds_to_tick(float(s['time_s']), resolution, segments)
+        end_tick = seconds_to_tick(
+            float(s['time_s']) + float(s.get('duration_s', 0.0)), resolution, segments,
+        )
+        duration_ticks = max(1, end_tick - tick)
+        confidence_int = int(round(float(s.get('confidence', 0.0)) * 100))
+        new_body.append(f'  {tick} = N {int(s["midi_pitch"])} {duration_ticks} {confidence_int}')
+        new_body.append(f'  {tick} = E lyric {_escape_chart_text(s["text"])}')
+        new_body.append(f'  {tick} = V {s.get("voicing", "sung")}')
+        if s.get('dynamics_db'):
+            new_body.append(f'  {tick} = D {_format_dynamics(s["dynamics_db"])}')
+        if s.get('pitch_curve_st'):
+            new_body.append(f'  {tick} = C {_format_curve(s["pitch_curve_st"])}')
+        if s.get('phrase_start'):
+            new_body.append(f'  {tick} = P start')
+        if s.get('phrase_end'):
+            new_body.append(f'  {tick} = P end')
+
+    new_block_lines = ['[JamseshVocals]', '{', *new_body, '}']
+
+    # Strip any existing [JamseshVocals] block
+    lines = text.splitlines()
+    out_lines: list[str] = []
+    i = 0
+    while i < len(lines):
+        if lines[i].strip() == '[JamseshVocals]':
+            j = i + 1
+            depth = 0
+            while j < len(lines):
+                if lines[j].strip() == '{':
+                    depth += 1
+                elif lines[j].strip() == '}':
+                    if depth <= 1:
+                        j += 1
+                        break
+                    depth -= 1
+                j += 1
+            i = j
+            continue
+        out_lines.append(lines[i])
+        i += 1
+
+    # Strip any [Events] lyric/phrase events authored by Plan A
+    cleaned: list[str] = []
+    in_events = False
+    for line in out_lines:
+        stripped = line.strip()
+        if stripped == '[Events]':
+            in_events = True
+            cleaned.append(line)
+            continue
+        if in_events:
+            if stripped == '}':
+                in_events = False
+                cleaned.append(line)
+                continue
+            if _is_lyric_event_line(line):
+                continue
+        cleaned.append(line)
+
+    cleaned.extend(new_block_lines)
+    chart_path.write_text('\n'.join(cleaned) + '\n', encoding='utf-8')
+
+    return len(syllables)

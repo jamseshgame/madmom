@@ -183,3 +183,81 @@ def test_write_then_load_vocal_notes(tmp_path):
 def test_load_vocal_notes_missing(tmp_path):
     from app.services.vocals import load_vocal_notes
     assert load_vocal_notes(tmp_path) is None
+
+
+FIXTURE = Path(__file__).parent / "fixtures" / "sample_vocal_chart.chart"
+
+
+def test_inject_vocals_writes_block_and_clears_old_lyric_events(tmp_path):
+    """Fixture chart has stale [Events] phrase/lyric entries from Plan A.
+    Injecting vocals should write [JamseshVocals] AND clear those events."""
+    from app.services.vocals import inject_vocals_into_chart
+    chart_path = tmp_path / "out.chart"
+    chart_path.write_text(FIXTURE.read_text(encoding='utf-8'), encoding='utf-8')
+
+    notes = {
+        "version": 1, "syllabified_from": "lrclib",
+        "pitch_model": "torchcrepe-full", "frame_hop_s": 0.010,
+        "syllables": [
+            {"time_s": 0.5, "duration_s": 0.3, "text": "Hel",
+             "midi_pitch": 64, "confidence": 0.92, "voicing": "sung",
+             "phrase_start": True,
+             "pitch_curve_st": [64.0, 64.1], "dynamics_db": [-15.0, -14.5]},
+            {"time_s": 1.0, "duration_s": 0.3, "text": "lo",
+             "midi_pitch": 66, "confidence": 0.88, "voicing": "sung",
+             "phrase_end": True,
+             "pitch_curve_st": [66.0], "dynamics_db": [-14.0]},
+        ],
+    }
+    inserted = inject_vocals_into_chart(chart_path, notes)
+    assert inserted == 2
+
+    text = chart_path.read_text(encoding='utf-8')
+
+    # JamseshVocals block exists with header lines
+    assert "[JamseshVocals]" in text
+    assert "Version = 1" in text
+    assert 'PitchModel = "torchcrepe-full"' in text
+    assert "HopMs = 10" in text
+
+    # Note + lyric + voicing lines for each syllable.
+    # 120 BPM, 192 ppq -> 1s = 384 ticks. Syllable 1 at 0.5s..0.8s -> 192..307 (dur 115).
+    # Syllable 2 at 1.0s..1.3s -> 384..499 (dur 115).
+    assert "192 = N 64 115 92" in text
+    assert '192 = E lyric Hel' in text
+    assert "192 = V sung" in text
+    assert "192 = P start" in text
+    assert "384 = N 66 115 88" in text
+    assert '384 = E lyric lo' in text
+    assert "384 = V sung" in text
+    assert "384 = P end" in text
+
+    # Pitch curve uses :.2f, dynamics uses :.1f
+    assert "192 = C 64.00,64.10" in text
+    assert "192 = D -15.0,-14.5" in text
+
+    # Old [Events] lyric/phrase entries are cleared
+    assert "phrase_start" not in text.split("[JamseshVocals]")[0]
+    assert "phrase_end" not in text.split("[JamseshVocals]")[0]
+    assert 'lyric Stale' not in text
+    # Non-lyric event preserved
+    assert '192 = E "section Intro"' in text
+
+
+def test_inject_vocals_idempotent(tmp_path):
+    from app.services.vocals import inject_vocals_into_chart
+    chart_path = tmp_path / "out.chart"
+    chart_path.write_text(FIXTURE.read_text(encoding='utf-8'), encoding='utf-8')
+    notes = {
+        "version": 1, "syllabified_from": "lrclib",
+        "pitch_model": "torchcrepe-full", "frame_hop_s": 0.010,
+        "syllables": [{"time_s": 1.0, "duration_s": 0.3, "text": "Hi",
+                       "midi_pitch": 60, "confidence": 0.9, "voicing": "sung",
+                       "phrase_start": True, "phrase_end": True,
+                       "pitch_curve_st": [60.0], "dynamics_db": [-15.0]}],
+    }
+    inject_vocals_into_chart(chart_path, notes)
+    first = chart_path.read_text(encoding='utf-8')
+    inject_vocals_into_chart(chart_path, notes)
+    second = chart_path.read_text(encoding='utf-8')
+    assert first == second
