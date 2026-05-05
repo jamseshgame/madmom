@@ -3,7 +3,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import LyricsButtons from '../components/LyricsButtons'
 import StemPlayer from '../components/StemPlayer.tsx'
 import BeatmapStatsModal, { BeatmapRecord as BeatmapStatsRecord } from '../components/BeatmapStatsModal.tsx'
-import VocalBeatmapTracker from '../components/VocalBeatmapTracker'
+import VocalmapButtons from '../components/VocalmapButtons'
 
 type BeatmapRecord = BeatmapStatsRecord
 
@@ -1310,60 +1310,65 @@ export default function TracksPage() {
                           duration_s: undefined,
                         }}
                       />
+                      <VocalmapButtons
+                        scope={{ trackId: selectedTrack.id }}
+                        meta={{
+                          artist: (songIni.artist || '').trim() || selectedTrack.artist,
+                          title: (songIni.name || '').trim() || selectedTrack.name,
+                          album: (songIni.album || '').trim() || selectedTrack.album,
+                        }}
+                        hasActive={hasVocalNotes}
+                        onActiveChange={refetchHasVocalNotes}
+                      />
                       {hasVocalNotes && (
-                        <div className="flex items-center gap-1">
-                          <button
-                            onClick={() => navigate(`/edit-vocals/${selectedTrack.id}`)}
-                            className="flex-1 px-2 py-1 bg-pink-700/40 hover:bg-pink-600/60 border border-pink-700/60 text-pink-200 rounded text-xs font-medium transition-colors"
-                            title="Open the vocal beatmap editor for this track"
-                          >
-                            Edit vocals
-                          </button>
-                          <button
-                            onClick={deleteVocalNotes}
-                            className="px-1.5 py-1 bg-red-900/40 hover:bg-red-800/60 border border-red-800/60 text-red-300 hover:text-red-200 rounded text-xs transition-colors"
-                            title="Delete vocal_notes.json for this track"
-                            aria-label="Delete vocal beatmap"
-                          >
-                            ×
-                          </button>
-                        </div>
+                        <button
+                          onClick={deleteVocalNotes}
+                          className="self-end px-1.5 py-0.5 bg-red-900/40 hover:bg-red-800/60 border border-red-800/60 text-red-300 hover:text-red-200 rounded text-[10px] transition-colors"
+                          title="Delete vocal_notes.json for this track"
+                          aria-label="Delete vocalmap"
+                        >
+                          delete vocalmap
+                        </button>
                       )}
                     </>
                   )}
-                  <div className="flex flex-wrap gap-1.5 justify-center items-center">
-                    {stem === 'song' ? (
-                      <a
-                        href={`/api/tracks/${selectedTrack.id}/stems/${stem}`}
-                        className="px-2 py-1 bg-gray-700 text-gray-300 hover:bg-gray-600 rounded text-xs font-medium transition-colors"
-                      >
-                        Download
-                      </a>
-                    ) : (
-                      <>
-                        <button
-                          onClick={() => startQuickBeatmap(stem)}
-                          disabled={!!inlineBmJobs[stem]}
-                          className="px-2 py-1 bg-green-700/60 hover:bg-green-600/70 disabled:opacity-40 disabled:cursor-not-allowed text-green-200 rounded text-xs font-medium transition-colors"
-                          title="Generate beatmap with current track metadata"
+                  {stem !== 'vocals' && (
+                    <div className="flex flex-wrap gap-1.5 justify-center items-center">
+                      {stem === 'song' ? (
+                        <a
+                          href={`/api/tracks/${selectedTrack.id}/stems/${stem}`}
+                          className="px-2 py-1 bg-gray-700 text-gray-300 hover:bg-gray-600 rounded text-xs font-medium transition-colors"
                         >
-                          Generate Beatmap
-                        </button>
-                        <button
-                          onClick={() => setBeatmapPanel({ track: selectedTrack, stem })}
-                          className="px-1.5 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-gray-100 rounded text-sm leading-none transition-colors"
-                          title="Advanced settings & download stem"
-                          aria-label="Advanced settings & download stem"
-                        >
-                          ⚙
-                        </button>
-                      </>
-                    )}
-                  </div>
-                  {/* Discoverability hint: when this stem has no beatmaps
-                      yet and nothing is in flight, surface an inline link
-                      to the empty editor right where the user is looking. */}
+                          Download
+                        </a>
+                      ) : (
+                        <>
+                          <button
+                            onClick={() => startQuickBeatmap(stem)}
+                            disabled={!!inlineBmJobs[stem]}
+                            className="px-2 py-1 bg-green-700/60 hover:bg-green-600/70 disabled:opacity-40 disabled:cursor-not-allowed text-green-200 rounded text-xs font-medium transition-colors"
+                            title="Generate beatmap with current track metadata"
+                          >
+                            Generate Beatmap
+                          </button>
+                          <button
+                            onClick={() => setBeatmapPanel({ track: selectedTrack, stem })}
+                            className="px-1.5 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-gray-100 rounded text-sm leading-none transition-colors"
+                            title="Advanced settings & download stem"
+                            aria-label="Advanced settings & download stem"
+                          >
+                            ⚙
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  )}
+                  {/* Discoverability hint: when this non-vocals stem has no
+                      beatmaps yet and nothing is in flight, surface an inline
+                      link to the empty editor. Vocals uses VocalmapButtons
+                      and doesn't need an empty-editor path. */}
                   {stem !== 'song'
+                    && stem !== 'vocals'
                     && !inlineBmJobs[stem]
                     && (selectedTrack.beatmaps || []).every((bm) => bm.stem !== stem) && (
                       <button
@@ -1389,27 +1394,6 @@ export default function TracksPage() {
                         or open empty editor →
                       </button>
                     )}
-                  {inlineBmJobs[stem] && stem === 'vocals' && (
-                    <VocalBeatmapTracker
-                      beatmapJobId={inlineBmJobs[stem]}
-                      onDone={() => {
-                        setInlineBmJobs((prev) => {
-                          const next = { ...prev }
-                          delete next[stem]
-                          return next
-                        })
-                        loadTracks()
-                        refetchHasVocalNotes()
-                      }}
-                      onCancelled={() => {
-                        setInlineBmJobs((prev) => {
-                          const next = { ...prev }
-                          delete next[stem]
-                          return next
-                        })
-                      }}
-                    />
-                  )}
                   {inlineBmJobs[stem] && stem !== 'vocals' && (
                     <InlineBeatmapProgress
                       jobId={inlineBmJobs[stem]}
@@ -1430,7 +1414,9 @@ export default function TracksPage() {
                       }}
                     />
                   )}
-                  {(selectedTrack.beatmaps || [])
+                  {/* Vocals uses VocalmapButtons → vocal_notes.json, not the
+                      tracks.beatmaps array, so skip the legacy chart list here. */}
+                  {stem !== 'vocals' && (selectedTrack.beatmaps || [])
                     .filter((bm) => bm.stem === stem)
                     .sort((a, b) => b.generated_at - a.generated_at)
                     .map((bm) => {

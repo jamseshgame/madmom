@@ -301,10 +301,18 @@ def build_vocal_notes(
         progress_callback('write', 96, 'Building vocal notes...')
 
     is_english = bool(language) and language.lower().startswith('en')
+    # Capture the torchcrepe package version so the UI can flag stale
+    # vocalmaps the same way it does for lyrics + faster-whisper.
+    try:
+        from importlib.metadata import version as _pkg_version
+        pitch_model_version = _pkg_version('torchcrepe')
+    except Exception:
+        pitch_model_version = None
     return {
         'version': 1,
         'syllabified_from': lyrics.get('source') or 'unknown',
         'pitch_model': 'torchcrepe-full',
+        'pitch_model_version': pitch_model_version,
         'syllabifier': f'ssp-{language}' if is_english else 'per-word',
         'frame_hop_s': hop_s,
         'lyrics_etag': lyrics_etag,
@@ -329,6 +337,99 @@ def load_vocal_notes(target_dir: Path) -> dict | None:
     if not path.exists():
         return None
     return json.loads(path.read_text(encoding='utf-8'))
+
+
+# ---------------------------------------------------------------------------
+# Versioned vocalmap history. Mirror lyrics_versions/: every successful
+# /api/vocals/generate snapshots its result here so users can compare runs
+# (different torchcrepe versions, edited lyric sources, hand-edited
+# vocal_notes saves) and pick which one becomes the active vocal_notes.json.
+import re
+
+_VOCAL_VERSIONS_SUBDIR = 'vocal_notes_versions'
+_VOCAL_VERSION_FILE_RE = re.compile(r'^(\d{8}T\d{6}Z)_torchcrepe\.json$')
+
+
+def _vocal_versions_dir(target_dir: Path) -> Path:
+    return target_dir / _VOCAL_VERSIONS_SUBDIR
+
+
+def _utc_stamp() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+
+
+def save_vocal_notes_version(target_dir: Path, notes: dict) -> Path | None:
+    """Snapshot a freshly-generated vocal_notes.json into the versions folder.
+
+    Filename pattern: <UTC stamp>_torchcrepe.json. lyrics.json's history
+    distinguishes lrclib vs whisper in the filename; vocalmaps only have
+    one source today (torchcrepe), but the suffix keeps the format
+    forward-compatible with future detectors.
+    """
+    if not notes:
+        return None
+    vdir = _vocal_versions_dir(target_dir)
+    vdir.mkdir(parents=True, exist_ok=True)
+    path = vdir / f'{_utc_stamp()}_torchcrepe.json'
+    path.write_text(json.dumps(notes, ensure_ascii=False, indent=2), encoding='utf-8')
+    return path
+
+
+def list_vocal_notes_versions(target_dir: Path) -> list[dict]:
+    """Newest-first list. Each entry: {file, source, fetched_at, syllable_count,
+    pitch_model_version, syllabified_from, active}."""
+    vdir = _vocal_versions_dir(target_dir)
+    if not vdir.exists():
+        return []
+    active = load_vocal_notes(target_dir) or {}
+    active_etag = active.get('fetched_at')
+    out: list[dict] = []
+    for p in vdir.iterdir():
+        if not p.is_file():
+            continue
+        m = _VOCAL_VERSION_FILE_RE.match(p.name)
+        if not m:
+            continue
+        ts_str = m.group(1)
+        try:
+            data = json.loads(p.read_text(encoding='utf-8'))
+        except (OSError, json.JSONDecodeError):
+            continue
+        try:
+            ts = datetime.datetime.strptime(ts_str, '%Y%m%dT%H%M%SZ').replace(
+                tzinfo=datetime.timezone.utc,
+            )
+            fetched_iso = ts.strftime('%Y-%m-%dT%H:%M:%SZ')
+        except ValueError:
+            fetched_iso = ts_str
+        out.append({
+            'file': p.name,
+            'source': 'torchcrepe',
+            'fetched_at': fetched_iso,
+            'syllable_count': len(data.get('syllables') or []),
+            'pitch_model_version': data.get('pitch_model_version'),
+            'syllabified_from': data.get('syllabified_from'),
+            'active': active_etag is not None and data.get('fetched_at') == active_etag,
+        })
+    out.sort(key=lambda x: x['file'], reverse=True)
+    return out
+
+
+def load_vocal_notes_version(target_dir: Path, filename: str) -> dict | None:
+    if not _VOCAL_VERSION_FILE_RE.match(filename):
+        return None
+    p = _vocal_versions_dir(target_dir) / filename
+    if not p.exists():
+        return None
+    return json.loads(p.read_text(encoding='utf-8'))
+
+
+def activate_vocal_notes_version(target_dir: Path, filename: str) -> dict | None:
+    data = load_vocal_notes_version(target_dir, filename)
+    if data is None:
+        return None
+    write_vocal_notes(target_dir, data)
+    return data
 
 
 def _escape_chart_text(text: str) -> str:

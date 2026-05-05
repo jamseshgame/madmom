@@ -531,7 +531,7 @@ export default function VocalEditor() {
           >
             ← Back
           </button>
-          <div className="text-sm font-semibold text-jam-300">Vocal Beatmap Editor</div>
+          <div className="text-sm font-semibold text-jam-300">Vocalmap Editor</div>
           {meta && (
             <div className="text-xs text-gray-500 hidden md:block">
               {meta.pitch_model} · {meta.syllabified_from} · {sylls.length} syllables

@@ -67,6 +67,43 @@ async def delete_vocals(
     return {'ok': True}
 
 
+# --- Versioned vocalmap history (mirrors /api/lyrics/versions) --------------
+
+@router.get('/versions')
+async def list_vocalmap_versions(
+    job_id: str | None = Query(default=None),
+    track_id: str | None = Query(default=None),
+):
+    target = _resolve_dir(job_id=job_id, track_id=track_id)
+    return vocals_service.list_vocal_notes_versions(target)
+
+
+@router.get('/versions/{filename}')
+async def get_vocalmap_version(
+    filename: str,
+    job_id: str | None = Query(default=None),
+    track_id: str | None = Query(default=None),
+):
+    target = _resolve_dir(job_id=job_id, track_id=track_id)
+    data = vocals_service.load_vocal_notes_version(target, filename)
+    if data is None:
+        raise HTTPException(404, 'Version not found')
+    return data
+
+
+@router.post('/versions/{filename}/activate')
+async def activate_vocalmap_version(
+    filename: str,
+    job_id: str | None = Query(default=None),
+    track_id: str | None = Query(default=None),
+):
+    target = _resolve_dir(job_id=job_id, track_id=track_id)
+    data = vocals_service.activate_vocal_notes_version(target, filename)
+    if data is None:
+        raise HTTPException(404, 'Version not found')
+    return {'ok': True, 'syllable_count': len(data.get('syllables') or [])}
+
+
 import asyncio
 
 from app.services import lyrics as lyrics_service
@@ -162,6 +199,7 @@ async def post_generate(
 
             target.mkdir(parents=True, exist_ok=True)
             vocals_service.write_vocal_notes(target, notes)
+            vocals_service.save_vocal_notes_version(target, notes)
 
             voicing_breakdown: dict[str, int] = {'sung': 0, 'spoken': 0, 'whispered': 0}
             for s in notes.get('syllables', []):
