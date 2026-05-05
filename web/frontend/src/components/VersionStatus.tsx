@@ -34,14 +34,15 @@ function useVersions() {
   return { data, error, reload }
 }
 
-function outdatedList(data: Versions): Array<{ name: string; installed: string; latest: string }> {
-  return data.packages
-    .filter((p) => p.up_to_date === false && p.installed && p.latest && !p.optional)
-    .map((p) => ({ name: p.name, installed: p.installed!, latest: p.latest! }))
+function outdatedList(data: Versions): PackageStatus[] {
+  return data.packages.filter(
+    (p) => p.up_to_date === false && p.installed && p.latest && !p.optional && !p.pinned,
+  )
 }
 
 export function VersionBanner() {
-  const { data } = useVersions()
+  const { data, reload } = useVersions()
+  const flow = useUpgradeFlow(reload)
   const [dismissed, setDismissed] = useState(false)
   if (!data || dismissed) return null
   const outdated = outdatedList(data)
@@ -51,10 +52,19 @@ export function VersionBanner() {
       <span className="text-amber-400 text-lg leading-none mt-0.5">⚠</span>
       <div className="flex-1 text-sm">
         <p className="font-medium text-amber-200">Updates available</p>
-        <ul className="mt-1 space-y-0.5 text-amber-300/80">
+        <ul className="mt-2 space-y-1 text-amber-300/80">
           {outdated.map((p) => (
-            <li key={p.name}>
-              <span className="font-mono">{p.name}</span> {p.installed} → {p.latest}
+            <li key={p.name} className="flex items-center gap-2">
+              <span className="flex-1">
+                <span className="font-mono">{p.name}</span> {p.installed} → {p.latest}
+              </span>
+              <button
+                onClick={() => flow.start(p)}
+                className="px-2 py-0.5 bg-amber-800/60 hover:bg-amber-700 text-amber-100 rounded text-[11px] font-medium transition-colors"
+                title={`pip install --upgrade ${p.name}`}
+              >
+                Upgrade
+              </button>
             </li>
           ))}
         </ul>
@@ -66,6 +76,7 @@ export function VersionBanner() {
       >
         ✕
       </button>
+      <UpgradePanel {...flow} />
     </div>
   )
 }
