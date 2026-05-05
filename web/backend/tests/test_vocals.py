@@ -261,3 +261,51 @@ def test_inject_vocals_idempotent(tmp_path):
     inject_vocals_into_chart(chart_path, notes)
     second = chart_path.read_text(encoding='utf-8')
     assert first == second
+
+
+from fastapi.testclient import TestClient
+from app.main import app
+from app.routers.auth import require_auth
+
+
+@pytest.fixture
+def _no_auth():
+    app.dependency_overrides[require_auth] = lambda: None
+    yield
+    app.dependency_overrides.pop(require_auth, None)
+
+
+def test_vocals_get_404_when_missing(_no_auth, monkeypatch, tmp_path):
+    from app.routers import vocals as vocals_router
+    monkeypatch.setattr(vocals_router, '_resolve_dir', lambda **kw: tmp_path)
+    client = TestClient(app)
+    r = client.get('/api/vocals?track_id=tx')
+    assert r.status_code == 404
+
+
+def test_vocals_put_then_get(_no_auth, monkeypatch, tmp_path):
+    from app.routers import vocals as vocals_router
+    monkeypatch.setattr(vocals_router, '_resolve_dir', lambda **kw: tmp_path)
+    client = TestClient(app)
+    body = {"version": 1, "syllabified_from": "lrclib",
+            "pitch_model": "torchcrepe-full", "frame_hop_s": 0.010,
+            "syllables": []}
+    r = client.put('/api/vocals?track_id=t1', json=body)
+    assert r.status_code == 200
+    r = client.get('/api/vocals?track_id=t1')
+    assert r.status_code == 200
+    assert r.json() == body
+
+
+def test_vocals_delete(_no_auth, monkeypatch, tmp_path):
+    from app.routers import vocals as vocals_router
+    monkeypatch.setattr(vocals_router, '_resolve_dir', lambda **kw: tmp_path)
+    client = TestClient(app)
+    body = {"version": 1, "syllabified_from": "lrclib",
+            "pitch_model": "torchcrepe-full", "frame_hop_s": 0.010,
+            "syllables": []}
+    client.put('/api/vocals?track_id=t1', json=body)
+    r = client.delete('/api/vocals?track_id=t1')
+    assert r.status_code == 200
+    r = client.get('/api/vocals?track_id=t1')
+    assert r.status_code == 404
