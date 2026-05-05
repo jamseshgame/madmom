@@ -122,3 +122,63 @@ async def fetch_from_lrclib(
         "fetched_at": datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
         "words": words,
     }
+
+
+_RESOLUTION_RE = re.compile(r"^\s*Resolution\s*=\s*(\d+)\s*$", re.MULTILINE)
+_BPM_LINE_RE = re.compile(r"^\s*(\d+)\s*=\s*B\s+(\d+)\s*$")
+
+
+def parse_sync_track(chart_text: str) -> tuple[int, list[dict]]:
+    """Extract Resolution and the [SyncTrack] BPM segments. BPM in CH `.chart`
+    format is `B <bpm * 1000>` so we divide back by 1000."""
+    res_match = _RESOLUTION_RE.search(chart_text)
+    resolution = int(res_match.group(1)) if res_match else 192
+
+    segments: list[dict] = []
+    in_sync = False
+    for line in chart_text.splitlines():
+        stripped = line.strip()
+        if stripped == "[SyncTrack]":
+            in_sync = True
+            continue
+        if in_sync:
+            if stripped == "}":
+                break
+            m = _BPM_LINE_RE.match(line)
+            if m:
+                segments.append({
+                    "tick": int(m.group(1)),
+                    "bpm": int(m.group(2)) / 1000.0,
+                })
+    if not segments:
+        segments = [{"tick": 0, "bpm": 120.0}]
+    segments.sort(key=lambda s: s["tick"])
+    return resolution, segments
+
+
+def seconds_to_tick(t: float, resolution: int, segments: list[dict]) -> int:
+    """Walk the tempo segments to convert a time-in-seconds to a tick.
+    `segments` is the list returned by `parse_sync_track` (sorted by tick).
+    Times before tick 0 clamp to 0."""
+    if t <= 0:
+        return 0
+    accum_s = 0.0
+    for i, seg in enumerate(segments):
+        seg_start_tick = seg["tick"]
+        bpm = seg["bpm"]
+        if i + 1 < len(segments):
+            next_tick = segments[i + 1]["tick"]
+            seg_duration_ticks = next_tick - seg_start_tick
+            seg_duration_s = (seg_duration_ticks / resolution) * (60.0 / bpm)
+            if accum_s + seg_duration_s >= t:
+                # `t` falls inside this segment
+                local_t = t - accum_s
+                local_ticks = local_t * (bpm * resolution / 60.0)
+                return int(round(seg_start_tick + local_ticks))
+            accum_s += seg_duration_s
+        else:
+            # Final segment extends to infinity
+            local_t = t - accum_s
+            local_ticks = local_t * (bpm * resolution / 60.0)
+            return int(round(seg_start_tick + local_ticks))
+    return 0

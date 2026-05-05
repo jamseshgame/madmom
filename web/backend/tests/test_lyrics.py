@@ -4,7 +4,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from app.services.lyrics import fetch_from_lrclib, interpolate_words, parse_lrc
+from app.services.lyrics import fetch_from_lrclib, interpolate_words, parse_lrc, parse_sync_track, seconds_to_tick
 
 
 def test_parse_lrc_basic():
@@ -167,3 +167,69 @@ async def test_lrclib_404_returns_none(monkeypatch):
     monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **kw: MockClient())
     result = await fetch_from_lrclib(artist="X", title="Y", album=None, duration_s=None)
     assert result is None
+
+
+def test_parse_sync_track_single_bpm():
+    chart = """[Song]
+{
+  Resolution = 192
+}
+[SyncTrack]
+{
+  0 = TS 4
+  0 = B 120000
+}
+[Events]
+{
+}
+"""
+    res, segments = parse_sync_track(chart)
+    assert res == 192
+    # Single segment starting at tick 0, 120 BPM
+    assert segments == [{"tick": 0, "bpm": 120.0}]
+
+
+def test_parse_sync_track_multi_bpm():
+    chart = """[Song]
+{
+  Resolution = 480
+}
+[SyncTrack]
+{
+  0 = B 120000
+  3840 = B 90000
+  7680 = B 140000
+}
+[Events]
+{
+}
+"""
+    res, segments = parse_sync_track(chart)
+    assert res == 480
+    assert segments == [
+        {"tick": 0, "bpm": 120.0},
+        {"tick": 3840, "bpm": 90.0},
+        {"tick": 7680, "bpm": 140.0},
+    ]
+
+
+def test_seconds_to_tick_single_bpm():
+    # 120 BPM, 192 ppq → 1 second = 2 beats = 384 ticks
+    segments = [{"tick": 0, "bpm": 120.0}]
+    assert seconds_to_tick(0.0, 192, segments) == 0
+    assert seconds_to_tick(1.0, 192, segments) == 384
+    assert seconds_to_tick(2.5, 192, segments) == 960
+
+
+def test_seconds_to_tick_after_tempo_change():
+    # 120 BPM for first 2 beats (= 1s), then 60 BPM
+    # First seg: tick 0..384 covers 0..1s
+    # Second seg starts at tick 384 (= 1.0s). At 60 BPM, 1s = 192 ticks.
+    # 1.5s past seg start = 1.5 * 192 = 288 ticks → 384 + 288 = 672.
+    segments = [
+        {"tick": 0, "bpm": 120.0},
+        {"tick": 384, "bpm": 60.0},
+    ]
+    assert seconds_to_tick(0.0, 192, segments) == 0
+    assert seconds_to_tick(1.0, 192, segments) == 384
+    assert seconds_to_tick(2.5, 192, segments) == 672
