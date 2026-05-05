@@ -117,3 +117,48 @@ def test_crepe_detects_a440_within_one_semitone(tmp_path):
     median_hz = sorted(voiced)[len(voiced) // 2]
     median_midi = 69 + 12 * math.log2(median_hz / 440.0)
     assert abs(median_midi - 69) < 1.0     # within 1 semitone
+
+
+def test_build_vocal_notes_orchestrates_syllabify_and_pitch_alignment(monkeypatch, tmp_path):
+    """Stub detect_pitches; assert build_vocal_notes assembles the right shape."""
+    fake_audio = tmp_path / "vocals.wav"
+    fake_audio.write_bytes(b"")  # not actually read since we stub detect_pitches
+
+    # Fake CREPE output: 200 frames at 10 ms hop = 2.0 seconds, all A4 (440 Hz)
+    n_frames = 200
+    fake_f0 = [440.0] * n_frames
+    fake_conf = [0.9] * n_frames
+
+    from app.services import vocals as vocals_service
+    monkeypatch.setattr(vocals_service, 'detect_pitches', lambda p: (fake_f0, fake_conf))
+
+    # Lyrics: two LRClib-style words spanning 0..1.0 and 1.0..2.0
+    lyrics = {
+        "source": "lrclib",
+        "language": "en",
+        "words": [
+            {"time_s": 0.0, "duration_s": 1.0, "text": "Hello", "phrase_start": True, "phrase_end": True},
+            {"time_s": 1.0, "duration_s": 1.0, "text": "world", "phrase_start": True, "phrase_end": True},
+        ],
+    }
+
+    notes = vocals_service.build_vocal_notes(fake_audio, lyrics)
+
+    # Three syllables: "Hel", "lo", "world"
+    assert len(notes["syllables"]) == 3
+    assert [s["text"] for s in notes["syllables"]] == ["Hel", "lo", "world"]
+    # All notes detect MIDI 69 (A4 = 440 Hz)
+    assert all(s["midi_pitch"] == 69 for s in notes["syllables"])
+    # All sung (high confidence, steady pitch)
+    assert all(s["voicing"] == "sung" for s in notes["syllables"])
+    # Phrase boundaries preserved
+    assert notes["syllables"][0]["phrase_start"] is True
+    assert notes["syllables"][1].get("phrase_start") is None or notes["syllables"][1].get("phrase_start") is not True
+    assert notes["syllables"][-1].get("phrase_end") is True
+    # Top-level metadata
+    assert notes["version"] == 1
+    assert notes["pitch_model"] == "torchcrepe-full"
+    assert notes["syllabified_from"] == "lrclib"
+    assert notes["syllabifier"] == "ssp-en"
+    assert notes["frame_hop_s"] == 0.010
+    assert "lyrics_etag" in notes

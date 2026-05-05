@@ -5,6 +5,9 @@ See docs/superpowers/specs/2026-05-05-vocal-beatmaps-design.md.
 """
 from __future__ import annotations
 
+import datetime
+import hashlib
+import json
 import math
 import statistics
 from pathlib import Path
@@ -153,3 +156,120 @@ def detect_pitches(vocals_path: Path) -> tuple[list[float], list[float]]:
     conf = periodicity.squeeze(0).numpy().astype(float)
     f0_masked = np.where(conf < threshold, np.nan, f0)
     return f0_masked.tolist(), conf.tolist()
+
+
+def _hz_to_midi(hz: float) -> float:
+    if not hz or math.isnan(hz) or hz <= 0:
+        return float("nan")
+    return 69.0 + 12.0 * math.log2(hz / 440.0)
+
+
+def _slice_frames(
+    f0: list[float],
+    conf: list[float],
+    start_s: float,
+    duration_s: float,
+    hop_s: float,
+) -> tuple[list[float], list[float]]:
+    """Slice the f0 + confidence frame arrays to [start_s, start_s + duration_s].
+    Returns (curve_midi_floats_voiced_only, confidences_for_those_frames)."""
+    if duration_s <= 0:
+        return [], []
+    start_idx = max(0, int(round(start_s / hop_s)))
+    end_idx = min(len(f0), int(round((start_s + duration_s) / hop_s)))
+    curve_midi: list[float] = []
+    conf_voiced: list[float] = []
+    for i in range(start_idx, end_idx):
+        if math.isnan(f0[i]):
+            continue
+        curve_midi.append(_hz_to_midi(f0[i]))
+        conf_voiced.append(conf[i])
+    return curve_midi, conf_voiced
+
+
+def _downsample(values: list[float], target: int) -> list[float]:
+    """Reduce a list to `target` evenly-spaced samples."""
+    if len(values) <= target:
+        return values[:]
+    out = []
+    for i in range(target):
+        idx = (i * len(values)) // target
+        out.append(values[idx])
+    return out
+
+
+def build_vocal_notes(
+    vocals_path: Path,
+    lyrics: dict,
+    progress_callback=None,
+) -> dict:
+    """Run pitch detection on the vocals stem, syllabify the lyrics, and
+    align pitch frames to syllable windows. Returns the normalized
+    `vocal_notes.json` shape."""
+    if progress_callback:
+        progress_callback('crepe', 70, 'Detecting pitch...')
+    f0, conf = detect_pitches(vocals_path)
+    hop_s = 0.010
+
+    if progress_callback:
+        progress_callback('syllabify', 60, 'Splitting into syllables...')
+    language = lyrics.get('language') or 'en'
+    sylls = syllabify(lyrics.get('words', []), language=language)
+
+    if progress_callback:
+        progress_callback('align', 92, 'Aligning pitch to syllables...')
+
+    out_sylls: list[dict] = []
+    for s in sylls:
+        curve_midi, conf_voiced = _slice_frames(
+            f0, conf, s['time_s'], s['duration_s'], hop_s,
+        )
+        if curve_midi:
+            median_midi = sorted(curve_midi)[len(curve_midi) // 2]
+            midi_pitch = int(round(median_midi))
+            median_conf = sorted(conf_voiced)[len(conf_voiced) // 2]
+        else:
+            # No voiced frames in this syllable — borrow nearest neighbor's pitch
+            midi_pitch = out_sylls[-1]['midi_pitch'] if out_sylls else 60
+            median_conf = 0.0
+            curve_midi = []
+
+        # Synthetic dB envelope from confidence until RMS is wired through.
+        dyn_proxy = [-30.0 + 30.0 * c for c in (conf_voiced or [median_conf])]
+
+        voicing = voicing_classify(curve_midi, median_conf, dyn_proxy)
+
+        entry: dict = {
+            'time_s': s['time_s'],
+            'duration_s': s['duration_s'],
+            'text': s['text'],
+            'midi_pitch': midi_pitch,
+            'confidence': round(median_conf, 3),
+            'voicing': voicing,
+            'pitch_curve_st': [round(v, 2) for v in _downsample(curve_midi, 5)] if curve_midi else [],
+            'dynamics_db': [round(v, 1) for v in _downsample(dyn_proxy, 5)],
+        }
+        if s.get('phrase_start'):
+            entry['phrase_start'] = True
+        if s.get('phrase_end'):
+            entry['phrase_end'] = True
+        out_sylls.append(entry)
+
+    lyrics_etag = hashlib.sha1(
+        json.dumps(lyrics, sort_keys=True, ensure_ascii=False).encode('utf-8')
+    ).hexdigest()
+
+    if progress_callback:
+        progress_callback('write', 96, 'Building vocal notes...')
+
+    is_english = bool(language) and language.lower().startswith('en')
+    return {
+        'version': 1,
+        'syllabified_from': lyrics.get('source') or 'unknown',
+        'pitch_model': 'torchcrepe-full',
+        'syllabifier': f'ssp-{language}' if is_english else 'per-word',
+        'frame_hop_s': hop_s,
+        'lyrics_etag': lyrics_etag,
+        'fetched_at': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'syllables': out_sylls,
+    }
