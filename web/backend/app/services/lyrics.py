@@ -310,9 +310,38 @@ def save_lyrics_version(target_dir: Path, lyrics: dict) -> Path:
     return path
 
 
+def _backfill_active_lyrics(target_dir: Path) -> None:
+    """If there's an active lyrics.json (legacy or from a fresh fetch) but
+    no matching snapshot in the versions folder, create one so the UI
+    versions list never appears empty when an active version exists.
+    Filename derives from the active file's `fetched_at`, so this is
+    idempotent — re-running on the same active version does nothing."""
+    active = load_lyrics(target_dir)
+    if not active:
+        return
+    source = active.get('source')
+    if source not in ('lrclib', 'whisper'):
+        return
+    iso = active.get('fetched_at')
+    if not iso:
+        return
+    try:
+        ts = datetime.datetime.strptime(iso, '%Y-%m-%dT%H:%M:%SZ')
+    except (ValueError, TypeError):
+        return
+    stamp = ts.strftime('%Y%m%dT%H%M%SZ')
+    filename = f'{stamp}_{source}.json'
+    vdir = _versions_dir(target_dir)
+    vdir.mkdir(parents=True, exist_ok=True)
+    p = vdir / filename
+    if not p.exists():
+        p.write_text(json.dumps(active, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
 def list_lyrics_versions(target_dir: Path) -> list[dict]:
     """Return version metadata, newest first. Each entry:
     {file, source, fetched_at_iso, word_count, active}."""
+    _backfill_active_lyrics(target_dir)
     vdir = _versions_dir(target_dir)
     if not vdir.exists():
         return []
@@ -371,6 +400,19 @@ def activate_lyrics_version(target_dir: Path, filename: str) -> dict | None:
         return None
     write_lyrics(target_dir, data)
     return data
+
+
+def delete_lyrics_version(target_dir: Path, filename: str) -> bool:
+    """Remove a snapshot. Returns False if the filename is malformed or the
+    file doesn't exist. Caller must check active-status first — this helper
+    will happily delete the file matching the active lyrics.json."""
+    if not _VERSION_FILE_RE.match(filename):
+        return False
+    p = _versions_dir(target_dir) / filename
+    if not p.exists():
+        return False
+    p.unlink()
+    return True
 
 
 _WHISPER_MODEL = None  # Lazy singleton

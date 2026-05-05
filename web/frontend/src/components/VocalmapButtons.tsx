@@ -201,6 +201,21 @@ export default function VocalmapButtons({ scope, meta, hasActive, onActiveChange
     }
   }
 
+  const deleteVersion = async (v: VocalmapVersion) => {
+    if (v.active) return
+    if (!window.confirm('Delete this vocalmap snapshot? The active version is unaffected.')) return
+    try {
+      const r = await fetch(`/api/vocals/versions/${encodeURIComponent(v.file)}?${scopeQuery(scope)}`, { method: 'DELETE' })
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}))
+        throw new Error(e.detail || `HTTP ${r.status}`)
+      }
+      await refetchVersions()
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
+
   // Build the Generate button label including the installed torchcrepe version.
   const genLabel = installedTorchcrepe
     ? `Generate Vocalmap with torchcrepe ${installedTorchcrepe}`
@@ -287,6 +302,15 @@ export default function VocalmapButtons({ scope, meta, hasActive, onActiveChange
                 className="shrink-0 px-1 py-0.5 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded text-[10px]"
               >
                 preview
+              </button>
+              <button
+                onClick={() => deleteVersion(v)}
+                disabled={v.active}
+                className="shrink-0 px-1 py-0.5 bg-red-900/30 hover:bg-red-800/50 disabled:opacity-30 disabled:cursor-not-allowed text-red-300 rounded text-[10px]"
+                title={v.active ? 'Cannot delete the active version. Activate another first.' : 'Delete this snapshot'}
+                aria-label="Delete vocalmap version"
+              >
+                ×
               </button>
             </div>
           ))}

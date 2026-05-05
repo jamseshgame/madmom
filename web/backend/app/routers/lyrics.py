@@ -192,3 +192,25 @@ async def activate_version(
     if data is None:
         raise HTTPException(404, 'Version not found')
     return {'ok': True, 'source': data.get('source'), 'word_count': len(data.get('words') or [])}
+
+
+@router.delete('/versions/{filename}')
+async def delete_version(
+    filename: str,
+    job_id: str | None = Query(default=None),
+    track_id: str | None = Query(default=None),
+):
+    """Delete a single lyrics snapshot. Refuses to delete the active version
+    (the one whose fetched_at matches the live lyrics.json) — caller must
+    activate another version first, or use DELETE /api/lyrics to wipe the
+    active file altogether."""
+    target = _resolve_dir(job_id=job_id, track_id=track_id)
+    snap = lyrics_service.load_lyrics_version(target, filename)
+    if snap is None:
+        raise HTTPException(404, 'Version not found')
+    active = lyrics_service.load_lyrics(target) or {}
+    if active.get('fetched_at') and snap.get('fetched_at') == active['fetched_at']:
+        raise HTTPException(409, 'Cannot delete the active version. Activate another first.')
+    if not lyrics_service.delete_lyrics_version(target, filename):
+        raise HTTPException(404, 'Version not found')
+    return {'ok': True}

@@ -422,9 +422,32 @@ def save_vocal_notes_version(target_dir: Path, notes: dict) -> Path | None:
     return path
 
 
+def _backfill_active_vocal_notes(target_dir: Path) -> None:
+    """Snapshot the active vocal_notes.json into the versions folder if it
+    isn't there yet. Idempotent — derives the filename from `fetched_at`."""
+    active = load_vocal_notes(target_dir)
+    if not active:
+        return
+    iso = active.get('fetched_at')
+    if not iso:
+        return
+    try:
+        ts = datetime.datetime.strptime(iso, '%Y-%m-%dT%H:%M:%SZ')
+    except (ValueError, TypeError):
+        return
+    stamp = ts.strftime('%Y%m%dT%H%M%SZ')
+    filename = f'{stamp}_torchcrepe.json'
+    vdir = _vocal_versions_dir(target_dir)
+    vdir.mkdir(parents=True, exist_ok=True)
+    p = vdir / filename
+    if not p.exists():
+        p.write_text(json.dumps(active, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
 def list_vocal_notes_versions(target_dir: Path) -> list[dict]:
     """Newest-first list. Each entry: {file, source, fetched_at, syllable_count,
     pitch_model_version, syllabified_from, active}."""
+    _backfill_active_vocal_notes(target_dir)
     vdir = _vocal_versions_dir(target_dir)
     if not vdir.exists():
         return []
@@ -479,6 +502,18 @@ def activate_vocal_notes_version(target_dir: Path, filename: str) -> dict | None
         return None
     write_vocal_notes(target_dir, data)
     return data
+
+
+def delete_vocal_notes_version(target_dir: Path, filename: str) -> bool:
+    """Remove a vocalmap snapshot. Returns False on malformed filename or
+    missing file. Caller must check active-status first."""
+    if not _VOCAL_VERSION_FILE_RE.match(filename):
+        return False
+    p = _vocal_versions_dir(target_dir) / filename
+    if not p.exists():
+        return False
+    p.unlink()
+    return True
 
 
 def _escape_chart_text(text: str) -> str:

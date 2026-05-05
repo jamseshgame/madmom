@@ -222,6 +222,23 @@ export default function LyricsButtons({ scope, hasVocals, meta, onLyricsChange }
     }
   }
 
+  const deleteVersion = async (v: LyricsVersion) => {
+    if (v.active) return
+    if (!window.confirm(`Delete this ${v.source.toUpperCase()} snapshot? The active version is unaffected.`)) return
+    try {
+      const r = await fetch(`/api/lyrics/versions/${encodeURIComponent(v.file)}?${scopeQuery(scope)}`, {
+        method: 'DELETE',
+      })
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}))
+        throw new Error(e.detail || `HTTP ${r.status}`)
+      }
+      refreshVersions()
+    } catch (e) {
+      setError({ kind: 'error', message: (e as Error).message })
+    }
+  }
+
   const lrclibBusy = lrclib.kind === 'loading' || whisper.kind === 'running'
   const whisperBusy = whisper.kind === 'running' || lrclib.kind === 'loading'
 
@@ -303,6 +320,15 @@ export default function LyricsButtons({ scope, hasVocals, meta, onLyricsChange }
                 className="shrink-0 px-1 py-0.5 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded text-[10px]"
               >
                 preview
+              </button>
+              <button
+                onClick={() => deleteVersion(v)}
+                disabled={v.active}
+                className="shrink-0 px-1 py-0.5 bg-red-900/30 hover:bg-red-800/50 disabled:opacity-30 disabled:cursor-not-allowed text-red-300 rounded text-[10px]"
+                title={v.active ? 'Cannot delete the active version. Activate another first.' : 'Delete this snapshot'}
+                aria-label="Delete version"
+              >
+                ×
               </button>
             </div>
           ))}

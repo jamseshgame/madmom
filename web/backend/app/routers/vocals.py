@@ -104,6 +104,25 @@ async def activate_vocalmap_version(
     return {'ok': True, 'syllable_count': len(data.get('syllables') or [])}
 
 
+@router.delete('/versions/{filename}')
+async def delete_vocalmap_version(
+    filename: str,
+    job_id: str | None = Query(default=None),
+    track_id: str | None = Query(default=None),
+):
+    """Delete a single vocalmap snapshot. Refuses to delete the active version."""
+    target = _resolve_dir(job_id=job_id, track_id=track_id)
+    snap = vocals_service.load_vocal_notes_version(target, filename)
+    if snap is None:
+        raise HTTPException(404, 'Version not found')
+    active = vocals_service.load_vocal_notes(target) or {}
+    if active.get('fetched_at') and snap.get('fetched_at') == active['fetched_at']:
+        raise HTTPException(409, 'Cannot delete the active version. Activate another first.')
+    if not vocals_service.delete_vocal_notes_version(target, filename):
+        raise HTTPException(404, 'Version not found')
+    return {'ok': True}
+
+
 import asyncio
 
 from app.services import lyrics as lyrics_service
