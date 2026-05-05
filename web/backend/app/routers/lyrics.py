@@ -4,12 +4,13 @@ See docs/superpowers/specs/2026-05-05-timestamped-lyrics-design.md.
 """
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from fastapi import APIRouter, Body, HTTPException, Query
 
 from app.services import lyrics as lyrics_service
-from app.services.jobs import get_job
+from app.services.jobs import JobKind, create_job, get_job
 from app.services.tracks import get_track
 
 router = APIRouter(prefix='/api/lyrics', tags=['lyrics'])
@@ -92,3 +93,53 @@ async def post_lrclib(
     target.mkdir(parents=True, exist_ok=True)
     lyrics_service.write_lyrics(target, result)
     return result
+
+
+@router.post('/whisper')
+async def post_whisper(
+    job_id: str | None = Query(default=None),
+    track_id: str | None = Query(default=None),
+):
+    """Kick off a Whisper transcription as a Job. UI subscribes to
+    /api/jobs/{returned_id}/events for progress."""
+    target = _resolve_dir(job_id=job_id, track_id=track_id)
+
+    # Find the vocals stem for this scope.
+    # demucs job: target = job.output_dir / 'stems' (vocals.<ext>)
+    # track:      target = track.stems_dir (vocals.ogg / etc)
+    candidates = list(target.glob('vocals.*'))
+    vocals = next((p for p in candidates if p.suffix.lower() in {'.ogg', '.wav', '.mp3', '.flac'}), None)
+    if vocals is None or not vocals.exists():
+        raise HTTPException(404, 'No vocals stem available for this scope')
+
+    work_job = create_job(kind=JobKind.OTHER, title='Whisper transcription')
+
+    async def _run() -> None:
+        loop = asyncio.get_running_loop()
+
+        # Whisper is CPU-bound; run in a thread executor to keep the event loop
+        # responsive. progress_callback is sync (matches transcribe_with_whisper's
+        # calling convention), but job.send is async — bridge via
+        # run_coroutine_threadsafe so the thread can schedule sends onto the loop.
+        def sync_progress(step: str, pct: int, msg: str) -> None:
+            asyncio.run_coroutine_threadsafe(
+                work_job.send(step, pct, msg),
+                loop,
+            )
+
+        try:
+            result = await loop.run_in_executor(
+                None,
+                lambda: lyrics_service.transcribe_with_whisper(vocals, sync_progress),
+            )
+            target.mkdir(parents=True, exist_ok=True)
+            lyrics_service.write_lyrics(target, result)
+            await work_job.send_done({'word_count': len(result['words']), 'source': 'whisper'})
+        except asyncio.CancelledError:
+            return
+        except Exception as e:  # noqa: BLE001
+            if not work_job.cancelled:
+                await work_job.send_error(str(e) or 'Whisper transcription failed')
+
+    work_job.task = asyncio.create_task(_run())
+    return {'job_id': work_job.id}
