@@ -5,7 +5,36 @@ See docs/superpowers/specs/2026-05-05-vocal-beatmaps-design.md.
 """
 from __future__ import annotations
 
+import statistics
+
 from syllabipy.sonoripy import SonoriPy
+
+
+_SUNG_CONF_MIN = 0.7
+_SUNG_PITCH_STD_MAX = 1.5            # semitones
+_WHISPER_DB_MAX = -40.0              # median dB
+_WHISPER_CONF_MAX = 0.4
+
+
+def voicing_classify(
+    curve: list[float],
+    confidence: float,
+    dynamics_db: list[float],
+) -> str:
+    """Classify a single syllable as sung / spoken / whispered.
+
+    `curve` is a per-frame list of float MIDI semitones (NaN frames already
+    removed by caller); `confidence` is the syllable's median CREPE confidence
+    in [0, 1]; `dynamics_db` is the syllable's per-frame RMS in dB.
+    """
+    median_db = statistics.median(dynamics_db) if dynamics_db else 0.0
+    if confidence <= _WHISPER_CONF_MAX and median_db <= _WHISPER_DB_MAX:
+        return "whispered"
+    if confidence >= _SUNG_CONF_MIN and len(curve) >= 2:
+        pitch_std = statistics.pstdev(curve)
+        if pitch_std <= _SUNG_PITCH_STD_MAX:
+            return "sung"
+    return "spoken"
 
 
 def _split_english_syllables(word: str) -> list[str]:
