@@ -343,9 +343,55 @@ export default function VocalEditor() {
   // ---------- Audio events ----------
   const onAudioPlay = () => setPlaying(true)
   const onAudioPause = () => setPlaying(false)
-  const onAudioTime = () => {
+  const didAutoSeekRef = useRef(false)
+  const onAudioMetadata = () => {
     const a = audioRef.current
-    if (a) setDuration(a.duration || 0)
+    if (!a) return
+    setDuration(a.duration || 0)
+    // One-shot pre-roll: jump to ~1s before the first syllable so the user
+    // immediately sees content instead of an empty highway. Skips if the user
+    // already moved the cursor (e.g. via seek slider) before metadata loaded.
+    if (!didAutoSeekRef.current && sylls.length && a.currentTime === 0) {
+      const target = Math.max(0, sylls[0].time_s - 1)
+      a.currentTime = target
+      didAutoSeekRef.current = true
+    }
+  }
+  // Seek to first syllable once data and audio are both ready.
+  useEffect(() => {
+    if (didAutoSeekRef.current) return
+    const a = audioRef.current
+    if (!a || !sylls.length) return
+    if (a.readyState >= 1 && a.duration > 0) {
+      a.currentTime = Math.max(0, sylls[0].time_s - 1)
+      didAutoSeekRef.current = true
+    }
+  }, [sylls])
+
+  // Next-note indicator: where is the closest upcoming syllable relative
+  // to the current playhead? Used to show a "→ jump to next note" button
+  // when nothing is in the current viewport.
+  const viewportSpanS = useMemo(() => {
+    const w = containerRef.current?.clientWidth ?? 1200
+    return w / pps
+  }, [pps, containerRef.current?.clientWidth])
+
+  const visibleCount = useMemo(() => {
+    const halfSpan = viewportSpanS / 2
+    return sylls.filter((s) => {
+      const end = s.time_s + s.duration_s
+      return end > currentTime - halfSpan && s.time_s < currentTime + halfSpan
+    }).length
+  }, [sylls, currentTime, viewportSpanS])
+
+  const nextSyllAfterNow = useMemo(() => {
+    return sylls.find((s) => s.time_s > currentTime) ?? null
+  }, [sylls, currentTime])
+
+  const jumpToNext = () => {
+    const a = audioRef.current
+    if (!a || !nextSyllAfterNow) return
+    a.currentTime = Math.max(0, nextSyllAfterNow.time_s - 0.5)
   }
 
   // ---------- Save ----------
@@ -544,6 +590,17 @@ export default function VocalEditor() {
         <div className="absolute top-1 left-1/2 -translate-x-1/2 px-1.5 py-0.5 bg-jam-600/90 text-white text-[10px] font-semibold rounded pointer-events-none z-20">
           {currentTime.toFixed(2)}s
         </div>
+
+        {/* "Jump to next note" affordance when nothing is in view */}
+        {visibleCount === 0 && nextSyllAfterNow && (
+          <button
+            onClick={(e) => { e.stopPropagation(); jumpToNext() }}
+            className="absolute top-1/2 right-4 -translate-y-1/2 px-3 py-2 bg-pink-700/80 hover:bg-pink-600 text-pink-100 text-xs rounded-md font-medium z-30 shadow-lg"
+            title={`Next note "${nextSyllAfterNow.text}" at ${nextSyllAfterNow.time_s.toFixed(2)}s`}
+          >
+            → Next note ({nextSyllAfterNow.time_s.toFixed(1)}s)
+          </button>
+        )}
       </div>
 
       {/* Lyric line */}
@@ -631,7 +688,7 @@ export default function VocalEditor() {
         preload="auto"
         onPlay={onAudioPlay}
         onPause={onAudioPause}
-        onLoadedMetadata={onAudioTime}
+        onLoadedMetadata={onAudioMetadata}
       />
     </div>
   )
