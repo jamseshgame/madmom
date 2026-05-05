@@ -175,6 +175,8 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
   const [iniSaveState, setIniSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [iniError, setIniError] = useState('')
   const [stemPeaks, setStemPeaks] = useState<Record<string, number[]> | null>(null)
+  const [vocalNotes, setVocalNotes] = useState<{ lyrics_etag?: string } | null>(null)
+  const [vocalsStale, setVocalsStale] = useState(false)
 
   // Fetch backend-precomputed waveform peaks once. If 404 (older job), each
   // StemPlayer falls back to its in-browser Web Audio decode.
@@ -185,6 +187,36 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => { if (data) setStemPeaks(data) })
       .catch(() => { /* ignore — fallback to client decode */ })
+    return () => ctrl.abort()
+  }, [jobId])
+
+  // Detect vocal_notes.json staleness vs current lyrics.json. The browser
+  // computes sha1 over a canonical JSON projection that mirrors the
+  // backend's hashlib.sha1(json.dumps(lyrics, sort_keys=True, ensure_ascii=False)).
+  useEffect(() => {
+    if (!jobId) return
+    const ctrl = new AbortController()
+    Promise.all([
+      fetch(`/api/lyrics?job_id=${jobId}`, { signal: ctrl.signal })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null),
+      fetch(`/api/vocals?job_id=${jobId}`, { signal: ctrl.signal })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null),
+    ])
+      .then(async ([lyrics, notes]) => {
+        setVocalNotes(notes)
+        if (lyrics && notes?.lyrics_etag) {
+          const canonical = JSON.stringify(lyrics, Object.keys(lyrics).sort())
+          const buf = new TextEncoder().encode(canonical)
+          const hash = await crypto.subtle.digest('SHA-1', buf)
+          const hex = Array.from(new Uint8Array(hash))
+            .map((b) => b.toString(16).padStart(2, '0'))
+            .join('')
+          setVocalsStale(hex !== notes.lyrics_etag)
+        }
+      })
+      .catch(() => { /* ignore */ })
     return () => ctrl.abort()
   }, [jobId])
   const updateIni = (key: string, value: string) =>
@@ -367,12 +399,17 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                 )}
 
                 {/* Beatmap generation */}
+                {stem === 'vocals' && vocalsStale && (
+                  <div className="bg-amber-900/40 border border-amber-800 rounded p-2 text-xs text-amber-200">
+                    Lyrics changed since vocal beatmap was generated. Click <span className="font-medium">Re-generate</span> to refresh.
+                  </div>
+                )}
                 {!bm && stem !== 'song' && (
                   <button
                     onClick={() => stem === 'vocals' ? generateVocalBeatmap() : generateBeatmap(stem)}
                     className="px-3 py-1.5 bg-green-700/60 hover:bg-green-600/70 text-green-200 rounded text-xs font-medium transition-colors w-full"
                   >
-                    Generate Beatmap
+                    {stem === 'vocals' && vocalNotes ? 'Re-generate vocals' : 'Generate Beatmap'}
                   </button>
                 )}
 
