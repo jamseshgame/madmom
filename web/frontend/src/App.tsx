@@ -2,6 +2,7 @@ import { Link, NavLink, Route, Routes, useLocation, useNavigate } from 'react-ro
 import TracksPage from './pages/TracksPage.tsx'
 import GameSongsPage from './pages/GameSongsPage.tsx'
 import ChangelogPage from './pages/ChangelogPage.tsx'
+import LogsPage from './pages/LogsPage.tsx'
 import BeatmapEditor from './components/BeatmapEditor.tsx'
 import { VersionBanner } from './components/VersionStatus.tsx'
 import { logout } from './components/AuthGate.tsx'
@@ -10,6 +11,7 @@ import { STUDIO_VERSION } from './version.ts'
 const navItems = [
   { to: '/', label: 'Studio Library' },
   { to: '/game-songs', label: 'Game Library' },
+  { to: '/logs', label: 'Logs' },
 ]
 
 export default function App() {
@@ -81,6 +83,7 @@ export default function App() {
           <Route path="/" element={<TracksPage />} />
           <Route path="/tracks" element={<TracksPage />} />
           <Route path="/game-songs" element={<GameSongsPage />} />
+          <Route path="/logs" element={<LogsPage />} />
           <Route path="/changelog" element={<ChangelogPage />} />
         </Routes>
       </main>

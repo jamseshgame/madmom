@@ -62,6 +62,7 @@ class Job:
     event_log: list[dict] = field(default_factory=list)
     track_id: Optional[str] = None
     beatmap_id: Optional[str] = None
+    user: Optional[str] = None
     # Runtime-only — never persisted
     cancelled: bool = field(default=False, repr=False)
     process: Any = field(default=None, repr=False)
@@ -91,6 +92,7 @@ class Job:
             'track_id': self.track_id or self.metadata.get('track_id'),
             'beatmap_id': self.beatmap_id or self.metadata.get('beatmap_id'),
             'output_dir': str(self.output_dir) if self.output_dir else None,
+            'user': self.user,
         }
 
     def _persist(self) -> None:
@@ -118,6 +120,7 @@ class Job:
             event_log=data.get('event_log', []),
             track_id=data.get('track_id'),
             beatmap_id=data.get('beatmap_id'),
+            user=data.get('user'),
         )
 
     # --------------------------------------------------------- Subscription
@@ -230,10 +233,19 @@ class Job:
 _jobs: dict[str, Job] = {}
 
 
-def create_job(kind: JobKind | str = JobKind.SEPARATE, title: str = '') -> Job:
+def create_job(
+    kind: JobKind | str = JobKind.SEPARATE,
+    title: str = '',
+    user: str | None = None,
+) -> Job:
     if isinstance(kind, str):
         kind = JobKind(kind)
-    job = Job(id=uuid.uuid4().hex[:12], kind=kind, title=title)
+    if user is None:
+        # Auth is single-user via studio_username today. Capture it as the
+        # job creator so the Logs UI can attribute work — when multi-user
+        # lands, callers will pass the real authenticated identity instead.
+        user = settings.studio_username or 'local'
+    job = Job(id=uuid.uuid4().hex[:12], kind=kind, title=title, user=user)
     _jobs[job.id] = job
     job._persist()
     return job

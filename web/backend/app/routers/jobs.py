@@ -12,20 +12,37 @@ router = APIRouter(prefix='/api/jobs', tags=['jobs'])
 
 
 @router.get('')
-async def get_all_jobs(active: bool = False, limit: int = 50, kind: str = ''):
+async def get_all_jobs(
+    active: bool = False,
+    limit: int = 50,
+    kind: str = '',
+    user: str = '',
+    include_events: bool = False,
+):
     """List jobs newest first.
 
     Query params:
-      - active=1   only QUEUED/RUNNING
-      - kind=...   only this JobKind value (separate, manual_stems, beatmap)
-      - limit      max rows (default 50)
+      - active=1            only QUEUED/RUNNING
+      - kind=...            only this JobKind value (separate, manual_stems, beatmap, ...)
+      - user=...            only jobs created by this user
+      - limit               max rows (default 50)
+      - include_events=1    inline the most recent 200 events per job
+                            (used by the Logs page to render in one round-trip)
     """
     jobs = list_jobs()
     if active:
         jobs = [j for j in jobs if j.status in (JobStatus.QUEUED, JobStatus.RUNNING)]
     if kind:
         jobs = [j for j in jobs if (j.kind.value if hasattr(j.kind, 'value') else j.kind) == kind]
-    return [j.to_dict() for j in jobs[:limit]]
+    if user:
+        jobs = [j for j in jobs if j.user == user]
+    out: list[dict] = []
+    for j in jobs[:limit]:
+        d = j.to_dict()
+        if include_events:
+            d['event_log'] = j.event_log[-200:]
+        out.append(d)
+    return out
 
 
 @router.get('/{job_id}')
