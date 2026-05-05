@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import CreateSection from '../components/CreateSection.tsx'
+import LyricsButtons from '../components/LyricsButtons'
 import StemPlayer from '../components/StemPlayer.tsx'
 import BeatmapStatsModal, { BeatmapRecord as BeatmapStatsRecord } from '../components/BeatmapStatsModal.tsx'
 
@@ -1240,6 +1241,18 @@ export default function TracksPage() {
                     {STEM_LABELS[stem] || stem}
                   </span>
                   <StemPlayer src={`/api/tracks/${selectedTrack.id}/stems/${stem}`} />
+                  {stem === 'vocals' && (
+                    <LyricsButtons
+                      scope={{ trackId: selectedTrack.id }}
+                      hasVocals={true}
+                      meta={{
+                        artist: (songIni.artist || '').trim() || selectedTrack.artist,
+                        title: (songIni.name || '').trim() || selectedTrack.name,
+                        album: (songIni.album || '').trim() || selectedTrack.album,
+                        duration_s: undefined,
+                      }}
+                    />
+                  )}
                   <div className="flex flex-wrap gap-1.5 justify-center items-center">
                     {stem === 'song' ? (
                       <a
