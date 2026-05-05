@@ -207,7 +207,7 @@ def inject_into_chart(chart_path: Path, lyrics: dict) -> int:
     derived from `lyrics`. Existing non-lyric events are preserved; existing
     lyric events from a previous run are removed (idempotent). Returns the
     number of word events written."""
-    text = chart_path.read_text()
+    text = chart_path.read_text(encoding='utf-8')
     resolution, segments = parse_sync_track(text)
 
     new_event_lines: list[tuple[int, str]] = []
@@ -246,7 +246,7 @@ def inject_into_chart(chart_path: Path, lyrics: dict) -> int:
 
     new_block = ['[Events]', '{'] + [line for _, line in merged] + ['}']
     new_lines = lines[:events_idx] + new_block + lines[close_idx + 1:]
-    chart_path.write_text('\n'.join(new_lines) + '\n')
+    chart_path.write_text('\n'.join(new_lines) + '\n', encoding='utf-8')
 
     return sum(1 for _ in lyrics.get('words', []))
 
@@ -255,7 +255,7 @@ def write_lyrics(target_dir: Path, lyrics: dict) -> Path:
     """Persist `lyrics.json` in target_dir. Caller is responsible for ensuring
     target_dir exists."""
     path = target_dir / 'lyrics.json'
-    path.write_text(json.dumps(lyrics, ensure_ascii=False, indent=2))
+    path.write_text(json.dumps(lyrics, ensure_ascii=False, indent=2), encoding='utf-8')
     return path
 
 
@@ -264,7 +264,7 @@ def load_lyrics(target_dir: Path) -> dict | None:
     path = target_dir / 'lyrics.json'
     if not path.exists():
         return None
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding='utf-8'))
 
 
 _WHISPER_MODEL = None  # Lazy singleton
