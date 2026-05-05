@@ -33,8 +33,12 @@ export default function VocalBeatmapTracker({
       }
     }
     es.onerror = () => {
-      es.close()
-      setError('Connection lost')
+      // Only treat as fatal if the browser has stopped trying to reconnect.
+      // Transient blips (proxy hiccup, server still working) keep the
+      // EventSource in CONNECTING — let the browser auto-reconnect.
+      if (es.readyState === EventSource.CLOSED) {
+        setError('Connection lost')
+      }
     }
     return () => es.close()
   }, [beatmapJobId, onCancelled, onDone])

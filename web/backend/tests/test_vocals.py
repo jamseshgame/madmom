@@ -27,11 +27,12 @@ def test_syllabify_three_word_english():
 
 
 def test_syllabify_single_syllable_word():
+    # No duration_s and no next word — final-word fallback (0.6s) applies.
     words = [{"time_s": 0.0, "text": "go", "phrase_start": True, "phrase_end": True}]
     sylls = syllabify(words, language="en")
     assert sylls == [{
         "time_s": 0.0,
-        "duration_s": 0.0,
+        "duration_s": 0.6,
         "text": "go",
         "phrase_start": True,
         "phrase_end": True,
@@ -48,6 +49,37 @@ def test_syllabify_non_english_falls_back_to_per_word():
     assert [s["text"] for s in sylls] == ["bonjour", "monde"]
     assert sylls[0]["phrase_start"] is True
     assert sylls[-1]["phrase_end"] is True
+
+
+def test_syllabify_infers_duration_from_next_word_when_missing():
+    """Whisper word-level output omits duration_s. syllabify must infer
+    durations from the gap to the next word — without this, every syllable
+    would have duration_s=0 and pitch alignment would collapse downstream.
+
+    Uses single-syllable words so the test focuses on the duration logic
+    without coupling to SonoriPy's split decisions."""
+    words = [
+        {"time_s": 18.0, "text": "I", "phrase_start": True},
+        {"time_s": 18.64, "text": "heard"},
+        {"time_s": 18.9, "text": "no", "phrase_end": True},
+    ]
+    sylls = syllabify(words, language="en")
+    # "I" gap → 0.64s, "heard" gap → 0.26s, "no" final → 0.6s fallback
+    by_text = {s["text"]: s for s in sylls}
+    assert abs(by_text["I"]["duration_s"] - 0.64) < 0.01
+    assert abs(by_text["heard"]["duration_s"] - 0.26) < 0.01
+    assert abs(by_text["no"]["duration_s"] - 0.6) < 0.01
+
+
+def test_syllabify_caps_inferred_duration_at_two_seconds():
+    """A long silence between words shouldn't produce a 60s syllable window."""
+    words = [
+        {"time_s": 0.0, "text": "yes", "phrase_start": True},
+        {"time_s": 60.0, "text": "no", "phrase_end": True},
+    ]
+    sylls = syllabify(words, language="en")
+    assert sylls[0]["text"] == "yes"
+    assert abs(sylls[0]["duration_s"] - 2.0) < 0.01
 
 
 def test_syllabify_distributes_word_duration_across_syllables():

@@ -129,13 +129,36 @@ async def post_generate(
 
             await work_job.send('crepe-load', 65, 'Loading pitch model...')
 
+            last_step = {'step': 'crepe', 'pct': 70, 'msg': 'Detecting pitch...'}
+
             def sync_build_progress(step: str, pct: int, msg: str) -> None:
+                last_step['step'] = step
+                last_step['pct'] = pct
+                last_step['msg'] = msg
                 asyncio.run_coroutine_threadsafe(work_job.send(step, pct, msg), loop)
 
-            notes = await loop.run_in_executor(
-                None,
-                lambda: vocals_service.build_vocal_notes(vocals, lyrics, sync_build_progress),
-            )
+            async def _heartbeat() -> None:
+                """Re-send the most recent progress event every 5s so the SSE
+                stays visibly alive during the long CREPE pass — without it,
+                EventSource sees no traffic for minutes and fires onerror."""
+                import time
+                start = time.time()
+                while True:
+                    await asyncio.sleep(5)
+                    elapsed = int(time.time() - start)
+                    await work_job.send(
+                        last_step['step'], last_step['pct'],
+                        f"{last_step['msg']} ({elapsed}s)",
+                    )
+
+            hb = asyncio.create_task(_heartbeat())
+            try:
+                notes = await loop.run_in_executor(
+                    None,
+                    lambda: vocals_service.build_vocal_notes(vocals, lyrics, sync_build_progress),
+                )
+            finally:
+                hb.cancel()
 
             target.mkdir(parents=True, exist_ok=True)
             vocals_service.write_vocal_notes(target, notes)

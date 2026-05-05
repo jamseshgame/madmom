@@ -9,6 +9,7 @@ import datetime
 import hashlib
 import json
 import math
+import os
 import statistics
 from pathlib import Path
 
@@ -64,6 +65,10 @@ def _split_english_syllables(word: str) -> list[str]:
     return [word] if word else []
 
 
+_WHISPER_FALLBACK_DUR_S = 0.6   # final-word fallback when no next-word gap exists
+_WHISPER_MAX_INFERRED_S = 2.0   # cap inferred durations at 2s for unusually long gaps
+
+
 def syllabify(words: list[dict], language: str = "en") -> list[dict]:
     """Split each word into syllables using Sonority Sequencing for English.
 
@@ -73,10 +78,16 @@ def syllabify(words: list[dict], language: str = "en") -> list[dict]:
     boundaries on the first/last syllable of each phrase respectively. Each
     word's time window is split across its syllables proportional to character
     count.
+
+    When `duration_s` is missing or None on a word (whisper word-level output
+    omits it), infer it from the gap to the next word's `time_s`, capped at
+    2.0s and floored at 0.05s. The last word falls back to a 0.6s default.
+    Without this, every syllable would carry duration_s=0, which collapses
+    pitch alignment to empty windows downstream.
     """
     is_english = bool(language) and language.lower().startswith("en")
     out: list[dict] = []
-    for w in words:
+    for idx, w in enumerate(words):
         text = (w.get("text") or "").strip()
         if not text:
             continue
@@ -84,7 +95,23 @@ def syllabify(words: list[dict], language: str = "en") -> list[dict]:
         if not parts:
             parts = [text]
         word_start = float(w.get("time_s", 0.0))
-        word_dur = float(w.get("duration_s", 0.0) or 0.0)
+        raw_dur = w.get("duration_s")
+        if raw_dur is None or float(raw_dur) <= 0:
+            # Infer from gap to next word's time_s; final word uses fallback.
+            next_t: float | None = None
+            for j in range(idx + 1, len(words)):
+                nxt = words[j]
+                if (nxt.get("text") or "").strip():
+                    nxt_time = nxt.get("time_s")
+                    if nxt_time is not None:
+                        next_t = float(nxt_time)
+                    break
+            if next_t is not None and next_t > word_start:
+                word_dur = min(_WHISPER_MAX_INFERRED_S, max(0.05, next_t - word_start))
+            else:
+                word_dur = _WHISPER_FALLBACK_DUR_S
+        else:
+            word_dur = float(raw_dur)
         total_chars = sum(len(p) for p in parts) or 1
         cumulative = 0
         for i, syl in enumerate(parts):
@@ -127,7 +154,18 @@ def detect_pitches(vocals_path: Path) -> tuple[list[float], list[float]]:
     (periodicity < 0.21) have f0_hz set to NaN. 10 ms hop. Loads the model
     on first call.
     """
+    import torch
     import torchaudio
+
+    # Cap intra-op + inter-op threads to avoid 45-thread CPU thrash that made
+    # CREPE inference take ~40x longer than necessary on a 4-min song.
+    try:
+        torch.set_num_threads(max(1, min(8, (os.cpu_count() or 2) // 2)))
+        torch.set_num_interop_threads(2)
+    except RuntimeError:
+        # set_num_interop_threads must be called before any parallel work;
+        # subsequent calls raise. Ignore — first call wins for the process.
+        pass
 
     audio, sr = torchaudio.load(str(vocals_path))
     if audio.shape[0] > 1:
