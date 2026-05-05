@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
-import CreateSection from '../components/CreateSection.tsx'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import LyricsButtons from '../components/LyricsButtons'
 import StemPlayer from '../components/StemPlayer.tsx'
 import BeatmapStatsModal, { BeatmapRecord as BeatmapStatsRecord } from '../components/BeatmapStatsModal.tsx'
@@ -959,9 +958,7 @@ export default function TracksPage() {
   const [loading, setLoading] = useState(true)
   const [beatmapPanel, setBeatmapPanel] = useState<{ track: Track; stem: string } | null>(null)
   const [searchParams, setSearchParams] = useSearchParams()
-  const location = useLocation()
   const navigate = useNavigate()
-  const createResetKey = (location.state as { resetAt?: number } | null)?.resetAt ?? 'default'
   const selectedId = searchParams.get('id')
   const setSelectedId = useCallback(
     (id: string | null) => {
@@ -1729,11 +1726,13 @@ export default function TracksPage() {
 
   return (
     <div className="space-y-8">
-      <CreateSection key={createResetKey} onSaved={loadTracks} />
-
       <div>
         <h1 className="text-2xl font-bold">Studio Library</h1>
-        <p className="text-gray-500 mt-1">Saved stems from previous separations. Click a track to view details.</p>
+        <p className="text-gray-500 mt-1">
+          Tracks in progress and finished maps. Click any track to edit metadata, generate beatmaps, or publish.
+          {' '}
+          <Link to="/create" className="text-jam-300 hover:text-jam-200">+ Create a new track →</Link>
+        </p>
       </div>
 
       {loading && (

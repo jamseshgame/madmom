@@ -3,6 +3,7 @@ import { Link, NavLink, Route, Routes, useLocation, useNavigate } from 'react-ro
 import TracksPage from './pages/TracksPage.tsx'
 import GameSongsPage from './pages/GameSongsPage.tsx'
 import ChangelogPage from './pages/ChangelogPage.tsx'
+import CreatePage from './pages/CreatePage.tsx'
 import DependenciesPage from './pages/DependenciesPage.tsx'
 import LogsPage from './pages/LogsPage.tsx'
 import UsersPage from './pages/UsersPage.tsx'
@@ -15,6 +16,7 @@ import { STUDIO_VERSION } from './version.ts'
 type Role = 'admin' | 'user'
 
 const baseNavItems: { to: string; label: string; adminOnly?: boolean }[] = [
+  { to: '/create', label: 'Create' },
   { to: '/', label: 'Studio Library' },
   { to: '/game-songs', label: 'Game Library' },
   { to: '/logs', label: 'Logs' },
@@ -127,6 +129,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<TracksPage />} />
           <Route path="/tracks" element={<TracksPage />} />
+          <Route path="/create" element={<CreatePage />} />
           <Route path="/game-songs" element={<GameSongsPage />} />
           <Route path="/logs" element={<LogsPage />} />
           <Route path="/users" element={<UsersPage />} />
