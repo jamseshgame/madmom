@@ -1264,28 +1264,40 @@ export default function TracksPage() {
             </button>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+          <div className="flex flex-col gap-2">
             {Object.entries(selectedTrack.stems)
               .filter(([stem]) => !NON_AUDIO_KEYS.has(stem))
               .map(([stem]) => (
                 <div
                   key={stem}
-                  className="bg-gray-800 border border-gray-700 rounded-lg p-3 flex flex-col items-stretch gap-2 relative"
+                  className="bg-gray-800 border border-gray-700 rounded-lg p-3 flex flex-col md:flex-row md:items-stretch gap-3 relative"
                 >
-                  {stem !== 'song' && (
-                    <input
-                      type="checkbox"
-                      checked={selectedStems.has(stem)}
-                      onChange={() => toggleSelectedStem(stem)}
-                      className="absolute top-2 left-2 h-4 w-4 rounded border-gray-600 bg-gray-900 accent-jam-500 cursor-pointer"
-                      aria-label={`Select ${STEM_LABELS[stem] || stem} for batch beatmap`}
-                      title="Select for batch beatmap generation"
-                    />
-                  )}
-                  <span className={`text-sm font-semibold text-center ${STEM_COLORS[stem] || 'text-gray-300'}`}>
-                    {STEM_LABELS[stem] || stem}
-                  </span>
-                  <StemPlayer src={`/api/tracks/${selectedTrack.id}/stems/${stem}`} />
+                  {/* Identity column: checkbox + stem label */}
+                  <div className="md:w-24 md:shrink-0 flex md:flex-col items-center md:justify-center gap-2 md:gap-1.5">
+                    {stem !== 'song' ? (
+                      <input
+                        type="checkbox"
+                        checked={selectedStems.has(stem)}
+                        onChange={() => toggleSelectedStem(stem)}
+                        className="h-4 w-4 rounded border-gray-600 bg-gray-900 accent-jam-500 cursor-pointer shrink-0"
+                        aria-label={`Select ${STEM_LABELS[stem] || stem} for batch beatmap`}
+                        title="Select for batch beatmap generation"
+                      />
+                    ) : (
+                      <div className="h-4 w-4 shrink-0" />
+                    )}
+                    <span className={`text-sm font-semibold ${STEM_COLORS[stem] || 'text-gray-300'}`}>
+                      {STEM_LABELS[stem] || stem}
+                    </span>
+                  </div>
+
+                  {/* Waveform column (gets the slack) */}
+                  <div className="flex-1 min-w-0 flex items-center">
+                    <StemPlayer src={`/api/tracks/${selectedTrack.id}/stems/${stem}`} />
+                  </div>
+
+                  {/* Actions column */}
+                  <div className="md:w-80 md:shrink-0 flex flex-col gap-1.5">
                   {stem === 'vocals' && (
                     <>
                       <LyricsButtons
@@ -1447,6 +1459,7 @@ export default function TracksPage() {
                       </div>
                       )
                     })}
+                  </div>
                 </div>
               ))}
           </div>
