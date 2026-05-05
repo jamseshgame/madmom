@@ -273,3 +273,21 @@ def build_vocal_notes(
         'fetched_at': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
         'syllables': out_sylls,
     }
+
+
+def write_vocal_notes(target_dir: Path, notes: dict) -> Path:
+    """Persist vocal_notes.json in target_dir."""
+    path = target_dir / 'vocal_notes.json'
+    path.write_text(
+        json.dumps(notes, ensure_ascii=False, indent=2),
+        encoding='utf-8',
+    )
+    return path
+
+
+def load_vocal_notes(target_dir: Path) -> dict | None:
+    """Read vocal_notes.json from target_dir. Returns None if absent."""
+    path = target_dir / 'vocal_notes.json'
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding='utf-8'))

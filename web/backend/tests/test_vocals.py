@@ -162,3 +162,24 @@ def test_build_vocal_notes_orchestrates_syllabify_and_pitch_alignment(monkeypatc
     assert notes["syllabifier"] == "ssp-en"
     assert notes["frame_hop_s"] == 0.010
     assert "lyrics_etag" in notes
+
+
+def test_write_then_load_vocal_notes(tmp_path):
+    from app.services.vocals import write_vocal_notes, load_vocal_notes
+    notes = {
+        "version": 1, "syllabified_from": "lrclib",
+        "pitch_model": "torchcrepe-full", "frame_hop_s": 0.010,
+        "syllables": [
+            {"time_s": 1.0, "duration_s": 0.3, "text": "Hi",
+             "midi_pitch": 60, "confidence": 0.9, "voicing": "sung",
+             "pitch_curve_st": [60.0], "dynamics_db": [-15.0]},
+        ],
+    }
+    path = write_vocal_notes(tmp_path, notes)
+    assert path == tmp_path / "vocal_notes.json"
+    assert load_vocal_notes(tmp_path) == notes
+
+
+def test_load_vocal_notes_missing(tmp_path):
+    from app.services.vocals import load_vocal_notes
+    assert load_vocal_notes(tmp_path) is None
