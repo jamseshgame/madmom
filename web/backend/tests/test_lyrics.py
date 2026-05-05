@@ -1,10 +1,12 @@
 """Unit tests for the lyrics service."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import httpx
 import pytest
 
-from app.services.lyrics import fetch_from_lrclib, interpolate_words, parse_lrc, parse_sync_track, seconds_to_tick
+from app.services.lyrics import fetch_from_lrclib, inject_into_chart, interpolate_words, parse_lrc, parse_sync_track, seconds_to_tick
 
 
 def test_parse_lrc_basic():
@@ -233,3 +235,74 @@ def test_seconds_to_tick_after_tempo_change():
     assert seconds_to_tick(0.0, 192, segments) == 0
     assert seconds_to_tick(1.0, 192, segments) == 384
     assert seconds_to_tick(2.5, 192, segments) == 672
+
+
+FIXTURE = Path(__file__).parent / "fixtures" / "sample.chart"
+
+
+def test_inject_into_chart_writes_lyric_events(tmp_path):
+    chart_path = tmp_path / "out.chart"
+    chart_path.write_text(FIXTURE.read_text())
+
+    lyrics = {
+        "source": "lrclib",
+        "language": "en",
+        "words": [
+            {"time_s": 0.5, "text": "Hello", "phrase_start": True},
+            {"time_s": 1.0, "text": "world", "phrase_end": True},
+            {"time_s": 2.0, "text": "again", "phrase_start": True, "phrase_end": True},
+        ],
+    }
+    count = inject_into_chart(chart_path, lyrics)
+    assert count == 3
+
+    text = chart_path.read_text()
+
+    # Existing section event preserved
+    assert '192 = E "section Intro"' in text
+    # Lyric events present
+    assert 'E "lyric Hello"' in text
+    assert 'E "lyric world"' in text
+    assert 'E "lyric again"' in text
+    # Phrase markers
+    assert text.count('E "phrase_start"') == 2
+    assert text.count('E "phrase_end"') == 2
+
+    # 0.5s @ 120 BPM, 192 ppq = 192 ticks. 1.0s = 384. 2.0s = 768.
+    assert '192 = E "phrase_start"' in text
+    assert '192 = E "lyric Hello"' in text
+    assert '384 = E "lyric world"' in text
+    assert '384 = E "phrase_end"' in text
+    assert '768 = E "phrase_start"' in text
+    assert '768 = E "lyric again"' in text
+    assert '768 = E "phrase_end"' in text
+
+
+def test_inject_into_chart_idempotent(tmp_path):
+    """Running twice produces the same output (no duplicate events)."""
+    chart_path = tmp_path / "out.chart"
+    chart_path.write_text(FIXTURE.read_text())
+    lyrics = {
+        "source": "lrclib", "language": "en",
+        "words": [{"time_s": 1.0, "text": "Hi", "phrase_start": True, "phrase_end": True}],
+    }
+    inject_into_chart(chart_path, lyrics)
+    first = chart_path.read_text()
+    inject_into_chart(chart_path, lyrics)
+    second = chart_path.read_text()
+    assert first == second
+
+
+def test_inject_into_chart_empty_words_clears_lyrics(tmp_path):
+    chart_path = tmp_path / "out.chart"
+    chart_path.write_text(FIXTURE.read_text())
+    inject_into_chart(chart_path, {
+        "source": "lrclib", "language": "en",
+        "words": [{"time_s": 1.0, "text": "Hi", "phrase_start": True, "phrase_end": True}],
+    })
+    inject_into_chart(chart_path, {"source": "lrclib", "language": "en", "words": []})
+    text = chart_path.read_text()
+    assert 'E "lyric' not in text
+    assert 'phrase_start' not in text
+    # Original section event still there
+    assert '192 = E "section Intro"' in text

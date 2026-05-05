@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import datetime
 import re
+from pathlib import Path
 
 import httpx
 
@@ -182,3 +183,68 @@ def seconds_to_tick(t: float, resolution: int, segments: list[dict]) -> int:
             local_ticks = local_t * (bpm * resolution / 60.0)
             return int(round(seg_start_tick + local_ticks))
     return 0
+
+
+_LYRIC_EVENT_NAMES = ('phrase_start', 'phrase_end', 'lyric ')
+
+
+def _is_lyric_event_line(line: str) -> bool:
+    """True if a line inside [Events] is a lyric/phrase event we manage."""
+    s = line.strip()
+    if not s.startswith(tuple(f'{n}' for n in '0123456789')):
+        return False
+    return any(name in s for name in _LYRIC_EVENT_NAMES)
+
+
+def _escape_chart_text(text: str) -> str:
+    """Quotes and backslashes need escaping inside CH .chart string events."""
+    return text.replace('\\', '\\\\').replace('"', '\\"')
+
+
+def inject_into_chart(chart_path: Path, lyrics: dict) -> int:
+    """Rewrite the [Events] block of `chart_path` with lyric/phrase events
+    derived from `lyrics`. Existing non-lyric events are preserved; existing
+    lyric events from a previous run are removed (idempotent). Returns the
+    number of word events written."""
+    text = chart_path.read_text()
+    resolution, segments = parse_sync_track(text)
+
+    new_event_lines: list[tuple[int, str]] = []
+    for w in lyrics.get('words', []):
+        tick = seconds_to_tick(float(w['time_s']), resolution, segments)
+        if w.get('phrase_start'):
+            new_event_lines.append((tick, f'  {tick} = E "phrase_start"'))
+        new_event_lines.append((tick, f'  {tick} = E "lyric {_escape_chart_text(w["text"])}"'))
+        if w.get('phrase_end'):
+            new_event_lines.append((tick, f'  {tick} = E "phrase_end"'))
+
+    lines = text.splitlines()
+    try:
+        events_idx = lines.index('[Events]')
+    except ValueError:
+        # No Events block — append one
+        lines += ['[Events]', '{', '}']
+        events_idx = len(lines) - 3
+    open_idx = events_idx + 1
+    while open_idx < len(lines) and lines[open_idx].strip() != '{':
+        open_idx += 1
+    close_idx = open_idx + 1
+    while close_idx < len(lines) and lines[close_idx].strip() != '}':
+        close_idx += 1
+
+    preserved: list[tuple[int, str]] = []
+    for raw in lines[open_idx + 1:close_idx]:
+        if _is_lyric_event_line(raw):
+            continue
+        m = re.match(r'\s*(\d+)\s*=', raw)
+        if m:
+            preserved.append((int(m.group(1)), raw))
+
+    merged = preserved + new_event_lines
+    merged.sort(key=lambda x: x[0])
+
+    new_block = ['[Events]', '{'] + [line for _, line in merged] + ['}']
+    new_lines = lines[:events_idx] + new_block + lines[close_idx + 1:]
+    chart_path.write_text('\n'.join(new_lines) + '\n')
+
+    return sum(1 for _ in lyrics.get('words', []))
