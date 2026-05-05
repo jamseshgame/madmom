@@ -87,3 +87,33 @@ def test_voicing_classify_high_conf_unsteady_pitch_is_spoken():
     # Confident but pitch jumps around → declamatory speech, not sung
     curve = [50.0, 60.0, 55.0, 65.0, 52.0]  # > 1.5 semitone std
     assert voicing_classify(curve, confidence=0.85, dynamics_db=[-20, -19, -20, -21, -20]) == "spoken"
+
+
+import os
+import math
+import subprocess
+import pytest
+from pathlib import Path
+
+
+@pytest.mark.skipif(
+    os.environ.get('VOCALS_CREPE_SMOKE') != '1',
+    reason='set VOCALS_CREPE_SMOKE=1 to run (downloads CREPE model)',
+)
+def test_crepe_detects_a440_within_one_semitone(tmp_path):
+    """Generate a 2-second A4 (440 Hz) sine via ffmpeg, run detect_pitches,
+    assert median MIDI pitch ~ 69 (A4). Smoke-only: gated to avoid the
+    30 MB model download on every test run."""
+    wav = tmp_path / "a440.wav"
+    subprocess.run(
+        ['ffmpeg', '-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2',
+         '-ac', '1', '-ar', '16000', '-loglevel', 'error', str(wav)],
+        check=True,
+    )
+    from app.services.vocals import detect_pitches
+    f0_hz, confidence = detect_pitches(wav)
+    voiced = [f for f, c in zip(f0_hz, confidence) if not math.isnan(f) and c >= 0.5]
+    assert len(voiced) > 0
+    median_hz = sorted(voiced)[len(voiced) // 2]
+    median_midi = 69 + 12 * math.log2(median_hz / 440.0)
+    assert abs(median_midi - 69) < 1.0     # within 1 semitone

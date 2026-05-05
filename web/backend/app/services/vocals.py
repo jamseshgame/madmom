@@ -5,8 +5,11 @@ See docs/superpowers/specs/2026-05-05-vocal-beatmaps-design.md.
 """
 from __future__ import annotations
 
+import math
 import statistics
+from pathlib import Path
 
+import numpy as np
 from syllabipy.sonoripy import SonoriPy
 
 
@@ -98,3 +101,55 @@ def syllabify(words: list[dict], language: str = "en") -> list[dict]:
                 entry["phrase_end"] = True
             out.append(entry)
     return out
+
+
+_CREPE_LOADED = False
+
+
+def _load_crepe_model():
+    """Lazy-load the CREPE 'full' model. Returns the torchcrepe module so
+    callers can use its predict() function. Idempotent."""
+    global _CREPE_LOADED
+    import torchcrepe
+    if not _CREPE_LOADED:
+        torchcrepe.load.model(device='cpu', capacity='full')
+        _CREPE_LOADED = True
+    return torchcrepe
+
+
+def detect_pitches(vocals_path: Path) -> tuple[list[float], list[float]]:
+    """Detect per-frame pitch (Hz) and confidence on a vocals stem.
+
+    Returns (f0_hz, confidence). Frames where the model is unsure
+    (periodicity < 0.21) have f0_hz set to NaN. 10 ms hop. Loads the model
+    on first call.
+    """
+    import torchaudio
+
+    audio, sr = torchaudio.load(str(vocals_path))
+    if audio.shape[0] > 1:
+        audio = audio.mean(dim=0, keepdim=True)
+    target_sr = 16000
+    if sr != target_sr:
+        audio = torchaudio.functional.resample(audio, sr, target_sr)
+        sr = target_sr
+
+    hop_samples = round(sr * 0.010)
+    torchcrepe = _load_crepe_model()
+
+    pitch, periodicity = torchcrepe.predict(
+        audio,
+        sr,
+        hop_length=hop_samples,
+        model='full',
+        batch_size=128,
+        device='cpu',
+        decoder=torchcrepe.decode.viterbi,
+        return_periodicity=True,
+    )
+
+    threshold = 0.21
+    f0 = pitch.squeeze(0).numpy().astype(float)
+    conf = periodicity.squeeze(0).numpy().astype(float)
+    f0_masked = np.where(conf < threshold, np.nan, f0)
+    return f0_masked.tolist(), conf.tolist()
