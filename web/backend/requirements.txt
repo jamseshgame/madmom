@@ -29,5 +29,7 @@ pytest-asyncio>=0.23
 # Pitch detection for vocal beatmaps. CPU-runnable; first call downloads
 # the ~30 MB CREPE 'full' model from HuggingFace.
 torchcrepe>=0.0.23
-# English syllable splitter for vocal beatmap note granularity.
-pyphen>=0.14
+# English syllable splitter for vocal beatmap note granularity. Sonority
+# Sequencing Principle (SSP) — orthographic syllable splits where pyphen's
+# typographic-hyphen output left short words like "Hello" unsplit.
+syllabipy>=0.2
