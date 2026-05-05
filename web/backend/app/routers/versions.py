@@ -46,6 +46,21 @@ PACKAGES: list[dict[str, str | bool]] = [
         'license': 'MIT',
     },
     {
+        'name': 'faster-whisper',
+        'used_for': 'CPU-friendly Whisper transcription for vocal lyrics',
+        'license': 'MIT',
+    },
+    {
+        'name': 'torchcrepe',
+        'used_for': 'Per-frame pitch detection on vocal stems for beatmaps',
+        'license': 'MIT',
+    },
+    {
+        'name': 'syllabipy',
+        'used_for': 'English syllable splitting (Sonority Sequencing) for per-syllable vocal notes',
+        'license': 'MIT',
+    },
+    {
         'name': 'yt-dlp',
         'used_for': 'YouTube search + audio-as-MP3 download',
         'license': 'Unlicense',
