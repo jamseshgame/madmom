@@ -978,6 +978,34 @@ export default function TracksPage() {
   // tickbox selection for the batch-generate button below the stem grid.
   const [selectedStems, setSelectedStems] = useState<Set<string>>(new Set())
   const [inlineBmJobs, setInlineBmJobs] = useState<Record<string, string>>({})
+  const [hasVocalNotes, setHasVocalNotes] = useState(false)
+
+  const refetchHasVocalNotes = useCallback(async () => {
+    if (!selectedId) { setHasVocalNotes(false); return }
+    try {
+      const r = await fetch(`/api/vocals?track_id=${selectedId}`)
+      setHasVocalNotes(r.ok)
+    } catch {
+      setHasVocalNotes(false)
+    }
+  }, [selectedId])
+
+  useEffect(() => { refetchHasVocalNotes() }, [refetchHasVocalNotes])
+
+  const deleteVocalNotes = async () => {
+    if (!selectedId) return
+    if (!window.confirm('Delete the vocal beatmap for this track? Lyrics versions are kept.')) return
+    try {
+      const r = await fetch(`/api/vocals?track_id=${selectedId}`, { method: 'DELETE' })
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}))
+        throw new Error(e.detail || `HTTP ${r.status}`)
+      }
+      setHasVocalNotes(false)
+    } catch (e) {
+      alert((e as Error).message)
+    }
+  }
   const [batchError, setBatchError] = useState('')
 
   // song.ini editor state for the detail view
@@ -1273,13 +1301,25 @@ export default function TracksPage() {
                           duration_s: undefined,
                         }}
                       />
-                      <button
-                        onClick={() => navigate(`/edit-vocals/${selectedTrack.id}`)}
-                        className="px-2 py-1 bg-pink-700/40 hover:bg-pink-600/60 border border-pink-700/60 text-pink-200 rounded text-xs font-medium transition-colors"
-                        title="Open the vocal beatmap editor for this track"
-                      >
-                        Edit vocals
-                      </button>
+                      {hasVocalNotes && (
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => navigate(`/edit-vocals/${selectedTrack.id}`)}
+                            className="flex-1 px-2 py-1 bg-pink-700/40 hover:bg-pink-600/60 border border-pink-700/60 text-pink-200 rounded text-xs font-medium transition-colors"
+                            title="Open the vocal beatmap editor for this track"
+                          >
+                            Edit vocals
+                          </button>
+                          <button
+                            onClick={deleteVocalNotes}
+                            className="px-1.5 py-1 bg-red-900/40 hover:bg-red-800/60 border border-red-800/60 text-red-300 hover:text-red-200 rounded text-xs transition-colors"
+                            title="Delete vocal_notes.json for this track"
+                            aria-label="Delete vocal beatmap"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      )}
                     </>
                   )}
                   <div className="flex flex-wrap gap-1.5 justify-center items-center">
@@ -1350,6 +1390,7 @@ export default function TracksPage() {
                           return next
                         })
                         loadTracks()
+                        refetchHasVocalNotes()
                       }}
                       onCancelled={() => {
                         setInlineBmJobs((prev) => {
