@@ -75,9 +75,45 @@ export default function LyricsButtons({ scope, hasVocals, meta, onLyricsChange }
     }
   }
 
-  // Whisper button is wired in the next task; stub for now.
   const startWhisper = async () => {
-    /* Task 13 */
+    try {
+      const res = await fetch(`/api/lyrics/whisper?${scopeQuery(scope)}`, { method: 'POST' })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || `HTTP ${res.status}`)
+      }
+      const { job_id } = await res.json()
+      setPhase({ kind: 'whisper-running', jobId: job_id, progress: 0, message: 'Starting…' })
+
+      const es = new EventSource(`/api/jobs/${job_id}/events`)
+      es.onmessage = async (ev) => {
+        const d = JSON.parse(ev.data)
+        if (typeof d.progress === 'number' && d.progress >= 0) {
+          setPhase((p) => (p.kind === 'whisper-running' ? { ...p, progress: d.progress, message: d.message ?? p.message } : p))
+        }
+        if (d.step === 'done') {
+          es.close()
+          // Reload the saved lyrics now that they're persisted server-side
+          const got = await fetch(`/api/lyrics?${scopeQuery(scope)}`)
+          if (got.ok) {
+            const lyrics: Lyrics = await got.json()
+            setPhase({ kind: 'have-lyrics', lyrics })
+            onLyricsChange?.(lyrics)
+          } else {
+            setPhase({ kind: 'error', message: 'Transcription finished but lyrics could not be loaded' })
+          }
+        } else if (d.step === 'error' || d.step === 'cancelled') {
+          es.close()
+          setPhase({ kind: 'error', message: d.message || 'Whisper failed' })
+        }
+      }
+      es.onerror = () => {
+        es.close()
+        setPhase({ kind: 'error', message: 'SSE connection lost' })
+      }
+    } catch (e) {
+      setPhase({ kind: 'error', message: (e as Error).message })
+    }
   }
 
   const lrclibLabel =
