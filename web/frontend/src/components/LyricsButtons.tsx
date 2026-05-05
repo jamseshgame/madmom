@@ -17,6 +17,7 @@ type LyricsVersion = {
   word_count: number
   language?: string
   model?: string
+  whisper_version?: string | null
   active: boolean
 }
 
@@ -70,6 +71,21 @@ export default function LyricsButtons({ scope, hasVocals, meta, onLyricsChange }
   const [versions, setVersions] = useState<LyricsVersion[]>([])
   const [previewVersion, setPreviewVersion] = useState<{ meta: LyricsVersion; lyrics: Lyrics } | null>(null)
   const [loadingPreview, setLoadingPreview] = useState(false)
+  const [whisperPkgVersion, setWhisperPkgVersion] = useState<string | null>(null)
+
+  // Pull the currently-installed faster-whisper version from /api/versions
+  // so the Transcribe button can show "Transcribe with Whisper 1.2.1" and
+  // users can spot when an existing transcript was made with an older one.
+  useEffect(() => {
+    fetch('/api/versions')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d?.packages) return
+        const w = d.packages.find((p: { name: string }) => p.name === 'faster-whisper')
+        if (w?.installed) setWhisperPkgVersion(w.installed)
+      })
+      .catch(() => {})
+  }, [])
 
   const refreshVersions = useCallback(async () => {
     try {
@@ -231,7 +247,9 @@ export default function LyricsButtons({ scope, hasVocals, meta, onLyricsChange }
         >
           {whisper.kind === 'running'
             ? `Transcribing… ${whisper.progress}%`
-            : 'Transcribe with Whisper'}
+            : whisperPkgVersion
+              ? `Transcribe with Whisper ${whisperPkgVersion}`
+              : 'Transcribe with Whisper'}
         </button>
       )}
 
@@ -264,9 +282,20 @@ export default function LyricsButtons({ scope, hasVocals, meta, onLyricsChange }
               />
               <span className={`shrink-0 inline-block px-1 py-0.5 rounded border text-[9px] font-semibold uppercase ${SOURCE_BADGE[v.source]}`}>
                 {SOURCE_LABEL[v.source]}
+                {v.source === 'whisper' && v.whisper_version
+                  ? ` ${v.whisper_version}`
+                  : ''}
               </span>
               <span className="text-gray-400 truncate flex-1">
                 {fmtFetchedAt(v.fetched_at)}
+                {v.source === 'whisper'
+                  && v.whisper_version
+                  && whisperPkgVersion
+                  && v.whisper_version !== whisperPkgVersion && (
+                  <span className="ml-1 text-amber-400" title={`Re-transcribing would use ${whisperPkgVersion}`}>
+                    (older)
+                  </span>
+                )}
               </span>
               <button
                 onClick={() => openPreview(v)}

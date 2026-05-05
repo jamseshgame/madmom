@@ -344,6 +344,7 @@ def list_lyrics_versions(target_dir: Path) -> list[dict]:
             'word_count': len(data.get('words') or []),
             'language': data.get('language'),
             'model': data.get('model'),
+            'whisper_version': data.get('whisper_version'),
             'active': active_etag is not None and data.get('fetched_at') == active_etag,
         })
     out.sort(key=lambda x: x['file'], reverse=True)
@@ -424,10 +425,19 @@ def transcribe_with_whisper(
     if progress_callback:
         progress_callback('done', 100, f'Transcribed {len(words)} words')
 
+    # Capture the faster-whisper package version for staleness comparison in
+    # the UI ("this transcript was made with 1.2.0; you've upgraded to 1.2.1").
+    try:
+        from importlib.metadata import version as _pkg_version
+        whisper_version = _pkg_version('faster-whisper')
+    except Exception:
+        whisper_version = None
+
     return {
         'source': 'whisper',
         'language': info.language or 'en',
         'model': model_size,
+        'whisper_version': whisper_version,
         'fetched_at': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
         'words': words,
     }
