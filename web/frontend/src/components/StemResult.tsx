@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import StemPlayer from './StemPlayer.tsx'
 import BeatmapStatsModal, { BeatmapRecord } from './BeatmapStatsModal.tsx'
+import LyricsButtons from './LyricsButtons'
 
 interface StemResultProps {
   jobId: string
@@ -324,6 +325,19 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
               >
                 <span className={`text-sm font-semibold text-center ${info.color}`}>{info.label}</span>
                 <StemPlayer src={`/api/stems/${jobId}/download/${stem}`} peaks={stemPeaks?.[stem] ?? null} />
+
+                {stem === 'vocals' && (
+                  <LyricsButtons
+                    scope={{ jobId }}
+                    hasVocals={true}
+                    meta={{
+                      artist: songIni.artist || '',
+                      title: songIni.name || '',
+                      album: songIni.album || undefined,
+                      duration_s: typeof metadata.duration === 'number' ? metadata.duration : undefined,
+                    }}
+                  />
+                )}
 
                 {/* Beatmap generation */}
                 {!bm && stem !== 'song' && (
