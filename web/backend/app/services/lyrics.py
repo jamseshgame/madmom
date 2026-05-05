@@ -38,3 +38,31 @@ def parse_lrc(text: str) -> list[tuple[float, str]]:
             out.append((t, line))
     out.sort(key=lambda x: x[0])
     return out
+
+
+def interpolate_words(
+    line: str,
+    line_start: float,
+    line_end: float,
+) -> list[dict]:
+    """Distribute a line's text across [line_start, line_end] proportional to
+    each word's character count. Returns word dicts with phrase_start on the
+    first word and phrase_end on the last."""
+    words = line.split()
+    if not words:
+        return []
+    duration = max(0.0, line_end - line_start)
+    total_chars = sum(len(w) for w in words) or 1
+    out: list[dict] = []
+    cumulative = 0
+    for i, word in enumerate(words):
+        ratio = cumulative / total_chars
+        t = line_start + ratio * duration
+        cumulative += len(word)
+        entry: dict = {"time_s": round(t, 3), "text": word}
+        if i == 0:
+            entry["phrase_start"] = True
+        if i == len(words) - 1:
+            entry["phrase_end"] = True
+        out.append(entry)
+    return out

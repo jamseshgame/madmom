@@ -40,3 +40,45 @@ def test_parse_lrc_drops_lines_without_timestamps():
 
 def test_parse_lrc_empty_input():
     assert parse_lrc("") == []
+
+
+from app.services.lyrics import interpolate_words
+
+
+def _approx(a: float, b: float, tol: float = 0.01) -> bool:
+    return abs(a - b) <= tol
+
+
+def test_interpolate_three_word_line():
+    # "Hello world tonight" → 5 + 5 + 7 = 17 chars → cumulative ratios
+    words = interpolate_words("Hello world tonight", line_start=10.0, line_end=13.4)
+    assert [w["text"] for w in words] == ["Hello", "world", "tonight"]
+    assert _approx(words[0]["time_s"], 10.0)
+    # Second word starts after 5/17 of 3.4s = 1.0s
+    assert _approx(words[1]["time_s"], 11.0)
+    # Third word starts after 10/17 of 3.4s = 2.0s
+    assert _approx(words[2]["time_s"], 12.0)
+    assert words[0]["phrase_start"] is True
+    assert words[-1]["phrase_end"] is True
+
+
+def test_interpolate_single_word_line():
+    words = interpolate_words("Yeah", line_start=4.0, line_end=5.0)
+    assert words == [{
+        "time_s": 4.0,
+        "text": "Yeah",
+        "phrase_start": True,
+        "phrase_end": True,
+    }]
+
+
+def test_interpolate_empty_line():
+    assert interpolate_words("   ", line_start=1.0, line_end=2.0) == []
+
+
+def test_interpolate_zero_duration_falls_back_to_line_start():
+    words = interpolate_words("a b c", line_start=2.0, line_end=2.0)
+    # All three words pinned to line_start; phrase_start/end on first/last
+    assert all(_approx(w["time_s"], 2.0) for w in words)
+    assert words[0]["phrase_start"] is True
+    assert words[-1]["phrase_end"] is True
