@@ -119,6 +119,6 @@ async def fetch_from_lrclib(
     return {
         "source": "lrclib",
         "language": "en",
-        "fetched_at": datetime.datetime.utcnow().isoformat() + "Z",
+        "fetched_at": datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
         "words": words,
     }
