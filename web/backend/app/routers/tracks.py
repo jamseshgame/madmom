@@ -18,6 +18,7 @@ from ..services.chart_generator import generate_full_chart
 from ..services.game_songs import _parse_song_ini
 from ..services.github_publisher import publish_song_folder
 from ..services.jobs import JobKind, JobStatus, create_job, get_job
+from ..services import lyrics as lyrics_service
 from ..services.stems import DEMUCS_TO_GAME, _convert_to_ogg, write_song_ini
 from ..services.tracks import (
     add_beatmap_record,
@@ -874,6 +875,23 @@ async def publish_track_to_game(
                         'selected_beatmaps': beatmap_selection,
                     }
 
+        # Lyrics: copy lyrics.json into the published folder and rewrite the
+        # chart's [Events] block. Looks at the track dir first; no job-level
+        # fallback is available here (publish_track_to_game has no demucs job
+        # in scope — track.stems_dir is the canonical lyrics location).
+        lyrics_data = lyrics_service.load_lyrics(track.stems_dir)
+        lyrics_summary: dict = {'source': None, 'word_count': 0, 'included': False}
+        if lyrics_data:
+            chart_path = tmp_dir / 'notes_fixed_slides.chart'
+            if chart_path.exists():
+                inserted = lyrics_service.inject_into_chart(chart_path, lyrics_data)
+                lyrics_service.write_lyrics(tmp_dir, lyrics_data)
+                lyrics_summary = {
+                    'source': lyrics_data.get('source'),
+                    'word_count': inserted,
+                    'included': True,
+                }
+
         # ── Tutorial mode: copy instrument samples, VO clips, and append a
         # [TutorialScript] section to notes_fixed_slides.chart if the picked
         # beatmaps carry tutorial events. The Unity dev parses these.
@@ -895,6 +913,7 @@ async def publish_track_to_game(
             'folder': f'{settings.github_inbox_prefix}/{folder_name}',
             'chart': chart_status,
             'tutorial': tutorial_status,
+            'lyrics': lyrics_summary,
         }
     except Exception as e:
         raise HTTPException(500, f'Publish failed: {e}')
