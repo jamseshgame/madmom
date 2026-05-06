@@ -681,6 +681,13 @@ export default function BeatmapEditor() {
   const [snapDivisor, setSnapDivisor] = useState(4)
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
+  // VO audio playback during transport. Each VO with a non-empty `file` gets
+  // its own HTMLAudioElement preloaded into voAudiosRef. firedVosRef tracks
+  // which ones have already been triggered in the current play pass — reset
+  // on any meaningful seek so a VO can replay if you scrub back over it.
+  const voAudiosRef = useRef<Map<string, HTMLAudioElement>>(new Map())
+  const firedVosRef = useRef<Set<string>>(new Set())
+  const lastSampleTimeRef = useRef(0)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const containerRef = useRef<HTMLDivElement | null>(null)
   const dragRef = useRef<{
@@ -1296,6 +1303,87 @@ export default function BeatmapEditor() {
     audioRef.current.currentTime = sec
     setCurrentTime(sec)
   }
+
+  // Build / tear down HTMLAudioElement instances for every VO that has an
+  // audio file. Re-runs whenever the tutorial event list (or chart context)
+  // changes so newly-synthesized VOs become playable without a remount.
+  useEffect(() => {
+    const have = voAudiosRef.current
+    const want = new Set<string>()
+    if (chart) {
+      for (const ev of chart.tutorial) {
+        if (ev.kind !== 'vo' || !ev.file) continue
+        want.add(ev.id)
+        const url = `/api/tutorial/${trackId}/beatmaps/${beatmapId}/${ev.file}`
+        const existing = have.get(ev.id) as (HTMLAudioElement & { _voUrl?: string }) | undefined
+        if (!existing || existing._voUrl !== url) {
+          if (existing) existing.pause()
+          const a = new Audio(url) as HTMLAudioElement & { _voUrl?: string }
+          a.preload = 'auto'
+          a._voUrl = url
+          have.set(ev.id, a)
+        }
+      }
+    }
+    for (const [id, a] of have) {
+      if (!want.has(id)) {
+        a.pause()
+        have.delete(id)
+      }
+    }
+  }, [chart, trackId, beatmapId])
+
+  // Trigger / pause VO audio elements based on the current playhead. Detects
+  // seeks via the time delta and resets the fired set so VOs can replay
+  // after scrubbing back, and pre-marks VOs whose start is already in the
+  // past after a seek-forward so they don't all retroactively fire.
+  useEffect(() => {
+    if (!chart) return
+    const delta = currentTime - lastSampleTimeRef.current
+    const isSeek = Math.abs(delta) > 0.3
+    if (isSeek) {
+      firedVosRef.current = new Set()
+      for (const ev of chart.tutorial) {
+        if (ev.kind !== 'vo') continue
+        const voSec = (ev.tick / chart.resolution) * (60 / chart.bpm)
+        if (currentTime > voSec + 0.05) {
+          firedVosRef.current.add(ev.id)
+        }
+        if (currentTime < voSec) {
+          const a = voAudiosRef.current.get(ev.id)
+          if (a && !a.paused) a.pause()
+        }
+      }
+    }
+    lastSampleTimeRef.current = currentTime
+    if (!playing) return
+    for (const ev of chart.tutorial) {
+      if (ev.kind !== 'vo' || !ev.file) continue
+      const voSec = (ev.tick / chart.resolution) * (60 / chart.bpm)
+      if (currentTime >= voSec && !firedVosRef.current.has(ev.id)) {
+        const a = voAudiosRef.current.get(ev.id)
+        if (a) {
+          a.currentTime = Math.max(0, currentTime - voSec)
+          a.play().catch(() => { /* autoplay blocked; user must interact again */ })
+          firedVosRef.current.add(ev.id)
+        }
+      }
+    }
+  }, [currentTime, playing, chart])
+
+  // Pause / unmount cleanup: keep VO audio paused whenever the song transport
+  // is paused, and stop everything on unmount so they don't keep playing
+  // after navigating away.
+  useEffect(() => {
+    if (playing) return
+    for (const a of voAudiosRef.current.values()) {
+      if (!a.paused) a.pause()
+    }
+  }, [playing])
+  useEffect(() => {
+    const audios = voAudiosRef.current
+    return () => { for (const a of audios.values()) a.pause() }
+  }, [])
 
   // TTS for a VO event — POST text to backend, then assign returned file path
   const [ttsBusy, setTtsBusy] = useState<string | null>(null)
