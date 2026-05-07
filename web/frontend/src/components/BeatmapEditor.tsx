@@ -2105,6 +2105,34 @@ export default function BeatmapEditor() {
               </div>
               {chart.tutorialEnabled && (
                 <>
+                  <div className="mb-2 p-2 bg-gray-900 border border-gray-800 rounded">
+                    <div className="text-[10px] text-gray-500 mb-1 uppercase tracking-wider">ElevenLabs default voice</div>
+                    {elVoicesError ? (
+                      <p className="text-[10px] text-gray-600">{elVoicesError}</p>
+                    ) : (
+                      <select
+                        value={trackVoiceId}
+                        onChange={async (e) => {
+                          const next = e.target.value
+                          setTrackVoiceId(next)
+                          await fetch(`/api/tracks/${trackId}/beatmaps/${beatmapId}/elevenlabs-voice`, {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ voice_id: next }),
+                          })
+                        }}
+                        className="w-full bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-[11px] text-gray-200"
+                      >
+                        <option value="">— no default —</option>
+                        {elVoices.map((v) => (
+                          <option key={v.voice_id} value={v.voice_id}>{v.name}</option>
+                        ))}
+                      </select>
+                    )}
+                    <p className="text-[10px] text-gray-600 mt-1 leading-snug">
+                      VOs set to ElevenLabs use this voice unless overridden per-VO.
+                    </p>
+                  </div>
                   <div className="grid grid-cols-3 gap-1 mb-2">
                     <button
                       onClick={addVo}
