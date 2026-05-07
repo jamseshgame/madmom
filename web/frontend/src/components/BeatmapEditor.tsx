@@ -19,12 +19,16 @@ interface ChartNote {
 // the runway just like notes.
 type TimingMode = 'any' | 'perfect'
 
+type VoEngine = 'chatterbox' | 'elevenlabs'
+
 interface TutorialVoEvent {
   kind: 'vo'
   id: string             // ephemeral, not persisted (regenerated per parse)
   tick: number
   file: string           // relative path under the beatmap dir, e.g. "vo/abc.ogg"
   text: string           // optional draft text used to (re)generate the clip
+  engine: VoEngine       // which TTS engine generated the file (defaults to chatterbox)
+  voiceId: string        // when engine === 'elevenlabs'; '' means inherit track default
 }
 
 interface TutorialStepEvent {
@@ -185,8 +189,15 @@ function parseTutorialSection(text: string): TutorialEvent[] {
     if (kind === 'VO') {
       const file = tokens[1] || ''
       let textArg = ''
+      let engineArg: VoEngine = 'chatterbox'
+      let voiceArg = ''
       for (const t of tokens.slice(2)) {
         if (t.startsWith('text=')) textArg = t.slice(5)
+        else if (t.startsWith('engine=')) {
+          const v = t.slice(7).toLowerCase()
+          if (v === 'elevenlabs' || v === 'chatterbox') engineArg = v
+        }
+        else if (t.startsWith('voice=')) voiceArg = t.slice(6)
       }
       events.push({
         kind: 'vo',
@@ -194,6 +205,8 @@ function parseTutorialSection(text: string): TutorialEvent[] {
         tick,
         file,
         text: textArg,
+        engine: engineArg,
+        voiceId: voiceArg,
       })
     } else if (kind === 'STEP') {
       const stepId = tokens[1] || ''
@@ -257,7 +270,9 @@ function serializeTutorialSection(events: TutorialEvent[]): string {
   const lines = sorted.map((e) => {
     if (e.kind === 'vo') {
       const t = e.text ? ` text="${e.text.replace(/"/g, "'")}"` : ''
-      return `  ${e.tick} = VO "${e.file}"${t}`
+      const engine = e.engine && e.engine !== 'chatterbox' ? ` engine=${e.engine}` : ''
+      const voice = e.voiceId ? ` voice=${e.voiceId}` : ''
+      return `  ${e.tick} = VO "${e.file}"${t}${engine}${voice}`
     }
     if (e.kind === 'step') {
       return (
@@ -1474,6 +1489,8 @@ export default function BeatmapEditor() {
       tick: playheadTick,
       file: '',
       text: '',
+      engine: 'chatterbox',
+      voiceId: '',
     }
     updateTutorial([...chart.tutorial, ev], true)
   }
