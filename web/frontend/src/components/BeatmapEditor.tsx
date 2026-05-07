@@ -1205,6 +1205,15 @@ export default function BeatmapEditor() {
     setDirty(true)
   }
 
+  const setSceneFlag = (key: keyof SceneFlags, value: number) => {
+    if (!chart) return
+    setChart({
+      ...chart,
+      sceneFlags: { ...chart.sceneFlags, [key]: value },
+    })
+    setDirty(true)
+  }
+
   const playheadTick = useMemo(() => {
     if (!chart) return 0
     const snap = Math.max(1, Math.round(chart.resolution / snapDivisor))
@@ -1648,6 +1657,36 @@ export default function BeatmapEditor() {
               <li><span className="font-mono text-gray-300">Space</span> play/pause</li>
             </ul>
           </section>
+
+          {chart && (
+            <section className="border-t border-gray-800 pt-4">
+              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Scene</h3>
+              <p className="text-[11px] text-gray-600 mb-2 leading-snug">
+                Song-wide flags applied at load. <span className="font-mono">0</span> = off,
+                <span className="font-mono"> 0.1</span> = on, higher = more intense.
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                {([
+                  ['floorcrowd', 'Floor crowd'],
+                  ['lasers_center', 'Lasers · center'],
+                  ['lasers_left', 'Lasers · left'],
+                  ['lasers_right', 'Lasers · right'],
+                ] as const).map(([key, label]) => (
+                  <label key={key} className="block">
+                    <span className="text-[10px] text-gray-500">{label}</span>
+                    <input
+                      type="number"
+                      min={0}
+                      step={0.1}
+                      value={chart.sceneFlags[key]}
+                      onChange={(e) => setSceneFlag(key, Math.max(0, Number(e.target.value) || 0))}
+                      className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-[11px] text-gray-200 font-mono"
+                    />
+                  </label>
+                ))}
+              </div>
+            </section>
+          )}
 
           {chart && (
             <section className="border-t border-gray-800 pt-4">
