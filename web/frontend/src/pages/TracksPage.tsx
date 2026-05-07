@@ -1363,14 +1363,13 @@ export default function TracksPage() {
                       )}
                     </div>
                   )}
-                  {/* Discoverability hint: when this non-vocals stem has no
-                      beatmaps yet and nothing is in flight, surface an inline
-                      link to the empty editor. Vocals uses VocalmapButtons
+                  {/* Surface the empty-editor entry point on every non-vocals,
+                      non-song stem so users can start a fresh manual chart even
+                      if a beatmap already exists. Vocals uses VocalmapButtons
                       and doesn't need an empty-editor path. */}
                   {stem !== 'song'
                     && stem !== 'vocals'
-                    && !inlineBmJobs[stem]
-                    && (selectedTrack.beatmaps || []).every((bm) => bm.stem !== stem) && (
+                    && !inlineBmJobs[stem] && (
                       <button
                         type="button"
                         onClick={async () => {
