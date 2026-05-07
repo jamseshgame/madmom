@@ -14,7 +14,21 @@ if sys.platform == 'win32':
 from fastapi import Depends
 
 from .config import settings
-from .routers import auth, beatmap, game_songs, jobs, lyrics, stems, tracks, tutorial, users, versions, vocals, youtube
+from .routers import (
+    auth,
+    beatmap,
+    elevenlabs,
+    game_songs,
+    jobs,
+    lyrics,
+    stems,
+    tracks,
+    tutorial,
+    users,
+    versions,
+    vocals,
+    youtube,
+)
 from .routers.auth import require_auth
 from .services.jobs import cleanup_old_jobs, load_jobs_from_disk
 from .services.users import ensure_seed_admin
@@ -61,6 +75,7 @@ app.include_router(game_songs.router, dependencies=_auth_dep)
 app.include_router(jobs.router, dependencies=_auth_dep)
 app.include_router(youtube.router, dependencies=_auth_dep)
 app.include_router(tutorial.router, dependencies=_auth_dep)
+app.include_router(elevenlabs.router, dependencies=_auth_dep)
 app.include_router(lyrics.router, dependencies=_auth_dep)
 app.include_router(vocals.router, dependencies=_auth_dep)
 # users router has its own require_admin / require_auth Depends per route
