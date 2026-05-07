@@ -300,3 +300,53 @@ def delete_beatmap_record(track_id: str, beatmap_id: str) -> bool:
         shutil.rmtree(str(bm_dir), ignore_errors=True)
     track.save()
     return True
+
+
+def read_elevenlabs_voice(track_id: str, beatmap_id: str) -> str:
+    """Return the elevenlabs_voice_id from a beatmap's song.ini, or '' if absent."""
+    bm_dir = get_beatmap_dir(track_id, beatmap_id)
+    if bm_dir is None:
+        return ''
+    ini = bm_dir / 'song.ini'
+    if not ini.exists():
+        return ''
+    for raw in ini.read_text(encoding='utf-8', errors='replace').splitlines():
+        line = raw.strip()
+        if not line or line.startswith(('#', ';', '[')) or '=' not in line:
+            continue
+        k, _, v = line.partition('=')
+        if k.strip().lower() == 'elevenlabs_voice_id':
+            return v.strip()
+    return ''
+
+
+def write_elevenlabs_voice(track_id: str, beatmap_id: str, voice_id: str) -> bool:
+    """Write/replace elevenlabs_voice_id in song.ini. Returns True on success.
+
+    Mirrors the existing line-based song.ini editing pattern: scan for the
+    key, replace if found, otherwise append at end (preserving every other
+    line verbatim).
+    """
+    bm_dir = get_beatmap_dir(track_id, beatmap_id)
+    if bm_dir is None:
+        return False
+    ini = bm_dir / 'song.ini'
+    if not ini.exists():
+        ini.write_text(f'[song]\nelevenlabs_voice_id = {voice_id.strip()}\n', encoding='utf-8')
+        return True
+    lines = ini.read_text(encoding='utf-8', errors='replace').splitlines()
+    needle = 'elevenlabs_voice_id'
+    rewrote = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith('#') or stripped.startswith(';') or '=' not in stripped:
+            continue
+        k, _, _ = stripped.partition('=')
+        if k.strip().lower() == needle:
+            lines[i] = f'{needle} = {voice_id.strip()}'
+            rewrote = True
+            break
+    if not rewrote:
+        lines.append(f'{needle} = {voice_id.strip()}')
+    ini.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    return True

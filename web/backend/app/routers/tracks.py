@@ -29,8 +29,10 @@ from ..services.tracks import (
     get_track,
     get_track_enriched,
     list_tracks,
+    read_elevenlabs_voice,
     rename_beatmap_record,
     update_track_meta,
+    write_elevenlabs_voice,
 )
 
 router = APIRouter(prefix='/api/tracks', tags=['tracks'])
@@ -1095,3 +1097,17 @@ def _bundle_tutorial_assets(
         'vo': bundled_vo,
         'script_blocks': len(tutorial_blocks),
     }
+
+
+@router.get('/{track_id}/beatmaps/{beatmap_id}/elevenlabs-voice')
+def get_elevenlabs_voice(track_id: str, beatmap_id: str):
+    return {'voice_id': read_elevenlabs_voice(track_id, beatmap_id)}
+
+
+@router.put('/{track_id}/beatmaps/{beatmap_id}/elevenlabs-voice')
+def put_elevenlabs_voice(track_id: str, beatmap_id: str, payload: dict):
+    voice_id = (payload.get('voice_id') or '').strip()
+    ok = write_elevenlabs_voice(track_id, beatmap_id, voice_id)
+    if not ok:
+        raise HTTPException(404, 'Beatmap not found')
+    return {'voice_id': voice_id}
