@@ -235,3 +235,24 @@ export function serializeSceneEvents(
   })
   return `[Events]\n{\n${all.join('\n')}\n}\n`
 }
+
+// ── Round-trip helper ──────────────────────────────────────────────────────
+//
+// Strips the existing [Scene] and [Events] sections from `fullText` and
+// re-emits them from in-memory state. Mirrors applyTutorialToFullText in
+// BeatmapEditor.tsx.
+
+export function applySceneToFullText(
+  fullText: string,
+  flags: SceneFlags,
+  unknownFlagKeys: Record<string, string>,
+  events: SceneEvent[],
+  passthroughLines: string[],
+): string {
+  let stripped = fullText.replace(/\[Scene\]\s*\{[^}]*\}\s*/g, '')
+  stripped = stripped.replace(/\[Events\]\s*\{[^}]*\}\s*/g, '')
+  const sceneBlock = serializeSceneFlags(flags, unknownFlagKeys)
+  const eventsBlock = serializeSceneEvents(events, passthroughLines)
+  if (!sceneBlock && !eventsBlock) return stripped
+  return stripped.trimEnd() + '\n' + sceneBlock + eventsBlock
+}
