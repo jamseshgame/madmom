@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     studio_username: str = 'admin'
     studio_password: str = 'SlayTheStage'
 
+    elevenlabs_api_key: str = ''
+
     madmom_root: str = str(Path(__file__).resolve().parents[4])
 
     model_config = {
