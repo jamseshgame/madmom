@@ -154,3 +154,84 @@ function formatSceneNumber(n: number): string {
   if (Number.isInteger(n)) return String(n)
   return Number(n.toFixed(4)).toString()
 }
+
+// ── [Events] payload parsing ───────────────────────────────────────────────
+//
+// Standard chart `[Events]` lines look like `<tick> = E "<payload>"`. The
+// payload is whatever the engine wants. We claim payloads that begin with
+// `onboard_` (a single token) optionally followed by a numeric duration:
+//
+//   36864 = E "onboard_L_primary 232"
+//   192000 = E "onboard_highway_show"
+//
+// All other E-lines (section/lyric markers, etc.) are NOT touched: we keep
+// them verbatim in the passthrough text returned by parseSceneEvents.
+
+const SCENE_EVENT_LINE = /^\s*(\d+)\s*=\s*E\s+"([^"]*)"\s*$/
+// Matches: name=group1, optional space + duration=group2
+const SCENE_PAYLOAD = /^([A-Za-z][A-Za-z0-9_]*)(?:\s+(\d+))?$/
+
+export interface ParsedSceneEvents {
+  events: SceneEvent[]
+  // Lines from [Events] that we did NOT claim. Re-emitted verbatim on save.
+  passthroughLines: string[]
+  // True if the chart originally had an [Events] section at all. Determines
+  // whether we re-emit the section even when both events and passthroughLines
+  // are empty (we don't, in that case).
+  hadSection: boolean
+}
+
+export function parseSceneEvents(text: string): ParsedSceneEvents {
+  const m = text.match(/\[Events\]\s*\{([^}]*)\}/)
+  if (!m) {
+    return { events: [], passthroughLines: [], hadSection: false }
+  }
+  const events: SceneEvent[] = []
+  const passthroughLines: string[] = []
+  let counter = 0
+  for (const raw of m[1].split(/\r?\n/)) {
+    const stripped = raw.replace(/^\s*;.*$/, '')
+    if (!stripped.trim()) continue
+    const lm = stripped.match(SCENE_EVENT_LINE)
+    if (!lm) {
+      passthroughLines.push(stripped.trimEnd())
+      continue
+    }
+    const tick = Number(lm[1])
+    const payload = lm[2].trim()
+    const pm = payload.match(SCENE_PAYLOAD)
+    if (!pm || !pm[1].startsWith('onboard_')) {
+      passthroughLines.push(stripped.trimEnd())
+      continue
+    }
+    events.push({
+      id: `scene-${tick}-${counter++}`,
+      tick,
+      name: pm[1],
+      duration: pm[2] ? Number(pm[2]) : 0,
+    })
+  }
+  return { events, passthroughLines, hadSection: true }
+}
+
+export function serializeSceneEvents(
+  events: SceneEvent[],
+  passthroughLines: string[],
+): string {
+  if (events.length === 0 && passthroughLines.length === 0) return ''
+  const sceneLines = [...events]
+    .sort((a, b) => a.tick - b.tick)
+    .map((e) => {
+      const dur = e.duration > 0 ? ` ${e.duration}` : ''
+      return `  ${e.tick} = E "${e.name}${dur}"`
+    })
+  // Merge passthrough + scene lines, then sort by leading tick to keep
+  // section/lyric markers in the right place. Lines without a leading tick
+  // sort to position 0.
+  const all = [...passthroughLines, ...sceneLines].sort((a, b) => {
+    const ta = Number(a.match(/^\s*(\d+)/)?.[1] ?? 0)
+    const tb = Number(b.match(/^\s*(\d+)/)?.[1] ?? 0)
+    return ta - tb
+  })
+  return `[Events]\n{\n${all.join('\n')}\n}\n`
+}
