@@ -1,5 +1,5 @@
 import {
-  SceneEvent, SceneFlags,
+  SCENE_EVENT_CATALOG, SceneEvent, SceneFlags,
   applySceneToFullText, parseSceneEvents, parseSceneFlags,
 } from './sceneEvents'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -790,10 +790,47 @@ function SceneTimeline({
   )
 }
 
+function ScenePicker({
+  onPick, onClose,
+}: { onPick: (name: string) => void; onClose: () => void }) {
+  // Group catalog by group label, preserving catalog order.
+  const groups: { label: string; entries: typeof SCENE_EVENT_CATALOG }[] = []
+  for (const entry of SCENE_EVENT_CATALOG) {
+    const last = groups[groups.length - 1]
+    if (last && last.label === entry.groupLabel) last.entries.push(entry)
+    else groups.push({ label: entry.groupLabel, entries: [entry] })
+  }
+  return (
+    <div
+      className="absolute top-full left-0 mt-1 w-64 max-h-80 overflow-y-auto bg-gray-900 border border-gray-700 rounded-md shadow-2xl z-[80] p-1.5 space-y-1.5"
+      onMouseLeave={onClose}
+    >
+      {groups.map((g) => (
+        <div key={g.label}>
+          <div className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-gray-500">
+            {g.label}
+          </div>
+          <div className="grid grid-cols-2 gap-0.5">
+            {g.entries.map((e) => (
+              <button
+                key={e.name}
+                onClick={() => onPick(e.name)}
+                className="text-left px-1.5 py-0.5 text-[10px] text-gray-200 hover:bg-emerald-700/40 rounded font-mono truncate"
+                title={e.name}
+              >
+                {e.itemLabel}
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 // Component -----------------------------------------------------------------
 
 export default function BeatmapEditor() {
-  void SceneTimeline
   const params = useParams<{ trackId: string; beatmapId: string }>()
   const navigate = useNavigate()
   const trackId = params.trackId!
@@ -1447,6 +1484,58 @@ export default function BeatmapEditor() {
     updateTutorial(next)
   }
 
+  const [sceneSelectedId, setSceneSelectedId] = useState<string | null>(null)
+  const [scenePickerOpen, setScenePickerOpen] = useState(false)
+
+  const updateScene = (next: SceneEvent[]) => {
+    if (!chart) return
+    setChart({ ...chart, sceneEvents: next })
+    setDirty(true)
+  }
+
+  const moveSceneEvent = (id: string, tick: number) => {
+    if (!chart) return
+    updateScene(chart.sceneEvents.map((e) => (e.id === id ? { ...e, tick } : e)))
+  }
+
+  const resizeSceneEvent = (id: string, duration: number) => {
+    if (!chart) return
+    updateScene(chart.sceneEvents.map((e) => (e.id === id ? { ...e, duration } : e)))
+  }
+
+  const removeSceneEvent = (id: string) => {
+    if (!chart) return
+    updateScene(chart.sceneEvents.filter((e) => e.id !== id))
+    if (sceneSelectedId === id) setSceneSelectedId(null)
+  }
+
+  const addSceneEvent = (name: string) => {
+    if (!chart) return
+    const entry = SCENE_EVENT_CATALOG.find((e) => e.name === name)
+    const ev: SceneEvent = {
+      id: `scene-${Date.now()}`,
+      tick: playheadTick,
+      name,
+      duration: entry?.acceptsDuration ? 384 : 0,
+    }
+    updateScene([...chart.sceneEvents, ev])
+    setSceneSelectedId(ev.id)
+    setScenePickerOpen(false)
+  }
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (sceneSelectedId === null) return
+      if (e.target instanceof HTMLElement && /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault()
+        removeSceneEvent(sceneSelectedId)
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [sceneSelectedId, chart])
+
   const seekToTick = (tick: number) => {
     if (!chart || !audioRef.current) return
     const sec = (tick / chart.resolution) * (60 / chart.bpm)
@@ -1602,23 +1691,59 @@ export default function BeatmapEditor() {
           </p>
         </div>
         {/* Full-song zoomable timeline. Sits between title and save button. */}
-        <div className="flex-1 min-w-0 h-12">
-          {chart && duration > 0 ? (
-            <TutorialTimeline
-              duration={duration}
-              currentTime={currentTime}
-              bpm={chart.bpm}
-              resolution={chart.resolution}
-              events={chart.tutorialEnabled ? chart.tutorial : []}
-              snapDivisor={snapDivisor}
-              onSeek={seekSeconds}
-              onMoveEvent={(id, tick) => updateTutorialEvent(id, { tick } as Partial<TutorialEvent>)}
-            />
-          ) : (
-            <div className="h-full bg-gray-950 border border-gray-800 rounded text-[11px] text-gray-700 flex items-center justify-center">
-              {loadError ? '—' : 'loading audio…'}
+        {/* Stacked timelines: tutorial events on top, scene events below. */}
+        <div className="flex-1 min-w-0 flex flex-col gap-1">
+          <div className="h-7">
+            {chart && duration > 0 ? (
+              <TutorialTimeline
+                duration={duration}
+                currentTime={currentTime}
+                bpm={chart.bpm}
+                resolution={chart.resolution}
+                events={chart.tutorialEnabled ? chart.tutorial : []}
+                snapDivisor={snapDivisor}
+                onSeek={seekSeconds}
+                onMoveEvent={(id, tick) => updateTutorialEvent(id, { tick } as Partial<TutorialEvent>)}
+              />
+            ) : (
+              <div className="h-full bg-gray-950 border border-gray-800 rounded text-[11px] text-gray-700 flex items-center justify-center">
+                {loadError ? '—' : 'loading audio…'}
+              </div>
+            )}
+          </div>
+          <div className="h-6 flex items-stretch gap-1">
+            <div className="relative shrink-0">
+              <button
+                onClick={() => setScenePickerOpen((v) => !v)}
+                className="h-full px-2 bg-emerald-700/50 hover:bg-emerald-600/60 border border-emerald-700/60 text-emerald-100 rounded text-[10px] font-medium transition-colors"
+                title="Add a scene event at the playhead"
+              >
+                + Scene
+              </button>
+              {scenePickerOpen && (
+                <ScenePicker
+                  onPick={addSceneEvent}
+                  onClose={() => setScenePickerOpen(false)}
+                />
+              )}
             </div>
-          )}
+            <div className="flex-1 min-w-0">
+              {chart && duration > 0 ? (
+                <SceneTimeline
+                  duration={duration}
+                  bpm={chart.bpm}
+                  resolution={chart.resolution}
+                  events={chart.sceneEvents}
+                  selectedId={sceneSelectedId}
+                  onSelect={setSceneSelectedId}
+                  onMoveEvent={moveSceneEvent}
+                  onResizeEvent={resizeSceneEvent}
+                />
+              ) : (
+                <div className="h-full bg-gray-950 border border-gray-800 rounded" />
+              )}
+            </div>
+          </div>
         </div>
         {saveMsg && (
           <span className={`text-xs shrink-0 ${saveMsg === 'Saved' ? 'text-emerald-400' : 'text-red-400'}`}>{saveMsg}</span>
