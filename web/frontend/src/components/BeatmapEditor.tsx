@@ -1,3 +1,7 @@
+import {
+  SceneEvent, SceneFlags,
+  applySceneToFullText, parseSceneEvents, parseSceneFlags,
+} from './sceneEvents'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 
@@ -67,6 +71,10 @@ interface ChartState {
   // are the verbatim inner block (no braces). Round-tripped on save so
   // segment notes survive even though we don't edit them inline.
   musicSections: Record<string, string>
+  sceneFlags: SceneFlags
+  sceneFlagsUnknown: Record<string, string>
+  sceneEvents: SceneEvent[]
+  sceneEventsPassthrough: string[]
 }
 
 const DIFFICULTY_PREFERENCE = [
@@ -323,6 +331,8 @@ function parseChart(text: string, prefer?: string): ChartState {
   const notes = activeName ? parseSectionNotes(text, activeName) : []
   const tutorial = parseTutorialSection(text)
   const musicSections = parseMusicSections(text)
+  const scene = parseSceneFlags(text)
+  const sceneEventsParsed = parseSceneEvents(text)
   // Pre-flip tutorial mode on whenever the chart already carries a
   // [TutorialScript] section (even an empty one). The blank-tutorial flow
   // and the empty-beatmap-with-tutorial flow both emit an empty section
@@ -333,6 +343,10 @@ function parseChart(text: string, prefer?: string): ChartState {
     fullText: text, resolution, bpm, bpmRaw, songName,
     availableSections, activeName, notes,
     tutorialEnabled, tutorial, musicSections,
+    sceneFlags: scene.flags,
+    sceneFlagsUnknown: scene.unknownKeys,
+    sceneEvents: sceneEventsParsed.events,
+    sceneEventsPassthrough: sceneEventsParsed.passthroughLines,
   }
 }
 
@@ -1121,6 +1135,13 @@ export default function BeatmapEditor() {
     }
     let newFull = replaceSectionNotes(chart.fullText, chart.activeName, chart.notes)
     newFull = applyTutorialToFullText(newFull, chart.tutorial, chart.tutorialEnabled, chart.musicSections)
+    newFull = applySceneToFullText(
+      newFull,
+      chart.sceneFlags,
+      chart.sceneFlagsUnknown,
+      chart.sceneEvents,
+      chart.sceneEventsPassthrough,
+    )
     const newNotes = parseSectionNotes(newFull, name)
     // Tutorial section is shared across difficulties — just keep current state.
     setChart({ ...chart, fullText: newFull, activeName: name, notes: newNotes })
@@ -1141,6 +1162,13 @@ export default function BeatmapEditor() {
     try {
       let newFull = replaceSectionNotes(chart.fullText, chart.activeName, chart.notes)
       newFull = applyTutorialToFullText(newFull, chart.tutorial, chart.tutorialEnabled, chart.musicSections)
+      newFull = applySceneToFullText(
+        newFull,
+        chart.sceneFlags,
+        chart.sceneFlagsUnknown,
+        chart.sceneEvents,
+        chart.sceneEventsPassthrough,
+      )
       const res = await fetch(`/api/tracks/${trackId}/beatmaps/${beatmapId}/chart`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
