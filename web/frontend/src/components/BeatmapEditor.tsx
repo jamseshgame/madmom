@@ -939,13 +939,27 @@ export default function BeatmapEditor() {
     const H = canvas.height
     const HIT = H - 110
     const NUM_LANES = 5
-    const LANE_W = W / NUM_LANES
+    // Sidecar carries VO1, VO2, EV1, EV2 to the right of the gem lanes. We
+    // give the gem lanes ~64% of the canvas width so a 5-lane chord still
+    // sits comfortably; the four sidecar lanes share the remaining ~36%.
+    const NUM_SIDECARS = 4
+    const SIDECAR_FRAC = 0.36
+    const SIDECAR_W_TOTAL = W * SIDECAR_FRAC
+    const SIDECAR_W = SIDECAR_W_TOTAL / NUM_SIDECARS
+    const GEM_W = W - SIDECAR_W_TOTAL
+    const LANE_W = GEM_W / NUM_LANES
     const NOTE_R = Math.min(LANE_W * 0.32, 60)
+    const SIDECAR_X0 = GEM_W
+    const SIDECAR_LABELS = ['VO1', 'VO2', 'EV1', 'EV2']
 
     ctx.fillStyle = '#0a0a0c'
     ctx.fillRect(0, 0, W, H)
 
-    // Lane separators
+    // Sidecar background (slightly darker so it reads as a separate column)
+    ctx.fillStyle = '#06070a'
+    ctx.fillRect(SIDECAR_X0, 0, SIDECAR_W_TOTAL, H)
+
+    // Lane separators (gem lanes)
     ctx.strokeStyle = '#1f2937'
     ctx.lineWidth = 1
     for (let i = 1; i < NUM_LANES; i++) {
@@ -954,6 +968,31 @@ export default function BeatmapEditor() {
       ctx.moveTo(x, 0)
       ctx.lineTo(x, H)
       ctx.stroke()
+    }
+    // Strong divider between gems and sidecar
+    ctx.strokeStyle = '#374151'
+    ctx.lineWidth = 2
+    ctx.beginPath()
+    ctx.moveTo(SIDECAR_X0, 0)
+    ctx.lineTo(SIDECAR_X0, H)
+    ctx.stroke()
+    // Sidecar lane separators + headers
+    ctx.strokeStyle = '#1f2937'
+    ctx.lineWidth = 1
+    for (let i = 1; i < NUM_SIDECARS; i++) {
+      const x = SIDECAR_X0 + i * SIDECAR_W
+      ctx.beginPath()
+      ctx.moveTo(x, 0)
+      ctx.lineTo(x, H)
+      ctx.stroke()
+    }
+    // Sidecar header labels along the top edge
+    ctx.fillStyle = '#6b7280'
+    ctx.font = '10px monospace'
+    ctx.textAlign = 'center'
+    for (let i = 0; i < NUM_SIDECARS; i++) {
+      const cx = SIDECAR_X0 + (i + 0.5) * SIDECAR_W
+      ctx.fillText(SIDECAR_LABELS[i], cx, 12)
     }
 
     const t2s = (tick: number) => tickToSeconds(tick, chart.bpm, chart.resolution)
@@ -1011,76 +1050,128 @@ export default function BeatmapEditor() {
       ctx.stroke()
     }
 
-    // Tutorial events (drawn beneath notes so notes stay legible)
-    if (chart.tutorialEnabled) {
-      // STEP boundaries — full-width horizontal stripe with a label.
-      ctx.font = '10px monospace'
-      ctx.textAlign = 'left'
-      for (const ev of chart.tutorial) {
-        if (ev.kind !== 'step') continue
-        const y = HIT - (t2s(ev.tick) - currentTime) * scrollSpeed
-        if (y < -40 || y > H + 20) continue
-        ctx.fillStyle = 'rgba(168, 85, 247, 0.10)'
-        ctx.fillRect(0, y - 12, W, 14)
-        ctx.strokeStyle = 'rgba(168, 85, 247, 0.55)'
-        ctx.lineWidth = 1
-        ctx.beginPath()
-        ctx.moveTo(0, y)
-        ctx.lineTo(W, y)
-        ctx.stroke()
-        ctx.fillStyle = '#c4b5fd'
-        const tag = `STEP ${ev.stepId || '?'} · ${ev.required || 0} ${ev.timing}`
-        ctx.fillText(tag, 6, y - 2)
-      }
-      // MUSIC segments — orange band spanning the segment's duration
-      for (const ev of chart.tutorial) {
-        if (ev.kind !== 'music') continue
-        const yStart = HIT - (t2s(ev.tick) - currentTime) * scrollSpeed
-        const bandHeight = Math.max(8, ev.durationSeconds * scrollSpeed)
-        const yTop = yStart - bandHeight
-        if (yStart < -40 || yTop > H + 40) continue
-        ctx.fillStyle = 'rgba(249, 115, 22, 0.13)'
-        ctx.fillRect(0, yTop, W, bandHeight)
-        ctx.strokeStyle = 'rgba(249, 115, 22, 0.55)'
-        ctx.lineWidth = 1
-        ctx.strokeRect(0.5, yTop + 0.5, W - 1, bandHeight - 1)
-        ctx.fillStyle = '#fdba74'
-        ctx.font = 'bold 10px sans-serif'
-        ctx.textAlign = 'left'
-        const filename = ev.file.split('/').pop() || ev.file
-        ctx.fillText(`♪ MUSIC ${filename}`, 6, yTop + 12)
-        ctx.fillStyle = '#fb923c'
-        ctx.font = '10px monospace'
-        ctx.fillText(
-          `${ev.notesCount} notes · ${ev.bpm.toFixed(0)} BPM · ${ev.required} ${ev.timing}`,
-          6, yTop + 24,
-        )
-      }
+    // Sidecar pills ──────────────────────────────────────────────────────────
+    // VO events render in VO1/VO2 (lanes 0/1 of the sidecar). STEP, MUSIC and
+    // scene events all share EV1/EV2 (lanes 2/3). Within each pair we run a
+    // greedy non-overlap assignment so simultaneous events stack instead of
+    // colliding.
+    interface Pill {
+      tickStart: number
+      tickEnd: number   // = tickStart + duration in ticks (>= tickStart + 1)
+      label: string     // multiline allowed via "\n"
+      fill: string
+      border: string
+      text: string
+    }
 
-      // VOs — left-edge ▶ icon + thin line across the runway
+    const ticksPerSec = (chart.bpm * chart.resolution) / 60
+    const tickFromSec = (s: number) => Math.max(0, s * ticksPerSec)
+    // Minimum visual height for instantaneous events: ~8 px worth of ticks.
+    const MIN_TICK_DUR = Math.max(1, Math.round((8 / scrollSpeed) * ticksPerSec))
+
+    const voPills: Pill[] = []
+    const evPills: Pill[] = []
+
+    if (chart.tutorialEnabled) {
       for (const ev of chart.tutorial) {
-        if (ev.kind !== 'vo') continue
-        const y = HIT - (t2s(ev.tick) - currentTime) * scrollSpeed
-        if (y < -20 || y > H + 20) continue
-        ctx.strokeStyle = 'rgba(56, 189, 248, 0.5)'
-        ctx.setLineDash([4, 3])
-        ctx.lineWidth = 1
-        ctx.beginPath()
-        ctx.moveTo(0, y)
-        ctx.lineTo(W, y)
-        ctx.stroke()
-        ctx.setLineDash([])
-        ctx.fillStyle = '#38bdf8'
-        ctx.font = 'bold 11px sans-serif'
-        ctx.textAlign = 'left'
-        ctx.fillText('▶', 4, y + 4)
-        if (ev.text) {
-          ctx.font = '10px sans-serif'
-          ctx.fillStyle = '#7dd3fc'
-          ctx.fillText(ev.text.slice(0, 50), 18, y + 4)
+        if (ev.kind === 'vo') {
+          voPills.push({
+            tickStart: ev.tick,
+            tickEnd: ev.tick + MIN_TICK_DUR,
+            label: ev.text ? `▶ ${ev.text.slice(0, 60)}` : '▶ VO',
+            fill: 'rgba(56, 189, 248, 0.22)',
+            border: 'rgba(56, 189, 248, 0.7)',
+            text: '#7dd3fc',
+          })
+        } else if (ev.kind === 'step') {
+          evPills.push({
+            tickStart: ev.tick,
+            tickEnd: ev.tick + MIN_TICK_DUR,
+            label: `▌STEP ${ev.stepId || '?'}\n${ev.required || 0} ${ev.timing}`,
+            fill: 'rgba(168, 85, 247, 0.22)',
+            border: 'rgba(168, 85, 247, 0.7)',
+            text: '#c4b5fd',
+          })
+        } else if (ev.kind === 'music') {
+          const durTicks = Math.max(MIN_TICK_DUR, Math.round(tickFromSec(ev.durationSeconds)))
+          const filename = ev.file.split('/').pop() || ev.file
+          evPills.push({
+            tickStart: ev.tick,
+            tickEnd: ev.tick + durTicks,
+            label: `♪ ${filename}\n${ev.notesCount}n · ${ev.bpm.toFixed(0)}BPM`,
+            fill: 'rgba(249, 115, 22, 0.20)',
+            border: 'rgba(249, 115, 22, 0.7)',
+            text: '#fdba74',
+          })
         }
       }
     }
+    for (const ev of chart.sceneEvents) {
+      const durTicks = ev.duration > 0 ? ev.duration : MIN_TICK_DUR
+      // Strip the onboard_ prefix in the runway label to keep pills readable.
+      const short = ev.name.replace(/^onboard_/, '')
+      evPills.push({
+        tickStart: ev.tick,
+        tickEnd: ev.tick + durTicks,
+        label: short,
+        fill: 'rgba(16, 185, 129, 0.22)',
+        border: 'rgba(16, 185, 129, 0.7)',
+        text: '#6ee7b7',
+      })
+    }
+
+    // Greedy two-lane non-overlap assignment. Sort by start tick, place on
+    // lane 0 if its trailing edge frees up before this pill, else lane 1,
+    // else lane 0 anyway (let it overlap rather than drop the cue).
+    const assignLanes = (pills: Pill[]): Array<Pill & { lane: 0 | 1 }> => {
+      const sorted = [...pills].sort((a, b) => a.tickStart - b.tickStart)
+      let lane0End = -Infinity
+      let lane1End = -Infinity
+      return sorted.map((p) => {
+        let lane: 0 | 1
+        if (p.tickStart >= lane0End) {
+          lane = 0
+          lane0End = p.tickEnd
+        } else if (p.tickStart >= lane1End) {
+          lane = 1
+          lane1End = p.tickEnd
+        } else {
+          lane = 0
+          lane0End = Math.max(lane0End, p.tickEnd)
+        }
+        return { ...p, lane }
+      })
+    }
+
+    const drawPills = (pills: Array<Pill & { lane: 0 | 1 }>, baseLaneIndex: number) => {
+      ctx.font = '10px sans-serif'
+      ctx.textAlign = 'left'
+      for (const p of pills) {
+        const yBottom = HIT - (t2s(p.tickStart) - currentTime) * scrollSpeed
+        const yTop = HIT - (t2s(p.tickEnd) - currentTime) * scrollSpeed
+        const h = Math.max(10, yBottom - yTop)
+        if (yBottom < -40 || yTop > H + 40) continue
+        const laneIndex = baseLaneIndex + p.lane
+        const x = SIDECAR_X0 + laneIndex * SIDECAR_W + 2
+        const w = SIDECAR_W - 4
+        ctx.fillStyle = p.fill
+        ctx.fillRect(x, yTop, w, h)
+        ctx.strokeStyle = p.border
+        ctx.lineWidth = 1
+        ctx.strokeRect(x + 0.5, yTop + 0.5, w - 1, h - 1)
+        ctx.fillStyle = p.text
+        // Label fits inside the pill, top-anchored. Truncate per line.
+        const lines = p.label.split('\n')
+        for (let i = 0; i < lines.length; i++) {
+          const ly = yTop + 11 + i * 11
+          if (ly > yBottom - 2) break
+          ctx.fillText(lines[i].slice(0, Math.max(2, Math.floor(w / 5))), x + 3, ly)
+        }
+      }
+    }
+
+    drawPills(assignLanes(voPills), 0)  // VO1, VO2
+    drawPills(assignLanes(evPills), 2)  // EV1, EV2
 
     // Notes
     for (let i = 0; i < chart.notes.length; i++) {
@@ -1174,7 +1265,10 @@ export default function BeatmapEditor() {
     const canvas = canvasRef.current
     if (!canvas) return null
     const HIT = canvas.height - 110
-    const LANE_W = canvas.width / 5
+    // Same split as draw(): 64% of width for gems, 36% for the sidecar.
+    const GEM_W = canvas.width * 0.64
+    if (cx >= GEM_W) return null  // Click landed in the sidecar
+    const LANE_W = GEM_W / 5
     const lane = Math.floor(cx / LANE_W)
     if (lane < 0 || lane > 4) return null
     let bestId: number | null = null
@@ -1215,7 +1309,8 @@ export default function BeatmapEditor() {
     dragRef.current.moved = true
 
     const HIT = canvas.height - 110
-    const LANE_W = canvas.width / 5
+    const GEM_W = canvas.width * 0.64
+    const LANE_W = GEM_W / 5
     const newLane = Math.max(0, Math.min(4, Math.floor(cx / LANE_W)))
     const targetSec = currentTime + (HIT - cy) / scrollSpeed
     const targetTickRaw = Math.max(0, (targetSec * chart.bpm * chart.resolution) / 60)
@@ -1763,7 +1858,7 @@ export default function BeatmapEditor() {
             on wide monitors. The canvas backing-store is sized to this
             container by the ResizeObserver, not to the full viewport. */}
         <div className="flex-1 flex justify-center bg-black min-w-0 px-4">
-          <div ref={containerRef} className="relative w-full max-w-[420px]">
+          <div ref={containerRef} className="relative w-full max-w-[660px]">
             <canvas
               ref={canvasRef}
               onMouseDown={handleMouseDown}
