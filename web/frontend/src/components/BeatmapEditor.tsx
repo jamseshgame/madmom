@@ -1736,17 +1736,66 @@ export default function BeatmapEditor() {
     return () => { for (const a of audios.values()) a.pause() }
   }, [])
 
+  // ElevenLabs voices fetched once per editor session. 503 is the "not
+  // configured" path; we fall back to an empty list and the engine radio
+  // will explain the situation to the user.
+  interface ElVoice { voice_id: string; name: string }
+  const [elVoices, setElVoices] = useState<ElVoice[]>([])
+  const [elVoicesLoaded, setElVoicesLoaded] = useState(false)
+  const [elVoicesError, setElVoicesError] = useState('')
+  const [trackVoiceId, setTrackVoiceId] = useState('')
+
+  useEffect(() => {
+    fetch('/api/elevenlabs/voices')
+      .then(async (r) => {
+        if (r.status === 503) {
+          setElVoicesError('ElevenLabs not configured')
+          setElVoicesLoaded(true)
+          return
+        }
+        if (!r.ok) {
+          setElVoicesError(`Failed to load voices (${r.status})`)
+          setElVoicesLoaded(true)
+          return
+        }
+        const data = await r.json()
+        setElVoices((data.voices || []).map((v: { voice_id: string; name: string }) => ({
+          voice_id: v.voice_id, name: v.name,
+        })))
+        setElVoicesLoaded(true)
+      })
+      .catch(() => {
+        setElVoicesError('Network error loading voices')
+        setElVoicesLoaded(true)
+      })
+    fetch(`/api/tracks/${trackId}/beatmaps/${beatmapId}/elevenlabs-voice`)
+      .then((r) => (r.ok ? r.json() : { voice_id: '' }))
+      .then((d) => setTrackVoiceId(d.voice_id || ''))
+      .catch(() => undefined)
+  }, [trackId, beatmapId])
+
   // TTS for a VO event — POST text to backend, then assign returned file path
   const [ttsBusy, setTtsBusy] = useState<string | null>(null)
   const generateVoAudio = async (ev: TutorialVoEvent) => {
     if (!ev.text.trim()) return
     setTtsBusy(ev.id)
     try {
+      let endpoint: string
       const fd = new FormData()
       fd.append('text', ev.text)
       fd.append('track_id', trackId)
       fd.append('beatmap_id', beatmapId)
-      const res = await fetch('/api/tutorial/tts/synth', { method: 'POST', body: fd })
+      if (ev.engine === 'elevenlabs') {
+        const voice = ev.voiceId || trackVoiceId
+        if (!voice) {
+          throw new Error('No ElevenLabs voice selected (set a track default or pick one on this VO)')
+        }
+        fd.append('voice_id', voice)
+        endpoint = '/api/elevenlabs/synth'
+      } else {
+        endpoint = '/api/tutorial/tts/synth'
+      }
+      const res = await fetch(endpoint, { method: 'POST', body: fd })
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
         throw new Error(err.detail || `TTS failed (${res.status})`)
@@ -1780,6 +1829,8 @@ export default function BeatmapEditor() {
     },
     [],
   )
+
+  void elVoicesLoaded
 
   return (
     <div className="fixed inset-0 bg-black flex flex-col z-[60]">
@@ -2190,6 +2241,45 @@ export default function BeatmapEditor() {
                             rows={2}
                             className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-200 resize-y focus:outline-none focus:border-sky-500"
                           />
+                          <div className="flex items-center gap-2 text-[10px] text-gray-400">
+                            <label className="flex items-center gap-1 cursor-pointer">
+                              <input
+                                type="radio"
+                                name={`engine-${ev.id}`}
+                                checked={ev.engine === 'chatterbox'}
+                                onChange={() => updateTutorialEvent(ev.id, { engine: 'chatterbox' })}
+                                className="accent-jam-500"
+                              />
+                              Chatterbox
+                            </label>
+                            <label className="flex items-center gap-1 cursor-pointer">
+                              <input
+                                type="radio"
+                                name={`engine-${ev.id}`}
+                                checked={ev.engine === 'elevenlabs'}
+                                onChange={() => updateTutorialEvent(ev.id, { engine: 'elevenlabs' })}
+                                disabled={!!elVoicesError}
+                                className="accent-jam-500"
+                              />
+                              ElevenLabs{elVoicesError ? ` (${elVoicesError})` : ''}
+                            </label>
+                            {ev.engine === 'elevenlabs' && (
+                              <select
+                                value={ev.voiceId}
+                                onChange={(e) => updateTutorialEvent(ev.id, { voiceId: e.target.value })}
+                                className="ml-auto bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-[10px] text-gray-200 max-w-[140px]"
+                              >
+                                <option value="">
+                                  inherit{trackVoiceId
+                                    ? ` (${(elVoices.find((v) => v.voice_id === trackVoiceId)?.name || 'track default')})`
+                                    : ' (no track default)'}
+                                </option>
+                                {elVoices.map((v) => (
+                                  <option key={v.voice_id} value={v.voice_id}>{v.name}</option>
+                                ))}
+                              </select>
+                            )}
+                          </div>
                           <div className="flex items-center gap-1.5">
                             <button
                               onClick={() => generateVoAudio(ev)}
