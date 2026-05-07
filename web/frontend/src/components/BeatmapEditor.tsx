@@ -678,9 +678,122 @@ function TutorialTimeline({
   )
 }
 
+// ── SceneTimeline ──────────────────────────────────────────────────────────
+// Sibling row to TutorialTimeline. Renders scene events as a row of bands
+// (durational events) and spikes (instantaneous events). Click event to
+// select; drag body to move tick; drag right edge to resize duration.
+
+interface SceneTimelineProps {
+  duration: number
+  bpm: number
+  resolution: number
+  events: SceneEvent[]
+  selectedId: string | null
+  onSelect: (id: string | null) => void
+  onMoveEvent: (id: string, tick: number) => void
+  onResizeEvent: (id: string, duration: number) => void
+}
+
+function SceneTimeline({
+  duration, bpm, resolution, events,
+  selectedId, onSelect, onMoveEvent, onResizeEvent,
+}: SceneTimelineProps) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [width, setWidth] = useState(600)
+  const dragRef = useRef<
+    | { kind: 'move'; id: string; offset: number }
+    | { kind: 'resize'; id: string; startTick: number; pivotX: number }
+    | null
+  >(null)
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const update = () => setWidth(el.clientWidth)
+    update()
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  const span = Math.max(0.001, duration)
+  const tickToSec = (t: number) => (t / resolution) * (60 / bpm)
+  const secToX = (s: number) => (s / span) * width
+  const xToSec = (x: number) => (x / Math.max(1, width)) * span
+  const secToTick = (s: number) => Math.max(0, Math.round((s * bpm * resolution) / 60))
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    const drag = dragRef.current
+    if (!drag) return
+    const rect = containerRef.current!.getBoundingClientRect()
+    const x = e.clientX - rect.left
+    if (drag.kind === 'move') {
+      const sec = Math.max(0, Math.min(duration, xToSec(x - drag.offset)))
+      onMoveEvent(drag.id, secToTick(sec))
+    } else {
+      const ev = events.find((e) => e.id === drag.id)
+      if (!ev) return
+      const cursorTick = secToTick(Math.max(0, xToSec(x)))
+      const next = Math.max(0, cursorTick - drag.startTick)
+      onResizeEvent(drag.id, next)
+    }
+  }
+
+  const handleMouseUp = () => { dragRef.current = null }
+
+  return (
+    <div
+      ref={containerRef}
+      onMouseMove={handleMouseMove}
+      onMouseUp={handleMouseUp}
+      onMouseLeave={handleMouseUp}
+      className="relative h-6 bg-gray-950 border border-gray-800 rounded overflow-hidden select-none"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onSelect(null)
+      }}
+    >
+      {events.map((ev) => {
+        const startSec = tickToSec(ev.tick)
+        const endSec = tickToSec(ev.tick + ev.duration)
+        const x = secToX(startSec)
+        const w = Math.max(2, secToX(endSec) - x)
+        const isSel = ev.id === selectedId
+        return (
+          <div
+            key={ev.id}
+            onMouseDown={(e) => {
+              e.stopPropagation()
+              const rect = containerRef.current!.getBoundingClientRect()
+              const localX = e.clientX - rect.left
+              dragRef.current = { kind: 'move', id: ev.id, offset: localX - x }
+              onSelect(ev.id)
+            }}
+            title={`${ev.name} @ tick ${ev.tick}${ev.duration > 0 ? ` (dur ${ev.duration})` : ''}`}
+            className={`absolute top-0 bottom-0 ${isSel ? 'bg-emerald-400/70' : 'bg-emerald-600/60'} hover:bg-emerald-500/80 cursor-grab`}
+            style={{ left: x, width: w }}
+          >
+            <span className="text-[9px] text-emerald-50 px-1 truncate block leading-6">{ev.name}</span>
+            {ev.duration > 0 && (
+              <div
+                onMouseDown={(e) => {
+                  e.stopPropagation()
+                  dragRef.current = { kind: 'resize', id: ev.id, startTick: ev.tick, pivotX: x }
+                  onSelect(ev.id)
+                }}
+                className="absolute top-0 bottom-0 right-0 w-1.5 cursor-ew-resize bg-emerald-200/40 hover:bg-emerald-200/80"
+              />
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 // Component -----------------------------------------------------------------
 
 export default function BeatmapEditor() {
+  void SceneTimeline
   const params = useParams<{ trackId: string; beatmapId: string }>()
   const navigate = useNavigate()
   const trackId = params.trackId!
