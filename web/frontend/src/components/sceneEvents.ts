@@ -88,3 +88,69 @@ export function isKnownSceneEventName(name: string): boolean {
 export function findCatalogEntry(name: string): SceneEventCatalogEntry | undefined {
   return SCENE_EVENT_CATALOG.find((e) => e.name === name)
 }
+
+// ── [Scene] section parsing ────────────────────────────────────────────────
+//
+// Format: simple `key = value` lines inside `[Scene] { ... }`. Unknown keys
+// are kept in a passthrough map so future flags survive a round-trip through
+// an older editor.
+
+const SCENE_FLAG_KEYS: (keyof SceneFlags)[] = [
+  'floorcrowd', 'lasers_center', 'lasers_left', 'lasers_right',
+]
+
+const SCENE_KEY_SET = new Set<string>(SCENE_FLAG_KEYS)
+
+export interface ParsedScene {
+  flags: SceneFlags
+  unknownKeys: Record<string, string>  // verbatim values for keys we don't model
+}
+
+export function parseSceneFlags(text: string): ParsedScene {
+  const m = text.match(/\[Scene\]\s*\{([^}]*)\}/)
+  const flags: SceneFlags = { ...DEFAULT_SCENE_FLAGS }
+  const unknownKeys: Record<string, string> = {}
+  if (!m) return { flags, unknownKeys }
+  for (const raw of m[1].split(/\r?\n/)) {
+    const line = raw.replace(/^\s*;.*$/, '').trim()
+    if (!line) continue
+    const eq = line.indexOf('=')
+    if (eq < 0) continue
+    const key = line.slice(0, eq).trim()
+    const val = line.slice(eq + 1).trim()
+    if (SCENE_KEY_SET.has(key)) {
+      const num = Number(val)
+      if (Number.isFinite(num)) {
+        flags[key as keyof SceneFlags] = num
+      }
+    } else {
+      unknownKeys[key] = val
+    }
+  }
+  return { flags, unknownKeys }
+}
+
+export function serializeSceneFlags(
+  flags: SceneFlags,
+  unknownKeys: Record<string, string>,
+): string {
+  const lines: string[] = []
+  for (const key of SCENE_FLAG_KEYS) {
+    const v = flags[key]
+    if (!Number.isFinite(v)) continue
+    if (v === 0) continue          // omit defaults to keep diffs small
+    lines.push(`  ${key} = ${formatSceneNumber(v)}`)
+  }
+  for (const [key, val] of Object.entries(unknownKeys)) {
+    lines.push(`  ${key} = ${val}`)
+  }
+  if (lines.length === 0) return ''
+  return `[Scene]\n{\n${lines.join('\n')}\n}\n`
+}
+
+function formatSceneNumber(n: number): string {
+  // Trim trailing zeros and the decimal point if integer; otherwise keep up to
+  // 4 fractional digits to allow fine-grained intensity steps.
+  if (Number.isInteger(n)) return String(n)
+  return Number(n.toFixed(4)).toString()
+}
