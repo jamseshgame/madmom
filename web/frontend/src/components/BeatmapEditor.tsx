@@ -1249,7 +1249,55 @@ export default function BeatmapEditor() {
     drawPills(assignLanes(voPills), 0)  // VO1, VO2
     drawPills(assignLanes(evPills), 2)  // EV1, EV2
 
-    // Notes
+    // Index modifiers by tick so each rendered note can pick up its HOPO/tap
+    // companion (lane 5 / 6) without an O(n²) inner loop. Open notes (lane 7)
+    // are stored separately because they render as a runway-wide bar, not a
+    // single gem.
+    const modByTick = new Map<number, { hopo: boolean; tap: boolean }>()
+    const openIdsByTick = new Map<number, number[]>()
+    for (let i = 0; i < chart.notes.length; i++) {
+      const n = chart.notes[i]
+      if (n.lane === 5 || n.lane === 6) {
+        const cur = modByTick.get(n.tick) || { hopo: false, tap: false }
+        if (n.lane === 5) cur.hopo = true
+        else cur.tap = true
+        modByTick.set(n.tick, cur)
+      } else if (n.lane === 7) {
+        const arr = openIdsByTick.get(n.tick) || []
+        arr.push(i)
+        openIdsByTick.set(n.tick, arr)
+      }
+    }
+
+    // Open notes — full-width bar across the gem lanes.
+    openIdsByTick.forEach((ids, tick) => {
+      const noteSec = t2s(tick)
+      const dy = (noteSec - currentTime) * scrollSpeed
+      const y = HIT - dy
+      if (y < -200 || y > H + 200) return
+      const note = chart.notes[ids[0]]
+      const isSelected = ids.some((id) => selectedIds.has(id))
+      const barH = 14
+      // Sustain bar runs upward from the note marker like single-lane sustains.
+      if (note.sustain > 0) {
+        const sustainSec = t2s(note.sustain)
+        const tailLen = sustainSec * scrollSpeed
+        ctx.fillStyle = '#a855f7' + '55'  // purple/violet for opens
+        ctx.fillRect(0, y - tailLen, GEM_W, tailLen)
+      }
+      ctx.fillStyle = '#a855f7'
+      ctx.fillRect(0, y - barH / 2, GEM_W, barH)
+      ctx.lineWidth = isSelected ? 3 : 1.5
+      ctx.strokeStyle = isSelected ? '#ffffff' : '#3b0764'
+      ctx.strokeRect(0.5, y - barH / 2 + 0.5, GEM_W - 1, barH - 1)
+      // Label
+      ctx.fillStyle = '#ffffff'
+      ctx.font = 'bold 10px sans-serif'
+      ctx.textAlign = 'center'
+      ctx.fillText('OPEN', GEM_W / 2, y + 3)
+    })
+
+    // Single-lane notes
     for (let i = 0; i < chart.notes.length; i++) {
       const n = chart.notes[i]
       if (n.lane > 4) continue
@@ -1267,30 +1315,58 @@ export default function BeatmapEditor() {
       }
 
       const isSelected = selectedIds.has(i)
+      const mods = modByTick.get(n.tick)
       ctx.beginPath()
       ctx.arc(x, y, NOTE_R, 0, Math.PI * 2)
       ctx.fillStyle = LANE_FILL[n.lane]
       ctx.fill()
       ctx.lineWidth = isSelected ? 4 : 2
-      ctx.strokeStyle = isSelected ? '#ffffff' : '#000000'
+      ctx.strokeStyle = isSelected ? '#ffffff'
+        : mods?.tap ? '#22d3ee'   // cyan ring on tap notes
+        : '#000000'
       ctx.stroke()
+
+      // Forced-HOPO indicator: small upward triangle riding on top of the gem.
+      if (mods?.hopo) {
+        ctx.fillStyle = '#fde047'
+        ctx.beginPath()
+        ctx.moveTo(x, y - NOTE_R - 8)
+        ctx.lineTo(x - 6, y - NOTE_R - 1)
+        ctx.lineTo(x + 6, y - NOTE_R - 1)
+        ctx.closePath()
+        ctx.fill()
+        ctx.strokeStyle = '#000000'
+        ctx.lineWidth = 1
+        ctx.stroke()
+      }
     }
 
     // Note-tool ghost: when the user is in click-to-place mode, render a
     // translucent circle in the selected lane at the snapped tick under the
-    // playhead so it's clear *where* a click will drop a note.
+    // playhead so it's clear *where* a click will drop a note. Open notes
+    // (lane 7) render as a wide bar instead.
     if (tool === 'note' && chart) {
       const ghostLane = noteToolLane
-      const x = (ghostLane + 0.5) * LANE_W
-      ctx.beginPath()
-      ctx.arc(x, HIT, NOTE_R, 0, Math.PI * 2)
-      ctx.fillStyle = LANE_FILL[ghostLane] + '55'
-      ctx.fill()
-      ctx.strokeStyle = '#ffffff'
-      ctx.setLineDash([4, 4])
-      ctx.lineWidth = 1.5
-      ctx.stroke()
-      ctx.setLineDash([])
+      if (ghostLane === 7) {
+        ctx.fillStyle = '#a855f7' + '55'
+        ctx.fillRect(0, HIT - 7, GEM_W, 14)
+        ctx.strokeStyle = '#ffffff'
+        ctx.setLineDash([4, 4])
+        ctx.lineWidth = 1.5
+        ctx.strokeRect(0.5, HIT - 7 + 0.5, GEM_W - 1, 13)
+        ctx.setLineDash([])
+      } else {
+        const x = (ghostLane + 0.5) * LANE_W
+        ctx.beginPath()
+        ctx.arc(x, HIT, NOTE_R, 0, Math.PI * 2)
+        ctx.fillStyle = LANE_FILL[ghostLane] + '55'
+        ctx.fill()
+        ctx.strokeStyle = '#ffffff'
+        ctx.setLineDash([4, 4])
+        ctx.lineWidth = 1.5
+        ctx.stroke()
+        ctx.setLineDash([])
+      }
     }
 
     // Lane labels at bottom — drum-type or colour name + colour swatch underneath
@@ -1318,8 +1394,12 @@ export default function BeatmapEditor() {
       const onlyId = selectedIds.values().next().value as number
       const sel = chart.notes[onlyId]
       if (sel) {
+        const laneName = sel.lane === 7 ? 'OPEN'
+          : sel.lane === 5 ? 'HOPO mod'
+          : sel.lane === 6 ? 'Tap mod'
+          : laneLabels[sel.lane] ?? '?'
         ctx.fillText(
-          `selected: ${laneLabels[sel.lane] ?? '?'} · tick ${sel.tick} · sustain ${sel.sustain}`,
+          `selected: ${laneName} · tick ${sel.tick} · sustain ${sel.sustain}`,
           12,
           42,
         )
@@ -1329,7 +1409,9 @@ export default function BeatmapEditor() {
     }
     if (tool === 'note') {
       ctx.fillStyle = '#a78bfa'
-      ctx.fillText(`Note tool · lane ${noteToolLane + 1} (${laneLabels[noteToolLane] ?? ''})`, 12, 62)
+      const ghostLaneName = noteToolLane === 7 ? 'OPEN (full-width)'
+        : `lane ${noteToolLane + 1} (${laneLabels[noteToolLane] ?? ''})`
+      ctx.fillText(`Note tool · ${ghostLaneName}`, 12, 62)
     }
   }, [chart, currentTime, scrollSpeed, selectedIds, snapDivisor, isDrums, laneLabels, tool, noteToolLane])
 
@@ -1372,14 +1454,24 @@ export default function BeatmapEditor() {
     if (cx >= GEM_W) return null  // Click landed in the sidecar
     const LANE_W = GEM_W / 5
     const lane = Math.floor(cx / LANE_W)
-    if (lane < 0 || lane > 4) return null
     let bestId: number | null = null
     let bestDist = 36
     for (let i = 0; i < chart.notes.length; i++) {
       const n = chart.notes[i]
-      if (n.lane !== lane) continue
       const noteSec = tickToSeconds(n.tick, chart.bpm, chart.resolution)
       const y = HIT - (noteSec - currentTime) * scrollSpeed
+      // Open notes (lane 7) span the full gem width — accept a click anywhere
+      // along the bar but with a tighter vertical tolerance to match the bar
+      // height.
+      if (n.lane === 7) {
+        const d = Math.abs(y - cy)
+        if (d < 12 && d < bestDist) { bestDist = d; bestId = i }
+        continue
+      }
+      // HOPO/tap modifiers (lane 5/6) aren't directly clickable — they're
+      // toggled via F/T on the underlying note.
+      if (n.lane > 4) continue
+      if (n.lane !== lane) continue
       const d = Math.abs(y - cy)
       if (d < bestDist) {
         bestDist = d
@@ -1477,7 +1569,9 @@ export default function BeatmapEditor() {
       const cur = next[idx]
       if (!cur) return
       const proposedTick = Math.max(0, orig.tick + tickDelta)
-      const proposedLane = Math.max(0, Math.min(4, orig.lane + laneDelta))
+      // Open notes (lane 7) and modifiers (5/6) only move along the time axis;
+      // gem notes can also change lane within 0–4.
+      const proposedLane = orig.lane > 4 ? orig.lane : Math.max(0, Math.min(4, orig.lane + laneDelta))
       if (cur.tick !== proposedTick || cur.lane !== proposedLane) {
         next[idx] = { ...cur, tick: proposedTick, lane: proposedLane }
         touched = true
@@ -1603,11 +1697,77 @@ export default function BeatmapEditor() {
         return
       }
 
+      // F / T toggle HOPO / Tap modifier on each unique tick covered by the
+      // selection. A modifier (lane 5 / 6) lives at the same tick as the
+      // affected gem note(s) — toggle = remove if present, add otherwise.
+      if (!isCtrl && (e.key === 'f' || e.key === 'F' || e.key === 't' || e.key === 'T')) {
+        e.preventDefault()
+        const modLane = (e.key === 'f' || e.key === 'F') ? 5 : 6
+        const ticks = new Set<number>()
+        selectedIds.forEach((idx) => {
+          const n = chart.notes[idx]
+          if (n && n.lane <= 4) ticks.add(n.tick)  // Only fret notes can be flagged
+        })
+        if (ticks.size === 0) return
+        const next = chart.notes.slice()
+        ticks.forEach((tick) => {
+          const existingIdx = next.findIndex((n) => n.tick === tick && n.lane === modLane)
+          if (existingIdx >= 0) next.splice(existingIdx, 1)
+          else next.push({ tick, lane: modLane, sustain: 0 })
+        })
+        next.sort((a, b) => a.tick - b.tick || a.lane - b.lane)
+        commitNotes(next)
+        return
+      }
+
+      // O converts each selected fret note (or chord cluster at one tick)
+      // to an open note: remove the fret notes and any modifiers at the
+      // same tick, add a single lane-7 note. Pressing O again on a selected
+      // open note converts it back to a green (lane 0) note so the gesture
+      // is reversible.
+      if (!isCtrl && (e.key === 'o' || e.key === 'O')) {
+        e.preventDefault()
+        const ticks = new Map<number, 'fret' | 'open'>()
+        selectedIds.forEach((idx) => {
+          const n = chart.notes[idx]
+          if (!n) return
+          if (n.lane === 7) ticks.set(n.tick, 'open')
+          else if (n.lane <= 4) ticks.set(n.tick, ticks.get(n.tick) || 'fret')
+        })
+        if (ticks.size === 0) return
+        let next = chart.notes.slice()
+        const newSelTicks = new Set<number>()
+        ticks.forEach((kind, tick) => {
+          if (kind === 'fret') {
+            // Drop all gem notes + modifiers at this tick, insert one open.
+            const sustain = Math.max(...next.filter((n) => n.tick === tick && n.lane <= 4).map((n) => n.sustain), 0)
+            next = next.filter((n) => n.tick !== tick || n.lane > 7)
+            next.push({ tick, lane: 7, sustain })
+          } else {
+            // Convert open back to a green fret note at the same tick.
+            next = next.filter((n) => !(n.tick === tick && n.lane === 7))
+            next.push({ tick, lane: 0, sustain: 0 })
+          }
+          newSelTicks.add(tick)
+        })
+        next.sort((a, b) => a.tick - b.tick || a.lane - b.lane)
+        commitNotes(next)
+        // Re-anchor selection on the converted notes.
+        const newSel = new Set<number>()
+        next.forEach((n, i) => {
+          if (newSelTicks.has(n.tick) && (n.lane === 7 || n.lane === 0)) newSel.add(i)
+        })
+        setSelectedIds(newSel)
+        return
+      }
+
       const transform = (n: ChartNote): ChartNote | null => {
         if (e.key === 'ArrowLeft') return { ...n, tick: Math.max(0, n.tick - stepTicks) }
         if (e.key === 'ArrowRight') return { ...n, tick: n.tick + stepTicks }
-        if (e.key === 'ArrowUp') return { ...n, lane: Math.min(4, n.lane + 1) }
-        if (e.key === 'ArrowDown') return { ...n, lane: Math.max(0, n.lane - 1) }
+        if (n.lane <= 4) {
+          if (e.key === 'ArrowUp') return { ...n, lane: Math.min(4, n.lane + 1) }
+          if (e.key === 'ArrowDown') return { ...n, lane: Math.max(0, n.lane - 1) }
+        }
         if (e.key === 'h' || e.key === 'H') return { ...n, sustain: n.sustain > 0 ? 0 : chart.resolution }
         return null
       }
@@ -2265,6 +2425,17 @@ export default function BeatmapEditor() {
                     </button>
                   ))}
                 </div>
+                <button
+                  onClick={() => setNoteToolLane(7)}
+                  className={`mt-1 w-full px-1 py-1.5 rounded text-[10px] font-mono transition-colors ${
+                    noteToolLane === 7
+                      ? 'ring-2 ring-white text-white bg-violet-600'
+                      : 'text-violet-200 hover:opacity-80 bg-violet-700/70'
+                  }`}
+                  title="Open note — full-width strum"
+                >
+                  Open (full-width)
+                </button>
               </div>
             )}
             <div className="flex items-stretch gap-1">
@@ -2287,6 +2458,8 @@ export default function BeatmapEditor() {
             </div>
             <p className="text-[10px] text-gray-600 mt-1.5 leading-snug">
               Shift-click to multi-select. Ctrl/Cmd + C/X/V copy, cut, paste at playhead. Ctrl+A selects all.
+              <br />
+              F = toggle force-HOPO · T = toggle tap · O = toggle open · H = toggle 1-beat sustain.
             </p>
           </section>
 
