@@ -626,7 +626,12 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                       const dateStr = formatDate(b.generated_at)
                       const isActive = !!b.active
                       const defaultName = `${trackName} (${label})`
-                      const displayLabel = liveName && liveName !== defaultName ? liveName : dateStr
+                      // Treat "<default>", "<default> (copy)", "<default> (copy) (copy)"
+                      // etc. as still-default so cloned rows keep showing the
+                      // generated-at date rather than redundant track-name noise.
+                      const baseName = liveName.replace(/(\s*\(copy\))+$/i, '')
+                      const isCustom = !!liveName && baseName !== defaultName
+                      const displayLabel = isCustom ? liveName : dateStr
                       const activate = async () => {
                         if (isActive) return
                         try {

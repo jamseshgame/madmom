@@ -1430,7 +1430,11 @@ export default function TracksPage() {
                       const dateStr = formatDate(bm.generated_at)
                       const isActive = !!bm.active
                       const defaultName = `${selectedTrack.name} (${STEM_LABELS[stem] || stem})`
-                      const displayLabel = liveName && liveName !== defaultName ? liveName : dateStr
+                      // Strip "(copy)" suffixes so cloned rows stay on the date
+                      // until the user gives them a real custom name.
+                      const baseName = liveName.replace(/(\s*\(copy\))+$/i, '')
+                      const isCustom = !!liveName && baseName !== defaultName
+                      const displayLabel = isCustom ? liveName : dateStr
                       const activate = async () => {
                         if (isActive) return
                         try {
