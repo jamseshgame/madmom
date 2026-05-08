@@ -79,6 +79,48 @@ interface ChartState {
   sceneFlagsUnknown: Record<string, string>
   sceneEvents: SceneEvent[]
   sceneEventsPassthrough: string[]
+  // Section markers — `tick = E "section <name>"` rows from [Events].
+  // Pulled out of sceneEventsPassthrough so the editor can edit them as
+  // first-class objects; merged back at save time.
+  sections: ChartSection[]
+}
+
+interface ChartSection {
+  id: string
+  tick: number
+  name: string
+}
+
+const SECTION_LINE_RE = /^\s*(\d+)\s*=\s*E\s+"section\s+([^"]*)"\s*$/
+
+function extractSections(passthroughLines: string[]): {
+  sections: ChartSection[]
+  remaining: string[]
+} {
+  const sections: ChartSection[] = []
+  const remaining: string[] = []
+  let counter = 0
+  for (const line of passthroughLines) {
+    const m = line.match(SECTION_LINE_RE)
+    if (m) {
+      sections.push({
+        id: `section-${m[1]}-${counter++}`,
+        tick: Number(m[1]),
+        name: m[2],
+      })
+    } else {
+      remaining.push(line)
+    }
+  }
+  sections.sort((a, b) => a.tick - b.tick)
+  return { sections, remaining }
+}
+
+function sectionLines(sections: ChartSection[]): string[] {
+  return sections
+    .slice()
+    .sort((a, b) => a.tick - b.tick)
+    .map((s) => `  ${s.tick} = E "section ${s.name}"`)
 }
 
 const DIFFICULTY_PREFERENCE = [
@@ -354,6 +396,8 @@ function parseChart(text: string, prefer?: string): ChartState {
   // for exactly this reason — so the user doesn't have to tick the
   // sidebar checkbox before adding their first VO/STEP.
   const tutorialEnabled = tutorial.length > 0 || hasTutorialSection(text)
+  const { sections: chartSections, remaining: passthroughWithoutSections } =
+    extractSections(sceneEventsParsed.passthroughLines)
   return {
     fullText: text, resolution, bpm, bpmRaw, songName,
     availableSections, activeName, notes,
@@ -361,7 +405,8 @@ function parseChart(text: string, prefer?: string): ChartState {
     sceneFlags: scene.flags,
     sceneFlagsUnknown: scene.unknownKeys,
     sceneEvents: sceneEventsParsed.events,
-    sceneEventsPassthrough: sceneEventsParsed.passthroughLines,
+    sceneEventsPassthrough: passthroughWithoutSections,
+    sections: chartSections,
   }
 }
 
@@ -898,6 +943,16 @@ export default function BeatmapEditor() {
   // Bumped to force a re-render when undo/redo state changes (so the toolbar
   // buttons enable/disable). The arrays themselves live in refs.
   const [, setHistoryTick] = useState(0)
+  // Playback rate. preservesPitch keeps voices intelligible when slowing down
+  // for charting hard sections.
+  const [playbackRate, setPlaybackRate] = useState(1)
+  // Waveform peaks decoded from song.ogg — one entry per WAVE_BUCKET_MS slice
+  // of the audio's full duration, stored in a ref so updates don't re-render
+  // (the draw loop reads it on every frame regardless).
+  const wavePeaksRef = useRef<Float32Array | null>(null)
+  // Bumps to force a re-render when peaks finish decoding so any UI that
+  // reflects waveform-ready state can update.
+  const [, setWaveLoaded] = useState(false)
 
   const audioSrc = `/api/tracks/${trackId}/beatmaps/${beatmapId}/download/song.ogg`
 
@@ -916,6 +971,21 @@ export default function BeatmapEditor() {
     })
     setDirty(true)
   }, [])
+
+  const updateSections = useCallback((updater: (prev: ChartSection[]) => ChartSection[]) => {
+    setChart((prev) => {
+      if (!prev) return prev
+      return { ...prev, sections: updater(prev.sections) }
+    })
+    setDirty(true)
+  }, [])
+
+  const addSectionAtPlayhead = useCallback(() => {
+    if (!chart) return
+    const tick = Math.max(0, Math.round((currentTime * chart.bpm * chart.resolution) / 60))
+    const id = `section-${tick}-${Date.now()}`
+    updateSections((prev) => [...prev, { id, tick, name: 'New section' }].sort((a, b) => a.tick - b.tick))
+  }, [chart, currentTime, updateSections])
 
   const undo = useCallback(() => {
     setChart((prev) => {
@@ -1000,6 +1070,71 @@ export default function BeatmapEditor() {
     raf = requestAnimationFrame(t)
     return () => cancelAnimationFrame(raf)
   }, [])
+
+  // Apply playback rate + pitch correction to the audio element. preservesPitch
+  // is supported in modern Chromium/Firefox/Safari; the prefixed variants are
+  // there for older WebKit.
+  useEffect(() => {
+    const a = audioRef.current
+    if (!a) return
+    a.playbackRate = playbackRate
+    type WithPitch = HTMLAudioElement & {
+      preservesPitch?: boolean
+      mozPreservesPitch?: boolean
+      webkitPreservesPitch?: boolean
+    }
+    const ap = a as WithPitch
+    ap.preservesPitch = true
+    ap.mozPreservesPitch = true
+    ap.webkitPreservesPitch = true
+  }, [playbackRate])
+
+  // Decode song.ogg → peaks for waveform overlay. Bucket size of 20ms gives
+  // ~50 peaks/second, enough resolution to read transients on the runway
+  // while keeping the array small (a 4-minute song needs ~12k floats).
+  const WAVE_BUCKET_MS = 20
+  useEffect(() => {
+    if (!audioSrc) return
+    const ctrl = new AbortController()
+    let ctx: AudioContext | null = null
+    fetch(audioSrc, { signal: ctrl.signal })
+      .then((r) => r.arrayBuffer())
+      .then(async (buf) => {
+        ctx = new (window.AudioContext || (window as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext!)()
+        const audio = await ctx.decodeAudioData(buf)
+        const sampleRate = audio.sampleRate
+        const bucketSamples = Math.max(1, Math.floor((WAVE_BUCKET_MS / 1000) * sampleRate))
+        const numBuckets = Math.ceil(audio.length / bucketSamples)
+        const peaks = new Float32Array(numBuckets)
+        const channelData = audio.getChannelData(0)
+        for (let b = 0; b < numBuckets; b++) {
+          const start = b * bucketSamples
+          const end = Math.min(start + bucketSamples, channelData.length)
+          let max = 0
+          for (let i = start; i < end; i++) {
+            const v = Math.abs(channelData[i])
+            if (v > max) max = v
+          }
+          peaks[b] = max
+        }
+        // Normalize so the loudest peak fills the column — same trick the
+        // stem player uses for quiet stems.
+        let scaleMax = 0
+        for (let i = 0; i < peaks.length; i++) if (peaks[i] > scaleMax) scaleMax = peaks[i]
+        if (scaleMax > 0.01) {
+          for (let i = 0; i < peaks.length; i++) peaks[i] = Math.min(1, peaks[i] / scaleMax)
+        }
+        wavePeaksRef.current = peaks
+        setWaveLoaded(true)
+      })
+      .catch((e) => {
+        if ((e as Error).name !== 'AbortError') console.error('waveform decode failed', e)
+      })
+      .finally(() => {
+        try { ctx?.close() } catch { /* already closed */ }
+      })
+    return () => ctrl.abort()
+  }, [audioSrc])
 
   const isDrums = meta?.stem === 'drums'
   const laneLabels = useMemo(() => (isDrums ? DRUM_LABELS : GUITAR_LABELS), [isDrums])
@@ -1248,6 +1383,60 @@ export default function BeatmapEditor() {
 
     drawPills(assignLanes(voPills), 0)  // VO1, VO2
     drawPills(assignLanes(evPills), 2)  // EV1, EV2
+
+    // Section markers: a horizontal rule across the gem area at each section
+    // tick, with the name floating just above. Drawn before the waveform so
+    // markers don't dominate visually.
+    if (chart.sections.length > 0) {
+      ctx.font = 'bold 11px sans-serif'
+      ctx.textAlign = 'left'
+      for (const sec of chart.sections) {
+        const y = HIT - (t2s(sec.tick) - currentTime) * scrollSpeed
+        if (y < -20 || y > H + 20) continue
+        ctx.strokeStyle = 'rgba(244, 114, 182, 0.55)'  // pink-400 line
+        ctx.lineWidth = 1
+        ctx.setLineDash([4, 3])
+        ctx.beginPath()
+        ctx.moveTo(0, y)
+        ctx.lineTo(GEM_W, y)
+        ctx.stroke()
+        ctx.setLineDash([])
+        // Label background
+        const labelW = ctx.measureText(sec.name).width + 8
+        ctx.fillStyle = 'rgba(190, 24, 93, 0.85)'  // pink-700
+        ctx.fillRect(2, y - 14, labelW, 13)
+        ctx.fillStyle = '#ffffff'
+        ctx.fillText(sec.name, 6, y - 4)
+      }
+    }
+
+    // Waveform: thin column down the LEFT edge of the gem area. Time runs
+    // vertically with currentTime at HIT (the strike line); each bucket draws
+    // a horizontal bar whose width is the normalized peak amplitude. Drawn
+    // before notes so gems land on top.
+    const peaks = wavePeaksRef.current
+    if (peaks && peaks.length > 0) {
+      const COLUMN_W = 14
+      const bucketSec = WAVE_BUCKET_MS / 1000
+      // Find the visible time range. y=0 is the future; y=H is the past.
+      const tAtY = (y: number) => currentTime + (HIT - y) / scrollSpeed
+      const topT = tAtY(0)
+      const botT = tAtY(H)
+      const startBucket = Math.max(0, Math.floor(Math.min(topT, botT) / bucketSec))
+      const endBucket = Math.min(peaks.length - 1, Math.ceil(Math.max(topT, botT) / bucketSec))
+      ctx.fillStyle = 'rgba(34, 211, 238, 0.55)'  // cyan-400 at 55%
+      for (let b = startBucket; b <= endBucket; b++) {
+        const t = b * bucketSec
+        const y = HIT - (t - currentTime) * scrollSpeed
+        const amp = peaks[b]
+        if (amp <= 0) continue
+        const w = Math.max(1, amp * COLUMN_W)
+        ctx.fillRect(0, y - 1, w, 2)
+      }
+      // Faint baseline so the column reads as one element.
+      ctx.fillStyle = 'rgba(34, 211, 238, 0.12)'
+      ctx.fillRect(0, 0, 1, H)
+    }
 
     // Index modifiers by tick so each rendered note can pick up its HOPO/tap
     // companion (lane 5 / 6) without an O(n²) inner loop. Open notes (lane 7)
@@ -1801,12 +1990,13 @@ export default function BeatmapEditor() {
     }
     let newFull = replaceSectionNotes(chart.fullText, chart.activeName, chart.notes)
     newFull = applyTutorialToFullText(newFull, chart.tutorial, chart.tutorialEnabled, chart.musicSections)
+    const passthroughWithSections = [...chart.sceneEventsPassthrough, ...sectionLines(chart.sections)]
     newFull = applySceneToFullText(
       newFull,
       chart.sceneFlags,
       chart.sceneFlagsUnknown,
       chart.sceneEvents,
-      chart.sceneEventsPassthrough,
+      passthroughWithSections,
     )
     const newNotes = parseSectionNotes(newFull, name)
     // Tutorial section is shared across difficulties — just keep current state.
@@ -1831,12 +2021,15 @@ export default function BeatmapEditor() {
     try {
       let newFull = replaceSectionNotes(chart.fullText, chart.activeName, chart.notes)
       newFull = applyTutorialToFullText(newFull, chart.tutorial, chart.tutorialEnabled, chart.musicSections)
+      // Merge section markers back into passthrough so applySceneToFullText
+      // re-emits them as standard `E "section ..."` rows in [Events].
+      const passthroughWithSections = [...chart.sceneEventsPassthrough, ...sectionLines(chart.sections)]
       newFull = applySceneToFullText(
         newFull,
         chart.sceneFlags,
         chart.sceneFlagsUnknown,
         chart.sceneEvents,
-        chart.sceneEventsPassthrough,
+        passthroughWithSections,
       )
       const res = await fetch(`/api/tracks/${trackId}/beatmaps/${beatmapId}/chart`, {
         method: 'PUT',
@@ -2377,6 +2570,30 @@ export default function BeatmapEditor() {
               }}
               className="w-full accent-jam-500"
             />
+            <div className="mt-2 flex items-center gap-2">
+              <span className="text-[11px] text-gray-500 shrink-0">Speed</span>
+              <input
+                type="range"
+                min={25}
+                max={150}
+                step={5}
+                value={Math.round(playbackRate * 100)}
+                onChange={(e) => setPlaybackRate(Number(e.target.value) / 100)}
+                className="flex-1 accent-jam-500"
+                title="Playback speed (pitch preserved)"
+              />
+              <span className="text-[11px] font-mono text-gray-300 w-10 text-right shrink-0">
+                {Math.round(playbackRate * 100)}%
+              </span>
+              <button
+                onClick={() => setPlaybackRate(1)}
+                disabled={playbackRate === 1}
+                className="text-[10px] px-1.5 py-0.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-30 text-gray-400 rounded transition-colors"
+                title="Reset to 100%"
+              >
+                1×
+              </button>
+            </div>
           </section>
 
           <section>
@@ -2480,6 +2697,58 @@ export default function BeatmapEditor() {
               <p className="text-[11px] text-gray-600 mt-1">
                 Switching difficulty keeps in-memory edits — Save writes them all back.
               </p>
+            )}
+          </section>
+
+          <section>
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Sections</h3>
+              <button
+                onClick={addSectionAtPlayhead}
+                disabled={!chart}
+                className="text-[10px] px-1.5 py-0.5 bg-pink-700/40 hover:bg-pink-600/60 disabled:opacity-30 border border-pink-700/40 hover:border-pink-500 text-pink-200 hover:text-pink-100 rounded transition-colors"
+                title="Add a section marker at the playhead"
+              >
+                + Add at playhead
+              </button>
+            </div>
+            {(!chart || chart.sections.length === 0) ? (
+              <p className="text-[11px] text-gray-600">No section markers. Sections appear as labelled rules on the runway.</p>
+            ) : (
+              <ul className="space-y-1 max-h-44 overflow-y-auto">
+                {chart.sections.map((sec) => (
+                  <li key={sec.id} className="flex items-center gap-1">
+                    <button
+                      onClick={() => {
+                        if (!audioRef.current || !chart) return
+                        const sec_t = (sec.tick / chart.resolution) * (60 / chart.bpm)
+                        audioRef.current.currentTime = sec_t
+                        setCurrentTime(sec_t)
+                      }}
+                      className="shrink-0 px-1.5 py-1 bg-gray-800 hover:bg-gray-700 text-pink-200 rounded text-[10px] font-mono transition-colors"
+                      title="Jump to this section"
+                    >
+                      ↶
+                    </button>
+                    <input
+                      type="text"
+                      value={sec.name}
+                      onChange={(e) => updateSections((prev) =>
+                        prev.map((s) => s.id === sec.id ? { ...s, name: e.target.value } : s),
+                      )}
+                      className="flex-1 min-w-0 bg-gray-800 border border-gray-700 rounded px-1.5 py-1 text-[11px] text-gray-200 focus:outline-none focus:border-pink-500"
+                    />
+                    <button
+                      onClick={() => updateSections((prev) => prev.filter((s) => s.id !== sec.id))}
+                      className="shrink-0 px-1.5 py-1 bg-red-900/30 hover:bg-red-800/60 border border-red-800/40 hover:border-red-700 text-red-300 hover:text-red-200 rounded text-[10px] transition-colors"
+                      title="Delete section"
+                      aria-label="Delete section"
+                    >
+                      ×
+                    </button>
+                  </li>
+                ))}
+              </ul>
             )}
           </section>
 
