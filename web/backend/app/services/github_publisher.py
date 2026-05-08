@@ -45,29 +45,39 @@ async def publish_song_folder(folder_path: Path, folder_name: str) -> str:
         commit_resp.raise_for_status()
         base_tree_sha = commit_resp.json()['tree']['sha']
 
-        # 2. Create blobs for each file
+        # 2. Create blobs for each file. rglob walks subdirectories so
+        # tutorial bundles (vo/*.ogg, tutorial_samples/*.ogg) ride along
+        # with the top-level chart + song.ini + song.ogg. Files whose name
+        # starts with `_` are treated as scratch artefacts and skipped at
+        # any depth.
         tree_entries = []
-        for file_path in sorted(folder_path.iterdir()):
-            if file_path.is_file() and not file_path.name.startswith('_'):
-                content_bytes = file_path.read_bytes()
-                blob_resp = await client.post(
-                    _api('/git/blobs'),
-                    headers=_headers(),
-                    json={
-                        'content': base64.b64encode(content_bytes).decode(),
-                        'encoding': 'base64',
-                    },
-                )
-                blob_resp.raise_for_status()
-                blob_sha = blob_resp.json()['sha']
+        for file_path in sorted(folder_path.rglob('*')):
+            if not file_path.is_file():
+                continue
+            rel = file_path.relative_to(folder_path)
+            if any(part.startswith('_') for part in rel.parts):
+                continue
+            content_bytes = file_path.read_bytes()
+            blob_resp = await client.post(
+                _api('/git/blobs'),
+                headers=_headers(),
+                json={
+                    'content': base64.b64encode(content_bytes).decode(),
+                    'encoding': 'base64',
+                },
+            )
+            blob_resp.raise_for_status()
+            blob_sha = blob_resp.json()['sha']
 
-                rel_path = f'{settings.github_inbox_prefix}/{folder_name}/{file_path.name}'
-                tree_entries.append({
-                    'path': rel_path,
-                    'mode': '100644',
-                    'type': 'blob',
-                    'sha': blob_sha,
-                })
+            # Preserve the subdir structure under SongInbox/<folder>/. POSIX
+            # path is mandatory — Git's API rejects backslashes on Windows.
+            rel_path = f'{settings.github_inbox_prefix}/{folder_name}/{rel.as_posix()}'
+            tree_entries.append({
+                'path': rel_path,
+                'mode': '100644',
+                'type': 'blob',
+                'sha': blob_sha,
+            })
 
         # 3. Create tree
         tree_resp = await client.post(
