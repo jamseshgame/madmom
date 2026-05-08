@@ -199,6 +199,27 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
   const [selectedStems, setSelectedStems] = useState<Set<string>>(new Set())
   const [hasVocalNotes, setHasVocalNotes] = useState(false)
   const [batchError, setBatchError] = useState('')
+  const [existingBeatmaps, setExistingBeatmaps] = useState<BeatmapRecord[]>([])
+
+  const refetchBeatmaps = useCallback(async () => {
+    if (!trackId) { setExistingBeatmaps([]); return }
+    try {
+      const r = await fetch(`/api/tracks/${trackId}`)
+      if (!r.ok) { setExistingBeatmaps([]); return }
+      const data = await r.json()
+      setExistingBeatmaps(Array.isArray(data.beatmaps) ? data.beatmaps : [])
+    } catch {
+      setExistingBeatmaps([])
+    }
+  }, [trackId])
+
+  useEffect(() => { refetchBeatmaps() }, [refetchBeatmaps])
+
+  const formatDate = (ts: number) =>
+    new Date(ts * 1000).toLocaleDateString(undefined, {
+      year: 'numeric', month: 'short', day: 'numeric',
+      hour: '2-digit', minute: '2-digit',
+    })
 
   const toggleSelectedStem = (stem: string) =>
     setSelectedStems((prev) => {
@@ -234,12 +255,6 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
       alert((e as Error).message)
     }
   }
-
-  const formatDate = (ts: number) =>
-    new Date(ts * 1000).toLocaleDateString(undefined, {
-      year: 'numeric', month: 'short', day: 'numeric',
-      hour: '2-digit', minute: '2-digit',
-    })
 
   // Fetch backend-precomputed waveform peaks once. If 404 (older job), each
   // StemPlayer falls back to its in-browser Web Audio decode.
@@ -568,6 +583,14 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                         delete next[stem]
                         return next
                       })}
+                      onDone={() => {
+                        setBeatmaps((prev) => {
+                          const next = { ...prev }
+                          delete next[stem]
+                          return next
+                        })
+                        refetchBeatmaps()
+                      }}
                       onView={
                         trackId
                           ? (id) =>
@@ -586,6 +609,36 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                   {bm?.state === 'error' && (
                     <div className="text-xs text-red-400 mt-1">Failed</div>
                   )}
+
+                  {/* Pre-existing beatmaps for this stem — open in editor or
+                      view stats. Rendered for non-vocals only; vocals uses
+                      vocal_notes.json via VocalmapButtons, not this list. */}
+                  {stem !== 'vocals' && trackId && existingBeatmaps
+                    .filter((b) => b.stem === stem)
+                    .sort((a, b) => b.generated_at - a.generated_at)
+                    .map((b) => {
+                      const liveName = (b.song_name || '').trim()
+                      const dateStr = formatDate(b.generated_at)
+                      return (
+                        <div key={b.id} className="w-full mt-1 flex items-stretch gap-1">
+                          <button
+                            onClick={() => setStatsBeatmap(b)}
+                            className="flex-1 min-w-0 px-2 py-1 bg-green-900/30 hover:bg-green-800/50 border border-green-800/40 hover:border-green-700 rounded text-[11px] text-green-300 hover:text-green-200 flex items-center justify-between gap-2 transition-colors"
+                            title={liveName ? `${liveName} · ${dateStr}` : 'View beatmap details'}
+                          >
+                            <span className="truncate">⏺ {liveName || dateStr}</span>
+                            <span className="text-green-500/80 shrink-0">›</span>
+                          </button>
+                          <button
+                            onClick={() => navigate(`/edit/${trackId}/${b.id}`)}
+                            className="shrink-0 px-2 py-1 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-600 rounded text-[11px] text-gray-300 hover:text-gray-100 transition-colors"
+                            title="Edit beatmap"
+                          >
+                            Edit
+                          </button>
+                        </div>
+                      )
+                    })}
                 </div>
               </div>
             )
