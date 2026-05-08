@@ -36,16 +36,16 @@ vo/                             ; tutorial narration clips (NEW)
   ...
 ```
 
-The new bits are `tutorial_samples/`, `vo/`, plus a `[tutorial]` section in
+The new bits are `tutorial_samples/`, `vo/`, plus a `[onboarding]` section in
 `song.ini` and a `[TutorialScript]` section in
 `notes_fixed_slides.chart`. **None of the standard Clone Hero pieces change.**
 
-If `song.ini` does not contain `tutorial = True`, treat the song as a normal
+If `song.ini` does not contain `onboarding = True`, treat the song as a normal
 gameplay chart and ignore everything below.
 
 ---
 
-## 2. `song.ini` — `[tutorial]` section
+## 2. `song.ini` — `[onboarding]` section
 
 ```ini
 [song]
@@ -53,8 +53,8 @@ name = Crashing Down
 artist = Everfall
 ... (standard CH keys) ...
 
-[tutorial]
-tutorial = True
+[onboarding]
+onboarding = True
 tutorial_voice = af_default
 
 ; 10 base instrument samples (paths relative to the song folder)
@@ -216,7 +216,7 @@ implementation.
 
 ### Initialization
 
-1. Load `song.ini`. If `[tutorial] tutorial = True` is missing, fall through
+1. Load `song.ini`. If `[onboarding] onboarding = True` is missing, fall through
    to standard gameplay.
 2. Parse `[TutorialScript]` from the chart. Build:
    - An ordered list of STEP events keyed by `id`, each with its `start_tick`,
@@ -283,17 +283,17 @@ lost:
 
 The studio guarantees:
 
-- `[song]` keys are unchanged. The `tutorial = True` flag is in a separate
-  `[tutorial]` section so any parser that splits by section ignores it.
+- `[song]` keys are unchanged. The `onboarding = True` flag is in a separate
+  `[onboarding]` section so any parser that splits by section ignores it.
 - `[Song]`, `[SyncTrack]`, `[Events]`, `[*Single]`, `[*Drums]`, etc. in the
   chart are unchanged.
 - `[TutorialScript]` is appended to the chart **after** all standard
   sections. Strict CH parsers that only know the standard sections skip
   it.
-- All paths in `[tutorial]` and `[TutorialScript]` are relative to the song
+- All paths in `[onboarding]` and `[TutorialScript]` are relative to the song
   folder, so the engine only needs `<song_dir>/...` lookups.
 
-If the runtime sees `tutorial = True` but no `[TutorialScript]` section,
+If the runtime sees `onboarding = True` but no `[TutorialScript]` section,
 it should fall back to standard gameplay (treat as misauthored).
 
 ---
@@ -304,7 +304,7 @@ A drum tutorial with one VO, two steps:
 
 **Studio editor inputs:**
 
-- `song.ini` form: name "Crashing Down", artist "Everfall", `tutorial = True`.
+- `song.ini` form: name "Crashing Down", artist "Everfall", `onboarding = True`.
 - Tutorial samples uploaded for slots `lane_1`..`lane_5` (drums kit).
 - Voice ref clip uploaded.
 - BeatmapEditor (Drums beatmap):
@@ -321,8 +321,8 @@ name = Crashing Down
 artist = Everfall
 ... (standard fields) ...
 
-[tutorial]
-tutorial = True
+[onboarding]
+onboarding = True
 sample_lane_1 = tutorial_samples/lane_1.ogg
 sample_lane_2 = tutorial_samples/lane_2.ogg
 sample_lane_3 = tutorial_samples/lane_3.ogg

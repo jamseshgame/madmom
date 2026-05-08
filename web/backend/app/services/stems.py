@@ -87,9 +87,9 @@ def write_song_ini(output_dir: Path, fields: dict) -> Path:
     """Write a Clone Hero-compatible song.ini file.
 
     Standard fields go in [song]. Any keys prefixed with `sample_` or any of
-    the tutorial control keys (tutorial, tutorial_voice) get a separate
-    [tutorial] section so Clone Hero ignores them while the Jamsesh tutorial
-    runtime can pick them up cleanly.
+    the onboarding control keys (onboarding, tutorial_voice) get a separate
+    [onboarding] section so Clone Hero ignores them while the Jamsesh runtime
+    can pick them up cleanly.
     """
     ini_path = output_dir / 'song.ini'
     lines = ['[song]']
@@ -99,13 +99,13 @@ def write_song_ini(output_dir: Path, fields: dict) -> Path:
 
     tutorial_keys = sorted(
         k for k in fields
-        if k == 'tutorial'
+        if k == 'onboarding'
         or k == 'tutorial_voice'
         or k.startswith('sample_')
     )
     if tutorial_keys and any(str(fields.get(k, '')).strip() for k in tutorial_keys):
         lines.append('')
-        lines.append('[tutorial]')
+        lines.append('[onboarding]')
         for k in tutorial_keys:
             v = fields.get(k, '')
             if v != '' and v is not None:

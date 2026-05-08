@@ -10,6 +10,15 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.6.8',
+    date: '2026-05-08',
+    summary:
+      'Rename the song.ini tutorial flag to onboarding for clarity — onboarding tutorials now live in [onboarding] with onboarding = True.',
+    entries: [
+      { kind: 'changed', text: 'Onboarding tutorials are written as [onboarding] / onboarding = True instead of [tutorial] / tutorial = True. write_song_ini, the blank-tutorial endpoint, the empty-beatmap tutorial flag, and the publish-game tutorial bundling all emit the new section/key. tutorial_voice and the sample_* keys are unchanged. Existing songs with the old [tutorial] section need a one-time rewrite.' },
+    ],
+  },
+  {
     version: '1.6.7',
     date: '2026-04-29',
     summary:

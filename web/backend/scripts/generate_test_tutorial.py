@@ -460,8 +460,8 @@ async def main() -> None:
             'delay = 0',
             'loading_phrase = Test bench tutorial',
             '',
-            '[tutorial]',
-            'tutorial = True',
+            '[onboarding]',
+            'onboarding = True',
         ]) + '\n'
         (bm_src / 'song.ini').write_text(ini_text, encoding='utf-8')
 

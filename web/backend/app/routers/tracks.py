@@ -601,7 +601,7 @@ async def create_empty_beatmap_for_track(
             'loading_phrase =',
         ]
         if tutorial:
-            ini_lines += ['', '[tutorial]', 'tutorial = True']
+            ini_lines += ['', '[onboarding]', 'onboarding = True']
         (bm_src / 'song.ini').write_text('\n'.join(ini_lines) + '\n', encoding='utf-8')
 
         beatmap_id = uuid.uuid4().hex[:12]
@@ -729,8 +729,8 @@ async def create_blank_tutorial(
             'delay = 0',
             'loading_phrase =',
             '',
-            '[tutorial]',
-            'tutorial = True',
+            '[onboarding]',
+            'onboarding = True',
         ]
         (bm_src / 'song.ini').write_text('\n'.join(ini_lines) + '\n', encoding='utf-8')
 
@@ -1029,8 +1029,8 @@ def _bundle_tutorial_assets(
     if not tutorial_blocks and not (track.dir / 'tutorial_samples').exists():
         return {'enabled': False}
 
-    # Mark song.ini as a tutorial and stamp the sample paths
-    ini_fields['tutorial'] = 'True'
+    # Mark song.ini as an onboarding tutorial and stamp the sample paths
+    ini_fields['onboarding'] = 'True'
     samples_src = track.dir / 'tutorial_samples'
     samples_dst = tmp_dir / 'tutorial_samples'
     bundled_samples: list[str] = []
