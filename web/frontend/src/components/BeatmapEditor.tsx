@@ -870,7 +870,11 @@ export default function BeatmapEditor() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const containerRef = useRef<HTMLDivElement | null>(null)
   const dragRef = useRef<{
-    id: number
+    // Notes that move together. snapshot is captured at drag start so we can
+    // compute deltas relative to the original positions even after multiple
+    // drag-move events. anchorId is the note the user actually grabbed.
+    anchorId: number
+    snapshot: Map<number, { tick: number; lane: number }>
     startX: number
     startY: number
     moved: boolean
@@ -881,9 +885,66 @@ export default function BeatmapEditor() {
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
   const [scrollSpeed, setScrollSpeed] = useState(450)
-  const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+  const [tool, setTool] = useState<'select' | 'note'>('select')
+  const [noteToolLane, setNoteToolLane] = useState(0)  // lane chosen for click-to-place (0–4)
+  // Undo/redo history. Each entry is a snapshot of `notes` (plus the active
+  // section name so undo across difficulty switches is safe). We keep up to
+  // 100 steps and push only on logical operations (add/delete/paste/move-end),
+  // not per-frame during drag.
+  const historyRef = useRef<{ activeName: string; notes: ChartNote[] }[]>([])
+  const futureRef = useRef<{ activeName: string; notes: ChartNote[] }[]>([])
+  const clipboardRef = useRef<ChartNote[]>([])
+  // Bumped to force a re-render when undo/redo state changes (so the toolbar
+  // buttons enable/disable). The arrays themselves live in refs.
+  const [, setHistoryTick] = useState(0)
 
   const audioSrc = `/api/tracks/${trackId}/beatmaps/${beatmapId}/download/song.ogg`
+
+  // Push the current notes snapshot onto the undo stack and apply the new one.
+  // Use this for any change the user would expect Ctrl+Z to revert: add, delete,
+  // paste, drag-end, arrow-nudge, sustain-toggle. Avoid pushing on every frame
+  // mid-drag (handleMouseMove writes through directly).
+  const commitNotes = useCallback((nextNotes: ChartNote[]) => {
+    setChart((prev) => {
+      if (!prev) return prev
+      historyRef.current.push({ activeName: prev.activeName, notes: prev.notes })
+      if (historyRef.current.length > 100) historyRef.current.shift()
+      futureRef.current = []
+      setHistoryTick((n) => n + 1)
+      return { ...prev, notes: nextNotes }
+    })
+    setDirty(true)
+  }, [])
+
+  const undo = useCallback(() => {
+    setChart((prev) => {
+      if (!prev) return prev
+      const last = historyRef.current.pop()
+      if (!last) return prev
+      // Only restore if the snapshot is for the currently active section. If
+      // the user switched difficulty after the change, we silently skip rather
+      // than corrupt the wrong section.
+      if (last.activeName !== prev.activeName) return prev
+      futureRef.current.push({ activeName: prev.activeName, notes: prev.notes })
+      setHistoryTick((n) => n + 1)
+      return { ...prev, notes: last.notes }
+    })
+    setDirty(true)
+  }, [])
+
+  const redo = useCallback(() => {
+    setChart((prev) => {
+      if (!prev) return prev
+      const next = futureRef.current.pop()
+      if (!next) return prev
+      if (next.activeName !== prev.activeName) return prev
+      historyRef.current.push({ activeName: prev.activeName, notes: prev.notes })
+      setHistoryTick((n) => n + 1)
+      return { ...prev, notes: next.notes }
+    })
+    setDirty(true)
+  }, [])
 
   // Lock body scroll while editor is mounted
   useEffect(() => {
@@ -1205,7 +1266,7 @@ export default function BeatmapEditor() {
         ctx.fillRect(x - LANE_W * 0.1, y - tailLen, LANE_W * 0.2, tailLen)
       }
 
-      const isSelected = selectedId === i
+      const isSelected = selectedIds.has(i)
       ctx.beginPath()
       ctx.arc(x, y, NOTE_R, 0, Math.PI * 2)
       ctx.fillStyle = LANE_FILL[n.lane]
@@ -1213,6 +1274,23 @@ export default function BeatmapEditor() {
       ctx.lineWidth = isSelected ? 4 : 2
       ctx.strokeStyle = isSelected ? '#ffffff' : '#000000'
       ctx.stroke()
+    }
+
+    // Note-tool ghost: when the user is in click-to-place mode, render a
+    // translucent circle in the selected lane at the snapped tick under the
+    // playhead so it's clear *where* a click will drop a note.
+    if (tool === 'note' && chart) {
+      const ghostLane = noteToolLane
+      const x = (ghostLane + 0.5) * LANE_W
+      ctx.beginPath()
+      ctx.arc(x, HIT, NOTE_R, 0, Math.PI * 2)
+      ctx.fillStyle = LANE_FILL[ghostLane] + '55'
+      ctx.fill()
+      ctx.strokeStyle = '#ffffff'
+      ctx.setLineDash([4, 4])
+      ctx.lineWidth = 1.5
+      ctx.stroke()
+      ctx.setLineDash([])
     }
 
     // Lane labels at bottom — drum-type or colour name + colour swatch underneath
@@ -1236,15 +1314,24 @@ export default function BeatmapEditor() {
     const fmt = (t: number) =>
       `${Math.floor(t / 60)}:${Math.floor(t % 60).toString().padStart(2, '0')}.${Math.floor((t % 1) * 100).toString().padStart(2, '0')}`
     ctx.fillText(`t = ${fmt(currentTime)}`, 12, 22)
-    if (selectedId !== null && chart.notes[selectedId]) {
-      const sel = chart.notes[selectedId]
-      ctx.fillText(
-        `selected: ${laneLabels[sel.lane] ?? '?'} · tick ${sel.tick} · sustain ${sel.sustain}`,
-        12,
-        42,
-      )
+    if (selectedIds.size === 1) {
+      const onlyId = selectedIds.values().next().value as number
+      const sel = chart.notes[onlyId]
+      if (sel) {
+        ctx.fillText(
+          `selected: ${laneLabels[sel.lane] ?? '?'} · tick ${sel.tick} · sustain ${sel.sustain}`,
+          12,
+          42,
+        )
+      }
+    } else if (selectedIds.size > 1) {
+      ctx.fillText(`${selectedIds.size} notes selected`, 12, 42)
     }
-  }, [chart, currentTime, scrollSpeed, selectedId, snapDivisor, isDrums, laneLabels])
+    if (tool === 'note') {
+      ctx.fillStyle = '#a78bfa'
+      ctx.fillText(`Note tool · lane ${noteToolLane + 1} (${laneLabels[noteToolLane] ?? ''})`, 12, 62)
+    }
+  }, [chart, currentTime, scrollSpeed, selectedIds, snapDivisor, isDrums, laneLabels, tool, noteToolLane])
 
   // Resize canvas backing store on container size change
   useEffect(() => {
@@ -1306,12 +1393,58 @@ export default function BeatmapEditor() {
     if (!chart) return
     const { cx, cy } = canvasToCoords(e)
     const id = findNoteAt(cx, cy)
-    if (id === null) {
-      setSelectedId(null)
+
+    // Click on existing note: select / shift-toggle, then start a group drag.
+    if (id !== null) {
+      const orig = chart.notes[id]
+      if (!orig) return
+      if (e.shiftKey || e.ctrlKey || e.metaKey) {
+        setSelectedIds((prev) => {
+          const next = new Set(prev)
+          if (next.has(id)) next.delete(id)
+          else next.add(id)
+          return next
+        })
+      } else if (!selectedIds.has(id)) {
+        setSelectedIds(new Set([id]))
+      }
+      // Build the drag snapshot from the post-update selection: include the
+      // clicked note even if the state update above hasn't flushed yet.
+      const dragIds = new Set(selectedIds)
+      if (e.shiftKey || e.ctrlKey || e.metaKey) {
+        if (dragIds.has(id)) dragIds.delete(id); else dragIds.add(id)
+      } else if (!dragIds.has(id)) {
+        dragIds.clear(); dragIds.add(id)
+      }
+      const snapshot = new Map<number, { tick: number; lane: number }>()
+      dragIds.forEach((i) => {
+        const n = chart.notes[i]
+        if (n) snapshot.set(i, { tick: n.tick, lane: n.lane })
+      })
+      dragRef.current = { anchorId: id, snapshot, startX: cx, startY: cy, moved: false }
       return
     }
-    setSelectedId(id)
-    dragRef.current = { id, startX: cx, startY: cy, moved: false }
+
+    // Note tool: click on empty area drops a new note in the chosen lane at
+    // the snapped tick under the cursor. The new note becomes the only
+    // selection so further nudges/deletes are scoped to it.
+    if (tool === 'note') {
+      const canvas = canvasRef.current!
+      const HIT = canvas.height - 110
+      const targetSec = currentTime + (HIT - cy) / scrollSpeed
+      const targetTickRaw = Math.max(0, (targetSec * chart.bpm * chart.resolution) / 60)
+      const snapTicks = Math.max(1, Math.round(chart.resolution / snapDivisor))
+      const newTick = Math.round(targetTickRaw / snapTicks) * snapTicks
+      const newNote: ChartNote = { tick: newTick, lane: noteToolLane, sustain: 0 }
+      const next = [...chart.notes, newNote].sort((a, b) => a.tick - b.tick || a.lane - b.lane)
+      const newIdx = next.findIndex((n) => n === newNote)
+      commitNotes(next)
+      setSelectedIds(new Set([newIdx]))
+      return
+    }
+
+    // Click on empty space in select tool: clear selection.
+    setSelectedIds(new Set())
   }
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -1326,23 +1459,55 @@ export default function BeatmapEditor() {
     const HIT = canvas.height - 110
     const GEM_W = canvas.width * 0.64
     const LANE_W = GEM_W / 5
-    const newLane = Math.max(0, Math.min(4, Math.floor(cx / LANE_W)))
+    const anchor = dragRef.current.snapshot.get(dragRef.current.anchorId)
+    if (!anchor) return
+
+    const newAnchorLane = Math.max(0, Math.min(4, Math.floor(cx / LANE_W)))
     const targetSec = currentTime + (HIT - cy) / scrollSpeed
     const targetTickRaw = Math.max(0, (targetSec * chart.bpm * chart.resolution) / 60)
     const snapTicks = Math.max(1, Math.round(chart.resolution / snapDivisor))
-    const newTick = Math.round(targetTickRaw / snapTicks) * snapTicks
+    const newAnchorTick = Math.round(targetTickRaw / snapTicks) * snapTicks
 
-    const idx = dragRef.current.id
-    const orig = chart.notes[idx]
-    if (!orig) return
-    if (orig.tick === newTick && orig.lane === newLane) return
-    const next = [...chart.notes]
-    next[idx] = { ...orig, tick: newTick, lane: newLane }
+    const tickDelta = newAnchorTick - anchor.tick
+    const laneDelta = newAnchorLane - anchor.lane
+
+    const next = chart.notes.slice()
+    let touched = false
+    dragRef.current.snapshot.forEach((orig, idx) => {
+      const cur = next[idx]
+      if (!cur) return
+      const proposedTick = Math.max(0, orig.tick + tickDelta)
+      const proposedLane = Math.max(0, Math.min(4, orig.lane + laneDelta))
+      if (cur.tick !== proposedTick || cur.lane !== proposedLane) {
+        next[idx] = { ...cur, tick: proposedTick, lane: proposedLane }
+        touched = true
+      }
+    })
+    if (!touched) return
+    // Mid-drag updates bypass the history stack — we only commit a single
+    // snapshot in handleMouseUp so undo reverts the whole drag at once.
     setChart({ ...chart, notes: next })
     setDirty(true)
   }
 
   const handleMouseUp = () => {
+    if (dragRef.current?.moved) {
+      // Push a single history entry capturing the pre-drag positions so undo
+      // returns the group to where the drag started.
+      setChart((prev) => {
+        if (!prev || !dragRef.current) return prev
+        const restored = prev.notes.slice()
+        dragRef.current.snapshot.forEach((orig, idx) => {
+          const cur = restored[idx]
+          if (cur) restored[idx] = { ...cur, tick: orig.tick, lane: orig.lane }
+        })
+        historyRef.current.push({ activeName: prev.activeName, notes: restored })
+        if (historyRef.current.length > 100) historyRef.current.shift()
+        futureRef.current = []
+        setHistoryTick((n) => n + 1)
+        return prev
+      })
+    }
     dragRef.current = null
   }
 
@@ -1352,41 +1517,122 @@ export default function BeatmapEditor() {
       if (!chart) return
       const target = e.target as HTMLElement | null
       if (target && (target.tagName === 'INPUT' || target.tagName === 'SELECT' || target.tagName === 'TEXTAREA')) return
+
+      const isCtrl = e.ctrlKey || e.metaKey
+
+      // Undo / redo first: they don't depend on selection.
+      if (isCtrl && (e.key === 'z' || e.key === 'Z')) {
+        e.preventDefault()
+        if (e.shiftKey) redo(); else undo()
+        return
+      }
+      if (isCtrl && (e.key === 'y' || e.key === 'Y')) {
+        e.preventDefault()
+        redo()
+        return
+      }
+
+      // Tool switching: 1 = select, 2 = note. Lane keys (qwert / 12345 in note
+      // mode) pick the lane the next click drops into.
+      if (e.key === '1' && !isCtrl) { setTool('select'); e.preventDefault(); return }
+      if (e.key === '2' && !isCtrl) { setTool('note'); e.preventDefault(); return }
+
       if (e.code === 'Space') {
         e.preventDefault()
         const a = audioRef.current
         if (a) { if (a.paused) a.play(); else a.pause() }
         return
       }
-      if (selectedId === null) return
-      const n = chart.notes[selectedId]
-      if (!n) return
-      const stepTicks = Math.max(1, Math.round(chart.resolution / snapDivisor))
-      let updated: ChartNote | null = null
-      if (e.key === 'ArrowLeft') updated = { ...n, tick: Math.max(0, n.tick - stepTicks) }
-      else if (e.key === 'ArrowRight') updated = { ...n, tick: n.tick + stepTicks }
-      else if (e.key === 'ArrowUp') updated = { ...n, lane: Math.min(4, n.lane + 1) }
-      else if (e.key === 'ArrowDown') updated = { ...n, lane: Math.max(0, n.lane - 1) }
-      else if (e.key === 'h' || e.key === 'H') updated = { ...n, sustain: n.sustain > 0 ? 0 : chart.resolution }
-      else if (e.key === 'Delete' || e.key === 'Backspace') {
+
+      // Copy / cut: capture selected notes with ticks made relative to the
+      // earliest selected note so paste can drop them at the playhead.
+      if (isCtrl && (e.key === 'c' || e.key === 'C')) {
+        if (selectedIds.size === 0) return
+        const sel = Array.from(selectedIds).map((i) => chart.notes[i]).filter(Boolean)
+        const minTick = Math.min(...sel.map((n) => n.tick))
+        clipboardRef.current = sel.map((n) => ({ ...n, tick: n.tick - minTick }))
         e.preventDefault()
-        const next = chart.notes.filter((_, i) => i !== selectedId)
-        setChart({ ...chart, notes: next })
-        setSelectedId(null)
-        setDirty(true)
         return
       }
-      if (updated) {
+      if (isCtrl && (e.key === 'x' || e.key === 'X')) {
+        if (selectedIds.size === 0) return
+        const sel = Array.from(selectedIds).map((i) => chart.notes[i]).filter(Boolean)
+        const minTick = Math.min(...sel.map((n) => n.tick))
+        clipboardRef.current = sel.map((n) => ({ ...n, tick: n.tick - minTick }))
+        const next = chart.notes.filter((_, i) => !selectedIds.has(i))
+        commitNotes(next)
+        setSelectedIds(new Set())
         e.preventDefault()
-        const next = [...chart.notes]
-        next[selectedId] = updated
-        setChart({ ...chart, notes: next })
-        setDirty(true)
+        return
+      }
+      if (isCtrl && (e.key === 'v' || e.key === 'V')) {
+        if (clipboardRef.current.length === 0) return
+        const playheadTickRaw = (currentTime * chart.bpm * chart.resolution) / 60
+        const snapTicks = Math.max(1, Math.round(chart.resolution / snapDivisor))
+        const baseTick = Math.max(0, Math.round(playheadTickRaw / snapTicks) * snapTicks)
+        const pasted = clipboardRef.current.map((n) => ({
+          ...n,
+          tick: baseTick + n.tick,
+        }))
+        const merged = [...chart.notes, ...pasted].sort((a, b) => a.tick - b.tick || a.lane - b.lane)
+        // Reselect the freshly pasted notes by identity. We tagged none so
+        // identify them by membership in `pasted`.
+        const pastedSet = new Set(pasted)
+        commitNotes(merged)
+        const newSel = new Set<number>()
+        merged.forEach((n, i) => { if (pastedSet.has(n)) newSel.add(i) })
+        setSelectedIds(newSel)
+        e.preventDefault()
+        return
+      }
+      if (isCtrl && (e.key === 'a' || e.key === 'A')) {
+        e.preventDefault()
+        setSelectedIds(new Set(chart.notes.map((_, i) => i)))
+        return
+      }
+
+      // Selection-scoped operations below this point.
+      if (selectedIds.size === 0) return
+      const stepTicks = Math.max(1, Math.round(chart.resolution / snapDivisor))
+
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault()
+        const next = chart.notes.filter((_, i) => !selectedIds.has(i))
+        commitNotes(next)
+        setSelectedIds(new Set())
+        return
+      }
+
+      const transform = (n: ChartNote): ChartNote | null => {
+        if (e.key === 'ArrowLeft') return { ...n, tick: Math.max(0, n.tick - stepTicks) }
+        if (e.key === 'ArrowRight') return { ...n, tick: n.tick + stepTicks }
+        if (e.key === 'ArrowUp') return { ...n, lane: Math.min(4, n.lane + 1) }
+        if (e.key === 'ArrowDown') return { ...n, lane: Math.max(0, n.lane - 1) }
+        if (e.key === 'h' || e.key === 'H') return { ...n, sustain: n.sustain > 0 ? 0 : chart.resolution }
+        return null
+      }
+
+      // Apply transform to all selected. If any change, commit a single
+      // history entry covering the whole batch.
+      let anyChanged = false
+      const next = chart.notes.slice()
+      selectedIds.forEach((idx) => {
+        const cur = next[idx]
+        if (!cur) return
+        const u = transform(cur)
+        if (u && (u.tick !== cur.tick || u.lane !== cur.lane || u.sustain !== cur.sustain)) {
+          next[idx] = u
+          anyChanged = true
+        }
+      })
+      if (anyChanged) {
+        e.preventDefault()
+        commitNotes(next)
       }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [chart, selectedId, snapDivisor])
+  }, [chart, selectedIds, snapDivisor, commitNotes, undo, redo, currentTime])
 
   const switchDifficulty = (name: string) => {
     if (!chart || name === chart.activeName) return
@@ -1405,7 +1651,10 @@ export default function BeatmapEditor() {
     const newNotes = parseSectionNotes(newFull, name)
     // Tutorial section is shared across difficulties — just keep current state.
     setChart({ ...chart, fullText: newFull, activeName: name, notes: newNotes })
-    setSelectedId(null)
+    setSelectedIds(new Set())
+    historyRef.current = []
+    futureRef.current = []
+    setHistoryTick((n) => n + 1)
   }
 
   const togglePlay = () => {
@@ -1968,6 +2217,77 @@ export default function BeatmapEditor() {
               }}
               className="w-full accent-jam-500"
             />
+          </section>
+
+          <section>
+            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Tools</h3>
+            <div className="grid grid-cols-2 gap-1 mb-2">
+              <button
+                onClick={() => setTool('select')}
+                className={`px-2 py-1.5 rounded text-xs font-medium transition-colors ${
+                  tool === 'select'
+                    ? 'bg-jam-600 text-white'
+                    : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+                }`}
+                title="Select tool (1) — click notes, shift-click to add to selection"
+              >
+                ▣ Select <span className="text-[10px] opacity-60">(1)</span>
+              </button>
+              <button
+                onClick={() => setTool('note')}
+                className={`px-2 py-1.5 rounded text-xs font-medium transition-colors ${
+                  tool === 'note'
+                    ? 'bg-jam-600 text-white'
+                    : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+                }`}
+                title="Note tool (2) — click on the runway to drop a note in the chosen lane"
+              >
+                ✚ Note <span className="text-[10px] opacity-60">(2)</span>
+              </button>
+            </div>
+            {tool === 'note' && (
+              <div className="mb-2">
+                <span className="text-[11px] text-gray-500 block mb-1">Lane to drop</span>
+                <div className="grid grid-cols-5 gap-1">
+                  {[0, 1, 2, 3, 4].map((lane) => (
+                    <button
+                      key={lane}
+                      onClick={() => setNoteToolLane(lane)}
+                      className={`px-1 py-1.5 rounded text-[10px] font-mono transition-colors ${
+                        noteToolLane === lane
+                          ? 'ring-2 ring-white text-white'
+                          : 'text-gray-300 hover:opacity-80'
+                      }`}
+                      style={{ backgroundColor: LANE_FILL[lane] }}
+                      title={laneLabels[lane]}
+                    >
+                      {laneLabels[lane]}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div className="flex items-stretch gap-1">
+              <button
+                onClick={undo}
+                disabled={historyRef.current.length === 0}
+                className="flex-1 px-2 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-30 text-gray-300 rounded text-[11px] transition-colors"
+                title="Undo (Ctrl+Z)"
+              >
+                ↶ Undo
+              </button>
+              <button
+                onClick={redo}
+                disabled={futureRef.current.length === 0}
+                className="flex-1 px-2 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-30 text-gray-300 rounded text-[11px] transition-colors"
+                title="Redo (Ctrl+Shift+Z or Ctrl+Y)"
+              >
+                ↷ Redo
+              </button>
+            </div>
+            <p className="text-[10px] text-gray-600 mt-1.5 leading-snug">
+              Shift-click to multi-select. Ctrl/Cmd + C/X/V copy, cut, paste at playhead. Ctrl+A selects all.
+            </p>
           </section>
 
           <section>
