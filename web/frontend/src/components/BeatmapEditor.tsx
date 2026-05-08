@@ -29,6 +29,12 @@ interface TutorialVoEvent {
   text: string           // optional draft text used to (re)generate the clip
   engine: VoEngine       // which TTS engine generated the file (defaults to chatterbox)
   voiceId: string        // when engine === 'elevenlabs'; '' means inherit track default
+  // Optional offsets into a collated audio file. When set, the engine plays
+  // file[startMs : startMs+durationMs] instead of the whole clip — used by
+  // the synthetic-tutorial generator that concats every VO into a single
+  // vo/tutorial.ogg. undefined means whole-file playback.
+  startMs?: number
+  durationMs?: number
 }
 
 interface TutorialStepEvent {
@@ -233,6 +239,8 @@ function parseTutorialSection(text: string): TutorialEvent[] {
       let textArg = ''
       let engineArg: VoEngine = 'chatterbox'
       let voiceArg = ''
+      let startMsArg: number | undefined
+      let durationMsArg: number | undefined
       for (const t of tokens.slice(2)) {
         if (t.startsWith('text=')) textArg = t.slice(5)
         else if (t.startsWith('engine=')) {
@@ -240,6 +248,14 @@ function parseTutorialSection(text: string): TutorialEvent[] {
           if (v === 'elevenlabs' || v === 'chatterbox') engineArg = v
         }
         else if (t.startsWith('voice=')) voiceArg = t.slice(6)
+        else if (t.startsWith('start_ms=')) {
+          const n = Number(t.slice(9))
+          if (Number.isFinite(n) && n >= 0) startMsArg = n
+        }
+        else if (t.startsWith('duration_ms=')) {
+          const n = Number(t.slice(12))
+          if (Number.isFinite(n) && n >= 0) durationMsArg = n
+        }
       }
       events.push({
         kind: 'vo',
@@ -249,6 +265,8 @@ function parseTutorialSection(text: string): TutorialEvent[] {
         text: textArg,
         engine: engineArg,
         voiceId: voiceArg,
+        startMs: startMsArg,
+        durationMs: durationMsArg,
       })
     } else if (kind === 'STEP') {
       const stepId = tokens[1] || ''
@@ -314,7 +332,12 @@ function serializeTutorialSection(events: TutorialEvent[]): string {
       const t = e.text ? ` text="${e.text.replace(/"/g, "'")}"` : ''
       const engine = e.engine && e.engine !== 'chatterbox' ? ` engine=${e.engine}` : ''
       const voice = e.voiceId ? ` voice=${e.voiceId}` : ''
-      return `  ${e.tick} = VO "${e.file}"${t}${engine}${voice}`
+      // start_ms / duration_ms are emitted right after the file path, before
+      // free-form fields like text=, so engine parsers can short-circuit on
+      // the offset before scanning the rest of the line.
+      const startMs = e.startMs !== undefined ? ` start_ms=${e.startMs}` : ''
+      const durationMs = e.durationMs !== undefined ? ` duration_ms=${e.durationMs}` : ''
+      return `  ${e.tick} = VO "${e.file}"${startMs}${durationMs}${t}${engine}${voice}`
     }
     if (e.kind === 'step') {
       return (
@@ -2316,9 +2339,26 @@ export default function BeatmapEditor() {
       if (currentTime >= voSec && !firedVosRef.current.has(ev.id)) {
         const a = voAudiosRef.current.get(ev.id)
         if (a) {
-          a.currentTime = Math.max(0, currentTime - voSec)
+          // Collated-file VOs: seek into the slice the chart says this VO
+          // occupies. If the playhead is already past voSec by some delta,
+          // start that much further into the slice so a scrub-resume picks
+          // up where it would have been.
+          const startSec = (ev.startMs ?? 0) / 1000
+          a.currentTime = startSec + Math.max(0, currentTime - voSec)
           a.play().catch(() => { /* autoplay blocked; user must interact again */ })
           firedVosRef.current.add(ev.id)
+          // Auto-stop at the end of the slice so we don't bleed into the
+          // next VO that lives further down the same collated file.
+          if (ev.durationMs && ev.durationMs > 0) {
+            const endSec = startSec + ev.durationMs / 1000
+            const onTick = () => {
+              if (a.currentTime >= endSec - 0.01) {
+                a.pause()
+                a.removeEventListener('timeupdate', onTick)
+              }
+            }
+            a.addEventListener('timeupdate', onTick)
+          }
         }
       }
     }
@@ -2403,7 +2443,10 @@ export default function BeatmapEditor() {
         throw new Error(err.detail || `TTS failed (${res.status})`)
       }
       const data = await res.json()
-      updateTutorialEvent(ev.id, { file: data.rel_path })
+      // Re-synthesizing replaces the audio file, so any prior collated-slice
+      // offsets no longer apply — clear them to fall back to whole-file
+      // playback for this freshly minted clip.
+      updateTutorialEvent(ev.id, { file: data.rel_path, startMs: undefined, durationMs: undefined })
     } catch (e) {
       window.alert((e as Error).message)
     } finally {
@@ -3031,6 +3074,54 @@ export default function BeatmapEditor() {
                             rows={2}
                             className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-200 resize-y focus:outline-none focus:border-sky-500"
                           />
+                          {/* Collated-file slice editor: when start_ms /
+                              duration_ms are set, the engine plays only that
+                              window of `file`. Shown when EITHER field is
+                              present, plus a one-click "remove offsets"
+                              shortcut so users can collapse back to whole-
+                              file playback. */}
+                          {(ev.startMs !== undefined || ev.durationMs !== undefined) && (
+                            <div className="flex items-center gap-1.5 text-[10px] text-gray-400 font-mono">
+                              <span className="text-sky-500/80 shrink-0">slice</span>
+                              <input
+                                type="number"
+                                step={10}
+                                min={0}
+                                value={ev.startMs ?? 0}
+                                onChange={(e) => updateTutorialEvent(ev.id, {
+                                  startMs: Math.max(0, Number(e.target.value) || 0),
+                                })}
+                                className="w-16 bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-[10px] text-gray-300"
+                                title="Start offset (ms) into the audio file"
+                              />
+                              <span>+</span>
+                              <input
+                                type="number"
+                                step={10}
+                                min={0}
+                                value={ev.durationMs ?? 0}
+                                onChange={(e) => updateTutorialEvent(ev.id, {
+                                  durationMs: Math.max(0, Number(e.target.value) || 0),
+                                })}
+                                className="w-16 bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-[10px] text-gray-300"
+                                title="Slice length (ms)"
+                              />
+                              <span className="text-gray-600">ms</span>
+                              <span className="text-gray-500 ml-1">
+                                ({((ev.startMs ?? 0) / 1000).toFixed(2)}s – {(((ev.startMs ?? 0) + (ev.durationMs ?? 0)) / 1000).toFixed(2)}s)
+                              </span>
+                              <button
+                                onClick={() => updateTutorialEvent(ev.id, {
+                                  startMs: undefined,
+                                  durationMs: undefined,
+                                })}
+                                className="ml-auto px-1.5 py-0.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-[10px] text-gray-400 hover:text-gray-200"
+                                title="Drop the offsets and play the whole file"
+                              >
+                                clear
+                              </button>
+                            </div>
+                          )}
                           <div className="flex items-center gap-2 text-[10px] text-gray-400">
                             <label className="flex items-center gap-1 cursor-pointer">
                               <input
