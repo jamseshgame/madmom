@@ -1,30 +1,48 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import StemPlayer from './StemPlayer.tsx'
 import BeatmapStatsModal, { BeatmapRecord } from './BeatmapStatsModal.tsx'
 import LyricsButtons from './LyricsButtons'
-import VocalBeatmapTracker from './VocalBeatmapTracker'
+import VocalmapButtons from './VocalmapButtons'
 
 interface StemResultProps {
   jobId: string
   metadata: Record<string, unknown>
 }
 
-const STEM_LABELS: Record<string, { label: string; color: string }> = {
-  vocals: { label: 'Vocals', color: 'text-pink-400' },
-  drums: { label: 'Drums', color: 'text-amber-400' },
-  bass: { label: 'Bass', color: 'text-green-400' },
-  guitar: { label: 'Guitar', color: 'text-orange-400' },
-  piano: { label: 'Piano', color: 'text-violet-400' },
-  other: { label: 'Other', color: 'text-blue-400' },
-  rhythm: { label: 'Bass', color: 'text-green-400' },
-  crowd: { label: 'Crowd', color: 'text-blue-400' },
-  song: { label: 'Master Mix', color: 'text-gray-300' },
-  no_vocals: { label: 'Instrumental', color: 'text-cyan-400' },
-  no_drums: { label: 'No Drums', color: 'text-cyan-400' },
-  no_bass: { label: 'No Bass', color: 'text-cyan-400' },
-  no_guitar: { label: 'No Guitar', color: 'text-cyan-400' },
-  no_piano: { label: 'No Piano', color: 'text-cyan-400' },
-  no_other: { label: 'No Other', color: 'text-cyan-400' },
+const STEM_COLORS: Record<string, string> = {
+  vocals: 'text-pink-400',
+  drums: 'text-amber-400',
+  bass: 'text-green-400',
+  rhythm: 'text-green-400',
+  guitar: 'text-orange-400',
+  piano: 'text-violet-400',
+  other: 'text-blue-400',
+  crowd: 'text-blue-400',
+  song: 'text-gray-300',
+  no_vocals: 'text-cyan-400',
+  no_drums: 'text-cyan-400',
+  no_bass: 'text-cyan-400',
+  no_guitar: 'text-cyan-400',
+  no_piano: 'text-cyan-400',
+  no_other: 'text-cyan-400',
+}
+
+const STEM_LABELS: Record<string, string> = {
+  vocals: 'Vocals',
+  drums: 'Drums',
+  bass: 'Bass',
+  rhythm: 'Bass',
+  guitar: 'Guitar',
+  piano: 'Piano',
+  other: 'Other',
+  crowd: 'Crowd',
+  song: 'Master Mix',
+  no_vocals: 'Instrumental',
+  no_drums: 'No Drums',
+  no_bass: 'No Bass',
+  no_guitar: 'No Guitar',
+  no_piano: 'No Piano',
+  no_other: 'No Other',
 }
 
 // Keys that historically appeared in the stems map but aren't actual audio
@@ -175,8 +193,51 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
   const [iniSaveState, setIniSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [iniError, setIniError] = useState('')
   const [stemPeaks, setStemPeaks] = useState<Record<string, number[]> | null>(null)
-  const [vocalNotes, setVocalNotes] = useState<{ lyrics_etag?: string } | null>(null)
   const [vocalsStale, setVocalsStale] = useState(false)
+  const [selectedStems, setSelectedStems] = useState<Set<string>>(new Set())
+  const [hasVocalNotes, setHasVocalNotes] = useState(false)
+  const [batchError, setBatchError] = useState('')
+
+  const toggleSelectedStem = (stem: string) =>
+    setSelectedStems((prev) => {
+      const next = new Set(prev)
+      if (next.has(stem)) next.delete(stem)
+      else next.add(stem)
+      return next
+    })
+
+  const refetchHasVocalNotes = useCallback(async () => {
+    if (!jobId) { setHasVocalNotes(false); return }
+    try {
+      const r = await fetch(`/api/vocals?job_id=${jobId}`)
+      setHasVocalNotes(r.ok)
+    } catch {
+      setHasVocalNotes(false)
+    }
+  }, [jobId])
+
+  useEffect(() => { refetchHasVocalNotes() }, [refetchHasVocalNotes])
+
+  const deleteVocalNotes = async () => {
+    if (!jobId) return
+    if (!window.confirm('Delete the vocal beatmap for this track? Lyrics versions are kept.')) return
+    try {
+      const r = await fetch(`/api/vocals?job_id=${jobId}`, { method: 'DELETE' })
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}))
+        throw new Error(e.detail || `HTTP ${r.status}`)
+      }
+      setHasVocalNotes(false)
+    } catch (e) {
+      alert((e as Error).message)
+    }
+  }
+
+  const formatDate = (ts: number) =>
+    new Date(ts * 1000).toLocaleDateString(undefined, {
+      year: 'numeric', month: 'short', day: 'numeric',
+      hour: '2-digit', minute: '2-digit',
+    })
 
   // Fetch backend-precomputed waveform peaks once. If 404 (older job), each
   // StemPlayer falls back to its in-browser Web Audio decode.
@@ -205,7 +266,6 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
         .catch(() => null),
     ])
       .then(async ([lyrics, notes]) => {
-        setVocalNotes(notes)
         if (lyrics && notes?.lyrics_etag) {
           const canonical = JSON.stringify(lyrics, Object.keys(lyrics).sort())
           const buf = new TextEncoder().encode(canonical)
@@ -316,13 +376,13 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
   }
 
   const generateBeatmap = async (stem: string) => {
-    const info = STEM_LABELS[stem] || { label: stem }
+    const label = STEM_LABELS[stem] || stem
     setBeatmaps((prev) => ({ ...prev, [stem]: { jobId: '', state: 'generating' } }))
 
     const formData = new FormData()
     formData.append('stem_job_id', jobId)
     formData.append('stem', stem)
-    formData.append('title', `${trackName} (${info.label})`)
+    formData.append('title', `${trackName} (${label})`)
 
     try {
       const res = await fetch('/api/beatmap/from-stem', { method: 'POST', body: formData })
@@ -337,108 +397,140 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
     }
   }
 
-  const generateVocalBeatmap = async () => {
-    setBeatmaps((prev) => ({ ...prev, vocals: { jobId: '', state: 'generating' } }))
-    const meta = {
-      artist: songIni.artist || '',
-      title: songIni.name || '',
-      album: songIni.album || undefined,
-      duration_s: typeof metadata.duration === 'number' ? metadata.duration : undefined,
+  const generateSelected = async () => {
+    setBatchError('')
+    const targets = Array.from(selectedStems).filter(
+      (stem) => stem !== 'song' && stem !== 'vocals' && !NON_AUDIO_KEYS.has(stem) && !beatmaps[stem],
+    )
+    if (targets.length === 0) return
+    for (const stem of targets) {
+      await generateBeatmap(stem)
     }
-    try {
-      const res = await fetch(`/api/vocals/generate?job_id=${jobId}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(meta),
-      })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.detail || `HTTP ${res.status}`)
-      }
-      const { job_id } = await res.json()
-      setBeatmaps((prev) => ({ ...prev, vocals: { jobId: job_id, state: 'generating' } }))
-    } catch (e) {
-      console.error('vocal beatmap start failed:', e)
-      setBeatmaps((prev) => ({ ...prev, vocals: { jobId: '', state: 'error' } }))
-    }
+    setSelectedStems(new Set())
   }
+
+  const createdAt = typeof metadata.created_at === 'number' ? (metadata.created_at as number) : null
+  const modelName = (metadata.model as string) || ''
+  const outputFormat = (metadata.output_format as string) || ''
+  const meta = {
+    artist: (songIni.artist || '').trim(),
+    title: (songIni.name || '').trim(),
+    album: (songIni.album || '').trim() || undefined,
+    duration_s: typeof metadata.duration === 'number' ? metadata.duration : undefined,
+  }
+  const headerTitle = (() => {
+    const liveName = meta.title || trackName
+    return meta.artist ? `${meta.artist} — ${liveName}` : liveName
+  })()
 
   return (
     <div className="space-y-6">
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-6">
-        <h3 className="text-lg font-semibold text-jam-300 mb-1">
-          {metadata.model === 'manual' ? 'Conversion Complete' : 'Separation Complete'}
-        </h3>
-        <p className="text-sm text-gray-500 mb-5">{trackName}</p>
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+        <div className="flex items-start justify-between mb-4">
+          <div>
+            <h3 className="font-semibold text-gray-100 text-lg">{headerTitle}</h3>
+            <p className="text-xs text-gray-600 mt-0.5">
+              {createdAt ? formatDate(createdAt) : (metadata.model === 'manual' ? 'Conversion Complete' : 'Separation Complete')}
+              {modelName && <> &middot; {modelName}</>}
+              {outputFormat && <> &middot; {outputFormat.toUpperCase()}</>}
+            </p>
+          </div>
+        </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+        <div className="flex flex-col gap-2">
           {Object.entries(stems)
             .filter(([stem]) => !NON_AUDIO_KEYS.has(stem))
             .map(([stem]) => {
-            const info = STEM_LABELS[stem] || { label: stem, color: 'text-gray-300' }
+            const label = STEM_LABELS[stem] || stem
+            const color = STEM_COLORS[stem] || 'text-gray-300'
             const bm = beatmaps[stem]
             return (
               <div
                 key={stem}
-                className="bg-gray-800 border border-gray-700 rounded-lg p-4 flex flex-col items-stretch gap-2"
+                className="bg-gray-800 border border-gray-700 rounded-lg p-3 flex flex-col md:flex-row md:items-stretch gap-3 relative"
               >
-                <span className={`text-sm font-semibold text-center ${info.color}`}>{info.label}</span>
-                <StemPlayer src={`/api/stems/${jobId}/download/${stem}`} peaks={stemPeaks?.[stem] ?? null} />
-
-                {stem === 'vocals' && (
-                  <LyricsButtons
-                    scope={{ jobId }}
-                    hasVocals={true}
-                    meta={{
-                      artist: songIni.artist || '',
-                      title: songIni.name || '',
-                      album: songIni.album || undefined,
-                      duration_s: typeof metadata.duration === 'number' ? metadata.duration : undefined,
-                    }}
-                  />
-                )}
-
-                {/* Beatmap generation */}
-                {stem === 'vocals' && vocalsStale && (
-                  <div className="bg-amber-900/40 border border-amber-800 rounded p-2 text-xs text-amber-200">
-                    Lyrics changed since vocal beatmap was generated. Click <span className="font-medium">Re-generate</span> to refresh.
-                  </div>
-                )}
-                {!bm && stem !== 'song' && (
-                  <button
-                    onClick={() => stem === 'vocals' ? generateVocalBeatmap() : generateBeatmap(stem)}
-                    className="px-3 py-1.5 bg-green-700/60 hover:bg-green-600/70 text-green-200 rounded text-xs font-medium transition-colors w-full"
-                  >
-                    {stem === 'vocals' && vocalNotes ? 'Re-generate vocals' : 'Generate Beatmap'}
-                  </button>
-                )}
-
-                {bm?.state === 'generating' && !bm.jobId && (
-                  <div className="flex items-center gap-1.5 mt-1">
-                    <div className="animate-spin h-3 w-3 border-2 border-jam-400 border-t-transparent rounded-full" />
-                    <span className="text-xs text-gray-500">Starting...</span>
-                  </div>
-                )}
-
-                {bm?.state === 'generating' && bm.jobId && stem === 'vocals' && (
-                  <div className="w-full">
-                    <VocalBeatmapTracker
-                      beatmapJobId={bm.jobId}
-                      onCancelled={() => setBeatmaps((prev) => {
-                        const next = { ...prev }
-                        delete next.vocals
-                        return next
-                      })}
-                      onDone={() => setBeatmaps((prev) => ({
-                        ...prev,
-                        vocals: { ...(prev.vocals ?? { jobId: bm.jobId }), state: 'done' },
-                      }))}
+                {/* Identity column: checkbox + stem label */}
+                <div className="md:w-24 md:shrink-0 flex md:flex-col items-center md:justify-center gap-2 md:gap-1.5">
+                  {stem !== 'song' ? (
+                    <input
+                      type="checkbox"
+                      checked={selectedStems.has(stem)}
+                      onChange={() => toggleSelectedStem(stem)}
+                      className="h-4 w-4 rounded border-gray-600 bg-gray-900 accent-jam-500 cursor-pointer shrink-0"
+                      aria-label={`Select ${label} for batch beatmap`}
+                      title="Select for batch beatmap generation"
                     />
-                  </div>
-                )}
+                  ) : (
+                    <div className="h-4 w-4 shrink-0" />
+                  )}
+                  <span className={`text-sm font-semibold ${color}`}>{label}</span>
+                </div>
 
-                {bm?.state === 'generating' && bm.jobId && stem !== 'vocals' && (
-                  <div className="w-full">
+                {/* Waveform column */}
+                <div className="flex-1 min-w-0 flex items-center">
+                  <StemPlayer src={`/api/stems/${jobId}/download/${stem}`} peaks={stemPeaks?.[stem] ?? null} />
+                </div>
+
+                {/* Actions column */}
+                <div className="md:w-80 md:shrink-0 flex flex-col gap-1.5">
+                  {stem === 'vocals' && (
+                    <>
+                      <LyricsButtons scope={{ jobId }} hasVocals={true} meta={meta} />
+                      <VocalmapButtons
+                        scope={{ jobId }}
+                        meta={{ artist: meta.artist, title: meta.title, album: meta.album }}
+                        hasActive={hasVocalNotes}
+                        onActiveChange={refetchHasVocalNotes}
+                      />
+                      {hasVocalNotes && (
+                        <button
+                          onClick={deleteVocalNotes}
+                          className="self-end px-1.5 py-0.5 bg-red-900/40 hover:bg-red-800/60 border border-red-800/60 text-red-300 hover:text-red-200 rounded text-[10px] transition-colors"
+                          title="Delete vocal_notes.json for this track"
+                          aria-label="Delete vocalmap"
+                        >
+                          delete vocalmap
+                        </button>
+                      )}
+                      {vocalsStale && (
+                        <div className="bg-amber-900/40 border border-amber-800 rounded p-2 text-xs text-amber-200">
+                          Lyrics changed since vocal beatmap was generated. Re-generate to refresh.
+                        </div>
+                      )}
+                    </>
+                  )}
+
+                  {stem !== 'vocals' && (
+                    <div className="flex flex-wrap gap-1.5 justify-center items-center">
+                      {stem === 'song' ? (
+                        <a
+                          href={`/api/stems/${jobId}/download/${stem}`}
+                          className="px-2 py-1 bg-gray-700 text-gray-300 hover:bg-gray-600 rounded text-xs font-medium transition-colors"
+                        >
+                          Download
+                        </a>
+                      ) : (
+                        !bm && (
+                          <button
+                            onClick={() => generateBeatmap(stem)}
+                            className="px-2 py-1 bg-green-700/60 hover:bg-green-600/70 text-green-200 rounded text-xs font-medium transition-colors"
+                            title="Generate beatmap with current track metadata"
+                          >
+                            Generate Beatmap
+                          </button>
+                        )
+                      )}
+                    </div>
+                  )}
+
+                  {bm?.state === 'generating' && !bm.jobId && stem !== 'vocals' && (
+                    <div className="flex items-center gap-1.5 mt-1">
+                      <div className="animate-spin h-3 w-3 border-2 border-jam-400 border-t-transparent rounded-full" />
+                      <span className="text-xs text-gray-500">Starting...</span>
+                    </div>
+                  )}
+
+                  {bm?.state === 'generating' && bm.jobId && stem !== 'vocals' && (
                     <StemBeatmapTracker
                       beatmapJobId={bm.jobId}
                       onCancelled={() => setBeatmaps((prev) => {
@@ -454,20 +546,39 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                                 stem,
                                 generated_at: Date.now() / 1000,
                                 folder_name: '',
-                                song_name: `${trackName} (${info.label})`,
+                                song_name: `${trackName} (${label})`,
                               })
                           : undefined
                       }
                     />
-                  </div>
-                )}
+                  )}
 
-                {bm?.state === 'error' && (
-                  <div className="text-xs text-red-400 mt-1">Failed</div>
-                )}
+                  {bm?.state === 'error' && (
+                    <div className="text-xs text-red-400 mt-1">Failed</div>
+                  )}
+                </div>
               </div>
             )
           })}
+        </div>
+
+        {/* Batch generate row */}
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="text-xs text-gray-500">
+            {selectedStems.size > 0
+              ? `${selectedStems.size} stem${selectedStems.size === 1 ? '' : 's'} selected`
+              : 'Tick stems above to queue multiple beatmap generations.'}
+          </div>
+          <div className="flex items-center gap-2">
+            {batchError && <span className="text-xs text-red-400">{batchError}</span>}
+            <button
+              onClick={generateSelected}
+              disabled={selectedStems.size === 0}
+              className="px-3 py-1.5 bg-jam-600 hover:bg-jam-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-md text-xs font-medium transition-colors"
+            >
+              Generate beatmap for {selectedStems.size || 'selected'} stem{selectedStems.size === 1 ? '' : 's'}
+            </button>
+          </div>
         </div>
       </div>
 
