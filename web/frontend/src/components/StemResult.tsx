@@ -626,7 +626,7 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                             className="flex-1 min-w-0 px-2 py-1 bg-green-900/30 hover:bg-green-800/50 border border-green-800/40 hover:border-green-700 rounded text-[11px] text-green-300 hover:text-green-200 flex items-center justify-between gap-2 transition-colors"
                             title={liveName ? `${liveName} · ${dateStr}` : 'View beatmap details'}
                           >
-                            <span className="truncate">⏺ {liveName || dateStr}</span>
+                            <span className="truncate">⏺ {dateStr}</span>
                             <span className="text-green-500/80 shrink-0">›</span>
                           </button>
                           <button
