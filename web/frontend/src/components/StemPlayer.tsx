@@ -118,13 +118,21 @@ export default function StemPlayer({
     const playRatio = duration > 0 ? currentTime / duration : 0
     const playX = Math.floor(playRatio * w)
 
+    // Normalize per-stem so the loudest peak fills the bar. Floor avoids
+    // amplifying near-silent buffers into noise.
+    let maxAmp = 0
+    for (let i = 0; i < peaks.length; i++) {
+      if (peaks[i] > maxAmp) maxAmp = peaks[i]
+    }
+    const scale = maxAmp > 0.01 ? 1 / maxAmp : 1
+
     // One vertical bar per pixel (or per bucket if we've got more pixels than buckets).
     const bars = Math.min(w, peaks.length)
     const barW = w / bars
     for (let i = 0; i < bars; i++) {
       const t = i / bars
       const peakIdx = Math.floor(t * peaks.length)
-      const amp = peaks[peakIdx]
+      const amp = Math.min(1, peaks[peakIdx] * scale)
       const barH = Math.max(1, amp * (h - 2))
       const x = i * barW
       const xPx = Math.floor(x)
@@ -167,7 +175,7 @@ export default function StemPlayer({
         >
           {playing ? <span className="tracking-tighter">❚❚</span> : <span className="ml-0.5">▶</span>}
         </button>
-        <div className="relative flex-1 h-7">
+        <div className="relative flex-1 h-12">
           <canvas
             ref={canvasRef}
             className={`w-full h-full ${duration ? 'cursor-pointer' : 'cursor-default'} ${peaksError ? 'opacity-40' : ''}`}
