@@ -104,9 +104,12 @@ TUTORIAL_LINES = [
 ]
 
 
-def build_chart_text() -> str:
+def build_chart_text(vo_offsets: dict[str, tuple[int, int]]) -> str:
     """Compose the .chart text including [Song], [SyncTrack], [Events],
-    [ExpertSingle], and [TutorialScript]."""
+    [ExpertSingle], and [TutorialScript].
+
+    vo_offsets: slug -> (start_ms, duration_ms) inside vo/tutorial.ogg.
+    """
     bpm_milli = int(BPM * 1000)
     lines: list[str] = []
 
@@ -178,7 +181,9 @@ def build_chart_text() -> str:
     lines.extend(note_lines)
     lines.append('}')
 
-    # [TutorialScript]: VO + STEP entries.
+    # [TutorialScript]: VO + STEP entries. VO entries point into a single
+    # collated vo/tutorial.ogg with start_ms / duration_ms offsets so the
+    # engine plays from the right slice without juggling N audio handles.
     lines.append('[TutorialScript]')
     lines.append('{')
     for entry in TUTORIAL_LINES:
@@ -186,9 +191,17 @@ def build_chart_text() -> str:
         if kind == 'vo':
             slug = entry[2]
             text = entry[3].replace('"', "'")
-            lines.append(
-                f'  {tick} = VO "vo/{slug}.ogg" text="{text}" engine=elevenlabs voice=""'
-            )
+            offsets = vo_offsets.get(slug)
+            if offsets is None:
+                # Fall back to whole-file playback if probing failed.
+                lines.append(
+                    f'  {tick} = VO "vo/tutorial.ogg" text="{text}" engine=elevenlabs voice=""'
+                )
+            else:
+                start_ms, duration_ms = offsets
+                lines.append(
+                    f'  {tick} = VO "vo/tutorial.ogg" start_ms={start_ms} duration_ms={duration_ms} text="{text}" engine=elevenlabs voice=""'
+                )
         elif kind == 'step':
             step_id = entry[2]
             fields = entry[3]
@@ -259,18 +272,111 @@ def build_note_lines() -> list[str]:
     return [f'  {tick} = N {lane} {sustain}' for (tick, lane, sustain) in notes]
 
 
-async def synth_vos(staging_dir: Path, voice_id: str) -> None:
-    """Synthesize every VO in TUTORIAL_LINES into staging_dir/vo/<slug>.ogg."""
-    vo_dir = staging_dir / 'vo'
+VO_GAP_MS = 250  # silence between clips so cues don't bleed into each other
+
+
+async def _probe_duration_ms(path: Path) -> int:
+    """Use ffprobe to read a clip's exact duration (ms). Falls back to 0
+    on probe failure so the caller can still build the chart."""
+    proc = await asyncio.create_subprocess_exec(
+        'ffprobe', '-v', 'error',
+        '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1',
+        str(path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return 0
+    try:
+        seconds = float(stdout.decode('utf-8', errors='replace').strip())
+        return max(0, int(round(seconds * 1000)))
+    except ValueError:
+        return 0
+
+
+async def synth_collated_vo(beatmap_dir: Path, voice_id: str) -> dict[str, tuple[int, int]]:
+    """Synthesize every VO line, then concat them with VO_GAP_MS silence
+    padding into a single beatmap_dir/vo/tutorial.ogg. Returns a mapping
+    slug -> (start_ms, duration_ms) so the chart builder can emit accurate
+    offsets. The intermediate per-clip files are deleted after concat.
+    """
+    vo_dir = beatmap_dir / 'vo'
     vo_dir.mkdir(parents=True, exist_ok=True)
-    for entry in TUTORIAL_LINES:
-        if entry[0] != 'vo':
-            continue
+    vo_lines = [e for e in TUTORIAL_LINES if e[0] == 'vo']
+
+    # 1. Synthesize each clip to its own temp file inside vo_dir.
+    clip_paths: list[Path] = []
+    clip_durations_ms: list[int] = []
+    for entry in vo_lines:
         slug = entry[2]
         text = entry[3]
-        out_path = vo_dir / f'{slug}.ogg'
-        print(f'  - synthesizing {slug} -> {out_path.name} ({len(text)} chars)')
-        await elevenlabs_client.synth_to_ogg(text, voice_id, out_path)
+        clip = vo_dir / f'_{slug}.ogg'
+        print(f'  - synthesizing {slug} -> _{slug}.ogg ({len(text)} chars)')
+        await elevenlabs_client.synth_to_ogg(text, voice_id, clip)
+        dur_ms = await _probe_duration_ms(clip)
+        clip_paths.append(clip)
+        clip_durations_ms.append(dur_ms)
+
+    # 2. Compute offsets within the final collated file. Each clip starts
+    #    at the running offset; a VO_GAP_MS silence follows each clip
+    #    (except the last) so cues don't crossfade.
+    offsets: dict[str, tuple[int, int]] = {}
+    cursor_ms = 0
+    for entry, dur_ms in zip(vo_lines, clip_durations_ms):
+        slug = entry[2]
+        offsets[slug] = (cursor_ms, dur_ms)
+        cursor_ms += dur_ms + VO_GAP_MS
+
+    # 3. Build a silence file once, then assemble a concat list ordering
+    #    [clip, silence, clip, silence, ..., clip].
+    silence = vo_dir / '_gap.ogg'
+    silence_seconds = VO_GAP_MS / 1000
+    proc = await asyncio.create_subprocess_exec(
+        'ffmpeg', '-y',
+        '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
+        '-t', f'{silence_seconds:.3f}',
+        '-c:a', 'libvorbis', '-q:a', '3',
+        str(silence),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    _, err = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f'ffmpeg silence gen failed: {err.decode("utf-8", errors="replace")[-300:]}')
+
+    concat_list = vo_dir / '_concat.txt'
+    concat_lines: list[str] = []
+    for i, clip in enumerate(clip_paths):
+        # ffmpeg concat demuxer wants forward slashes + a single-quoted path
+        # so spaces survive. Our paths are temp-dir-scoped so safe.
+        concat_lines.append(f"file '{clip.as_posix()}'")
+        if i != len(clip_paths) - 1:
+            concat_lines.append(f"file '{silence.as_posix()}'")
+    concat_list.write_text('\n'.join(concat_lines) + '\n', encoding='utf-8')
+
+    out_path = vo_dir / 'tutorial.ogg'
+    proc = await asyncio.create_subprocess_exec(
+        'ffmpeg', '-y',
+        '-f', 'concat', '-safe', '0',
+        '-i', str(concat_list),
+        '-c:a', 'libvorbis', '-q:a', '4',
+        str(out_path),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    _, err = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f'ffmpeg concat failed: {err.decode("utf-8", errors="replace")[-400:]}')
+
+    print(f'  - collated {len(clip_paths)} clips -> tutorial.ogg ({out_path.stat().st_size} bytes)')
+
+    # 4. Drop the intermediate per-clip files + concat list + silence.
+    for clip in clip_paths:
+        clip.unlink(missing_ok=True)
+    silence.unlink(missing_ok=True)
+    concat_list.unlink(missing_ok=True)
+
+    return offsets
 
 
 async def main() -> None:
@@ -332,7 +438,12 @@ async def main() -> None:
         bm_src.mkdir()
         shutil.copy2(silent_ogg, bm_src / 'song.ogg')
 
-        chart_text = build_chart_text()
+        # Collate every VO line into a single vo/tutorial.ogg before the
+        # chart is written so we have accurate start_ms/duration_ms offsets
+        # to embed in the [TutorialScript] entries.
+        vo_offsets = await synth_collated_vo(bm_src, voice_id)
+
+        chart_text = build_chart_text(vo_offsets)
         (bm_src / 'notes.chart').write_text(chart_text, encoding='utf-8')
         print(f'notes.chart: {len(chart_text)} chars, {chart_text.count(chr(10))} lines')
 
@@ -353,8 +464,6 @@ async def main() -> None:
             'tutorial = True',
         ]) + '\n'
         (bm_src / 'song.ini').write_text(ini_text, encoding='utf-8')
-
-        await synth_vos(bm_src, voice_id)
 
         # 6. Register the beatmap and copy the folder into track storage.
         add_beatmap_record(
