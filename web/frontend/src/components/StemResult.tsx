@@ -4,6 +4,7 @@ import StemPlayer from './StemPlayer.tsx'
 import BeatmapStatsModal, { BeatmapRecord } from './BeatmapStatsModal.tsx'
 import LyricsButtons from './LyricsButtons'
 import VocalmapButtons from './VocalmapButtons'
+import useInstalledVersion from './useInstalledVersion'
 
 interface StemResultProps {
   jobId: string
@@ -200,6 +201,10 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
   const [hasVocalNotes, setHasVocalNotes] = useState(false)
   const [batchError, setBatchError] = useState('')
   const [existingBeatmaps, setExistingBeatmaps] = useState<BeatmapRecord[]>([])
+  const installedMadmom = useInstalledVersion('madmom')
+  const beatmapBtnLabel = installedMadmom
+    ? `Generate Beatmap with madmom ${installedMadmom}`
+    : 'Generate Beatmap'
 
   const refetchBeatmaps = useCallback(async () => {
     if (!trackId) { setExistingBeatmaps([]); return }
@@ -518,11 +523,11 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                   )}
 
                   {stem !== 'vocals' && (
-                    <div className="flex flex-wrap gap-1.5 justify-center items-center">
+                    <div className="flex items-stretch gap-1">
                       {stem === 'song' ? (
                         <a
                           href={`/api/stems/${jobId}/download/${stem}`}
-                          className="px-2 py-1 bg-gray-700 text-gray-300 hover:bg-gray-600 rounded text-xs font-medium transition-colors"
+                          className="flex-1 px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-200 rounded text-xs font-medium transition-colors text-center"
                         >
                           Download
                         </a>
@@ -530,10 +535,10 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                         !bm && (
                           <button
                             onClick={() => generateBeatmap(stem)}
-                            className="px-2 py-1 bg-green-700/60 hover:bg-green-600/70 text-green-200 rounded text-xs font-medium transition-colors"
-                            title="Generate beatmap with current track metadata"
+                            className="flex-1 px-3 py-1.5 bg-green-700/60 hover:bg-green-600/70 text-green-100 rounded text-xs font-medium transition-colors"
+                            title="Generate beatmap with the installed madmom model"
                           >
-                            Generate Beatmap
+                            {beatmapBtnLabel}
                           </button>
                         )
                       )}
