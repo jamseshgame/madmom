@@ -977,7 +977,23 @@ export default function BeatmapEditor() {
   // reflects waveform-ready state can update.
   const [, setWaveLoaded] = useState(false)
 
-  const audioSrc = `/api/tracks/${trackId}/beatmaps/${beatmapId}/download/song.ogg`
+  // Audio playback source. The default 'beatmap' plays the stem audio
+  // bundled with this beatmap (typically a single instrument). 'track-song'
+  // swaps in the track's full master mix so charters can hear the rest of
+  // the song while authoring against one stem. Switching is non-destructive
+  // — the playhead position is preserved across the swap.
+  const [audioSource, setAudioSource] = useState<'beatmap' | 'track-song'>('beatmap')
+  const audioSrc = audioSource === 'track-song'
+    ? `/api/tracks/${trackId}/stems/song`
+    : `/api/tracks/${trackId}/beatmaps/${beatmapId}/download/song.ogg`
+  // Preserve the playhead across an audioSrc swap. Captured pre-swap, applied
+  // once the new <audio> reports loaded metadata.
+  const pendingSeekRef = useRef<number | null>(null)
+  const switchAudioSource = (next: 'beatmap' | 'track-song') => {
+    if (next === audioSource) return
+    pendingSeekRef.current = currentTime
+    setAudioSource(next)
+  }
 
   // Push the current notes snapshot onto the undo stack and apply the new one.
   // Use this for any change the user would expect Ctrl+Z to revert: add, delete,
@@ -2613,6 +2629,30 @@ export default function BeatmapEditor() {
               }}
               className="w-full accent-jam-500"
             />
+            <div className="mt-2 grid grid-cols-2 gap-1">
+              <button
+                onClick={() => switchAudioSource('beatmap')}
+                className={`px-2 py-1 rounded text-[10px] font-medium transition-colors ${
+                  audioSource === 'beatmap'
+                    ? 'bg-jam-600 text-white'
+                    : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+                }`}
+                title="Play this beatmap's stem audio (default)"
+              >
+                Stem only
+              </button>
+              <button
+                onClick={() => switchAudioSource('track-song')}
+                className={`px-2 py-1 rounded text-[10px] font-medium transition-colors ${
+                  audioSource === 'track-song'
+                    ? 'bg-jam-600 text-white'
+                    : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+                }`}
+                title="Play the track's full mix while authoring this beatmap's chart"
+              >
+                Full mix
+              </button>
+            </div>
             <div className="mt-2 flex items-center gap-2">
               <span className="text-[11px] text-gray-500 shrink-0">Speed</span>
               <input
@@ -3282,7 +3322,17 @@ export default function BeatmapEditor() {
         ref={audioRef}
         src={audioSrc}
         preload="metadata"
-        onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
+        onLoadedMetadata={(e) => {
+          setDuration(e.currentTarget.duration)
+          // Restore the playhead after switching between the beatmap stem
+          // and the full mix so the user keeps their place in the song.
+          if (pendingSeekRef.current !== null) {
+            const target = Math.min(pendingSeekRef.current, e.currentTarget.duration || pendingSeekRef.current)
+            e.currentTarget.currentTime = target
+            setCurrentTime(target)
+            pendingSeekRef.current = null
+          }
+        }}
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
         onEnded={() => setPlaying(false)}
