@@ -123,11 +123,22 @@ export default function BeatmapStatsModal({
   }
 
   const sections = data?.sections ?? {}
-  const root = sections._root ?? {}
+  // song.ini's [song] header puts all metadata fields under sections.song;
+  // _root only contains keys that appeared before any [section] header,
+  // which is normally empty.
+  const root = { ...(sections._root ?? {}), ...(sections.song ?? {}) }
   const presentDiffs = DIFF_ORDER.filter((d) => sections[d] && Object.keys(sections[d]).length > 0)
 
   const sumLane = (sec: Record<string, string>, prefix: string) =>
     Array.from({ length: 5 }, (_, i) => Number(sec[`${prefix}_${i}`] || 0))
+
+  const fmtCount = (count: number, total: number) => {
+    if (count === 0) return '0'
+    if (total <= 0) return String(count)
+    const pct = (count / total) * 100
+    const pctStr = pct >= 10 ? pct.toFixed(0) : pct.toFixed(1)
+    return `${count} (${pctStr}%)`
+  }
 
   const chordRows: { key: string; label: string }[] = [
     { key: 'chord_0+1', label: '0+1 Green+Red' },
@@ -282,74 +293,117 @@ export default function BeatmapStatsModal({
                         {LANE_LABELS.map((label, i) => (
                           <tr key={`single_${i}`} className="border-t border-gray-800/60">
                             <td className="py-1 pr-3">Singles · {label}</td>
-                            {presentDiffs.map((d) => (
-                              <td key={d} className="text-right px-2">{sumLane(sections[d], 'single')[i]}</td>
-                            ))}
+                            {presentDiffs.map((d) => {
+                              const total = Number(sections[d].total_events || 0)
+                              return (
+                                <td key={d} className="text-right px-2">
+                                  {fmtCount(sumLane(sections[d], 'single')[i], total)}
+                                </td>
+                              )
+                            })}
                           </tr>
                         ))}
 
                         {LANE_LABELS.map((label, i) => (
                           <tr key={`hold_${i}`} className="border-t border-gray-800/60">
                             <td className="py-1 pr-3">Holds · {label}</td>
-                            {presentDiffs.map((d) => (
-                              <td key={d} className="text-right px-2">{sumLane(sections[d], 'hold')[i]}</td>
-                            ))}
+                            {presentDiffs.map((d) => {
+                              const total = Number(sections[d].total_events || 0)
+                              return (
+                                <td key={d} className="text-right px-2">
+                                  {fmtCount(sumLane(sections[d], 'hold')[i], total)}
+                                </td>
+                              )
+                            })}
                           </tr>
                         ))}
 
                         {LANE_LABELS.map((label, i) => (
                           <tr key={`slide_${i}`} className="border-t border-gray-800/60">
                             <td className="py-1 pr-3">Slides · {label}</td>
-                            {presentDiffs.map((d) => (
-                              <td key={d} className="text-right px-2">{sumLane(sections[d], 'slide')[i]}</td>
-                            ))}
+                            {presentDiffs.map((d) => {
+                              const total = Number(sections[d].total_events || 0)
+                              return (
+                                <td key={d} className="text-right px-2">
+                                  {fmtCount(sumLane(sections[d], 'slide')[i], total)}
+                                </td>
+                              )
+                            })}
                           </tr>
                         ))}
 
                         {chordRows.map(({ key, label }) => (
                           <tr key={key} className="border-t border-gray-800/60">
                             <td className="py-1 pr-3">Chord · {label}</td>
-                            {presentDiffs.map((d) => (
-                              <td key={d} className="text-right px-2">{sections[d][key] || 0}</td>
-                            ))}
+                            {presentDiffs.map((d) => {
+                              const total = Number(sections[d].total_events || 0)
+                              return (
+                                <td key={d} className="text-right px-2">
+                                  {fmtCount(Number(sections[d][key] || 0), total)}
+                                </td>
+                              )
+                            })}
                           </tr>
                         ))}
 
                         {chordRows.map(({ key, label }) => (
                           <tr key={`hold_${key}`} className="border-t border-gray-800/60">
                             <td className="py-1 pr-3">Chord hold · {label}</td>
-                            {presentDiffs.map((d) => (
-                              <td key={d} className="text-right px-2">{sections[d][`chord_hold_${key.replace('chord_', '')}`] || 0}</td>
-                            ))}
+                            {presentDiffs.map((d) => {
+                              const total = Number(sections[d].total_events || 0)
+                              const v = Number(sections[d][`chord_hold_${key.replace('chord_', '')}`] || 0)
+                              return (
+                                <td key={d} className="text-right px-2">{fmtCount(v, total)}</td>
+                              )
+                            })}
                           </tr>
                         ))}
 
                         {chordRows.map(({ key, label }) => (
                           <tr key={`slide_${key}`} className="border-t border-gray-800/60">
                             <td className="py-1 pr-3">Chord slide · {label}</td>
-                            {presentDiffs.map((d) => (
-                              <td key={d} className="text-right px-2">{sections[d][`chord_slide_${key.replace('chord_', '')}`] || 0}</td>
-                            ))}
+                            {presentDiffs.map((d) => {
+                              const total = Number(sections[d].total_events || 0)
+                              const v = Number(sections[d][`chord_slide_${key.replace('chord_', '')}`] || 0)
+                              return (
+                                <td key={d} className="text-right px-2">{fmtCount(v, total)}</td>
+                              )
+                            })}
                           </tr>
                         ))}
 
                         <tr className="border-t border-gray-800">
                           <td className="py-1 pr-3">Open · normal</td>
-                          {presentDiffs.map((d) => (
-                            <td key={d} className="text-right px-2">{sections[d].open_normal || 0}</td>
-                          ))}
+                          {presentDiffs.map((d) => {
+                            const total = Number(sections[d].total_events || 0)
+                            return (
+                              <td key={d} className="text-right px-2">
+                                {fmtCount(Number(sections[d].open_normal || 0), total)}
+                              </td>
+                            )
+                          })}
                         </tr>
                         <tr className="border-t border-gray-800/60">
                           <td className="py-1 pr-3">Open · hold</td>
-                          {presentDiffs.map((d) => (
-                            <td key={d} className="text-right px-2">{sections[d].open_hold || 0}</td>
-                          ))}
+                          {presentDiffs.map((d) => {
+                            const total = Number(sections[d].total_events || 0)
+                            return (
+                              <td key={d} className="text-right px-2">
+                                {fmtCount(Number(sections[d].open_hold || 0), total)}
+                              </td>
+                            )
+                          })}
                         </tr>
                         <tr className="border-t border-gray-800/60">
                           <td className="py-1 pr-3">Open · slide</td>
-                          {presentDiffs.map((d) => (
-                            <td key={d} className="text-right px-2">{sections[d].open_slide || 0}</td>
-                          ))}
+                          {presentDiffs.map((d) => {
+                            const total = Number(sections[d].total_events || 0)
+                            return (
+                              <td key={d} className="text-right px-2">
+                                {fmtCount(Number(sections[d].open_slide || 0), total)}
+                              </td>
+                            )
+                          })}
                         </tr>
                       </tbody>
                     </table>
