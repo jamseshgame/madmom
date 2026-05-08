@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import StemPlayer from './StemPlayer.tsx'
 import BeatmapStatsModal, { BeatmapRecord } from './BeatmapStatsModal.tsx'
 import LyricsButtons from './LyricsButtons'
@@ -160,6 +161,7 @@ function StemBeatmapTracker({
 }
 
 export default function StemResult({ jobId, metadata }: StemResultProps) {
+  const navigate = useNavigate()
   const stems = (metadata.stems || {}) as Record<string, string>
   const trackName = (metadata.original_name as string) || 'track'
   const isGameReady = !!metadata.game_ready
@@ -521,6 +523,34 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                         )
                       )}
                     </div>
+                  )}
+
+                  {/* Skip beat detection — open the editor with an empty chart.
+                      Requires the track to have been saved to the library
+                      (track_id present), which the Create flow does. */}
+                  {stem !== 'song' && stem !== 'vocals' && trackId && !bm && (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          const fd = new FormData()
+                          fd.append('stem', stem)
+                          const res = await fetch(`/api/tracks/${trackId}/empty-beatmap`, { method: 'POST', body: fd })
+                          if (!res.ok) {
+                            const err = await res.json().catch(() => ({}))
+                            throw new Error(err.detail || `Failed (${res.status})`)
+                          }
+                          const data = await res.json()
+                          navigate(`/edit/${data.track_id}/${data.beatmap_id}`)
+                        } catch (e) {
+                          setBatchError((e as Error).message)
+                        }
+                      }}
+                      className="text-[11px] text-gray-500 hover:text-jam-300 underline-offset-2 hover:underline transition-colors text-center"
+                      title="Skip beat detection — open the editor with an empty chart"
+                    >
+                      or open empty editor →
+                    </button>
                   )}
 
                   {bm?.state === 'generating' && !bm.jobId && stem !== 'vocals' && (
