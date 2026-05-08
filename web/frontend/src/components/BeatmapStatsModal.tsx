@@ -6,6 +6,7 @@ export interface BeatmapRecord {
   generated_at: number
   folder_name: string
   song_name: string
+  active?: boolean
 }
 
 const STEM_COLORS: Record<string, string> = {

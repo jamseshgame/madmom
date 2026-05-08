@@ -31,6 +31,7 @@ from ..services.tracks import (
     list_tracks,
     read_elevenlabs_voice,
     rename_beatmap_record,
+    set_active_beatmap,
     update_track_meta,
     write_elevenlabs_voice,
 )
@@ -478,6 +479,16 @@ async def rename_beatmap(
     return record
 
 
+@router.post('/{track_id}/beatmaps/{beatmap_id}/activate')
+async def activate_beatmap(track_id: str, beatmap_id: str):
+    """Mark this beatmap as the active one for its stem. The publish flow uses
+    the active beatmap per stem when no per-stem override is supplied."""
+    record = set_active_beatmap(track_id, beatmap_id)
+    if record is None:
+        raise HTTPException(404, 'Beatmap not found')
+    return record
+
+
 @router.post('/{track_id}/empty-beatmap')
 async def create_empty_beatmap_for_track(
     track_id: str,
@@ -844,7 +855,8 @@ async def publish_track_to_game(
                             chosen = bm
                             break
                 if chosen is None:
-                    chosen = max(candidates, key=lambda b: b.get('generated_at', 0))
+                    active_match = next((b for b in candidates if b.get('active')), None)
+                    chosen = active_match or max(candidates, key=lambda b: b.get('generated_at', 0))
 
                 bm_dir = track.beatmaps_dir / chosen.get('id', '')
                 if not bm_dir.exists():

@@ -619,15 +619,38 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                     .map((b) => {
                       const liveName = (b.song_name || '').trim()
                       const dateStr = formatDate(b.generated_at)
+                      const isActive = !!b.active
+                      const pillCls = isActive
+                        ? 'bg-green-700/50 hover:bg-green-600/60 border-green-500 text-green-100'
+                        : 'bg-gray-800 hover:bg-gray-700 border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-200'
                       return (
                         <div key={b.id} className="w-full mt-1 flex items-stretch gap-1">
                           <button
+                            type="button"
+                            onClick={async () => {
+                              if (isActive) return
+                              try {
+                                const r = await fetch(`/api/tracks/${trackId}/beatmaps/${b.id}/activate`, { method: 'POST' })
+                                if (!r.ok) throw new Error(`HTTP ${r.status}`)
+                                refetchBeatmaps()
+                              } catch (e) {
+                                setBatchError((e as Error).message)
+                              }
+                            }}
+                            className="shrink-0 w-7 px-1 py-1 border rounded text-[11px] flex items-center justify-center transition-colors bg-gray-800 hover:bg-gray-700 border-gray-700 text-gray-400 hover:text-amber-300 disabled:cursor-default"
+                            disabled={isActive}
+                            title={isActive ? 'Active beatmap (used when publishing)' : 'Make this the active beatmap for this stem'}
+                            aria-label={isActive ? 'Active beatmap' : 'Make active'}
+                          >
+                            <span className={isActive ? 'text-amber-300' : ''}>{isActive ? '★' : '☆'}</span>
+                          </button>
+                          <button
                             onClick={() => setStatsBeatmap(b)}
-                            className="flex-1 min-w-0 px-2 py-1 bg-green-900/30 hover:bg-green-800/50 border border-green-800/40 hover:border-green-700 rounded text-[11px] text-green-300 hover:text-green-200 flex items-center justify-between gap-2 transition-colors"
+                            className={`flex-1 min-w-0 px-2 py-1 border rounded text-[11px] flex items-center justify-between gap-2 transition-colors ${pillCls}`}
                             title={liveName ? `${liveName} · ${dateStr}` : 'View beatmap details'}
                           >
                             <span className="truncate">⏺ {dateStr}</span>
-                            <span className="text-green-500/80 shrink-0">›</span>
+                            <span className="shrink-0 opacity-70">›</span>
                           </button>
                           <button
                             onClick={() => navigate(`/edit/${trackId}/${b.id}`)}

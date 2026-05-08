@@ -211,12 +211,35 @@ def add_beatmap_record(
         'generated_at': time.time(),
         'folder_name': folder_name,
         'song_name': song_name,
+        'active': True,
     }
     # Replace any prior record with the same id (shouldn't happen, but keeps it tidy)
     track.beatmaps = [b for b in track.beatmaps if b.get('id') != beatmap_id]
+    # New beatmap takes the active slot for its stem; clear it on siblings so
+    # publish defaults to the freshest result.
+    for b in track.beatmaps:
+        if b.get('stem') == stem:
+            b['active'] = False
     track.beatmaps.append(record)
     track.save()
     return track
+
+
+def set_active_beatmap(track_id: str, beatmap_id: str) -> dict | None:
+    """Mark `beatmap_id` as the active beatmap for its stem. Returns the
+    updated record, or None if not found."""
+    track = Track.load(track_id)
+    if not track:
+        return None
+    target = next((b for b in track.beatmaps if b.get('id') == beatmap_id), None)
+    if target is None:
+        return None
+    stem = target.get('stem', '')
+    for b in track.beatmaps:
+        if b.get('stem') == stem:
+            b['active'] = (b.get('id') == beatmap_id)
+    track.save()
+    return target
 
 
 def get_beatmap_dir(track_id: str, beatmap_id: str) -> Path | None:
