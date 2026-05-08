@@ -625,6 +625,8 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                       const liveName = (b.song_name || '').trim()
                       const dateStr = formatDate(b.generated_at)
                       const isActive = !!b.active
+                      const defaultName = `${trackName} (${label})`
+                      const displayLabel = liveName && liveName !== defaultName ? liveName : dateStr
                       const activate = async () => {
                         if (isActive) return
                         try {
@@ -654,9 +656,9 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                           <button
                             onClick={() => setStatsBeatmap(b)}
                             className="flex-1 min-w-0 text-left text-[11px] text-gray-300 hover:text-gray-100 truncate transition-colors"
-                            title="View beatmap details"
+                            title={liveName ? `${liveName} · ${dateStr}` : 'View beatmap details'}
                           >
-                            {dateStr}
+                            {displayLabel}
                           </button>
                           <button
                             onClick={() => navigate(`/edit/${trackId}/${b.id}`)}
@@ -924,6 +926,11 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
           trackId={trackId}
           beatmap={statsBeatmap}
           onClose={() => setStatsBeatmap(null)}
+          onRenamed={() => refetchBeatmaps()}
+          onCloned={(cloned) => {
+            setStatsBeatmap(null)
+            navigate(`/edit/${trackId}/${cloned.id}`)
+          }}
         />
       )}
     </div>

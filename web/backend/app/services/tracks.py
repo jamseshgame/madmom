@@ -225,6 +225,68 @@ def add_beatmap_record(
     return track
 
 
+def clone_beatmap_record(track_id: str, beatmap_id: str) -> dict | None:
+    """Duplicate a beatmap's folder + record. The clone gets a new id, a
+    "(copy)"-suffixed song_name to keep it distinct in the picker, and is
+    marked active for its stem so the user lands on the edited copy first."""
+    track = Track.load(track_id)
+    if not track:
+        return None
+    src_record = next((b for b in track.beatmaps if b.get('id') == beatmap_id), None)
+    if src_record is None:
+        return None
+    src_dir = track.beatmaps_dir / beatmap_id
+    if not src_dir.exists():
+        return None
+
+    new_id = uuid.uuid4().hex[:12]
+    dst_dir = track.beatmaps_dir / new_id
+    shutil.copytree(str(src_dir), str(dst_dir))
+
+    base_name = (src_record.get('song_name') or '').strip()
+    new_song_name = f'{base_name} (copy)' if base_name else 'Copy'
+
+    # Rewrite [Song] name inside the cloned song.ini + notes.chart so any
+    # downstream tooling sees the new title; mirrors rename_beatmap_record.
+    for fname in ('song.ini', 'notes.chart'):
+        path = dst_dir / fname
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding='utf-8', errors='replace')
+            lines = text.splitlines()
+            in_song_section = False
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                if stripped.startswith('[') and stripped.endswith(']'):
+                    in_song_section = stripped.lower() in ('[song]',)
+                    continue
+                if in_song_section and '=' in stripped:
+                    k, _, _ = stripped.partition('=')
+                    if k.strip().lower() == 'name':
+                        indent = line[: len(line) - len(line.lstrip())]
+                        lines[i] = f'{indent}name = {new_song_name}' if fname.endswith('.ini') else f'{indent}Name = "{new_song_name}"'
+            path.write_text('\n'.join(lines) + ('\n' if text.endswith('\n') else ''), encoding='utf-8')
+        except Exception:
+            # Best-effort — chart still works with stale name.
+            pass
+
+    record = {
+        'id': new_id,
+        'stem': src_record.get('stem', ''),
+        'generated_at': time.time(),
+        'folder_name': src_record.get('folder_name', ''),
+        'song_name': new_song_name,
+        'active': True,
+    }
+    for b in track.beatmaps:
+        if b.get('stem') == record['stem']:
+            b['active'] = False
+    track.beatmaps.append(record)
+    track.save()
+    return record
+
+
 def set_active_beatmap(track_id: str, beatmap_id: str) -> dict | None:
     """Mark `beatmap_id` as the active beatmap for its stem. Returns the
     updated record, or None if not found."""

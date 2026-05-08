@@ -30,6 +30,7 @@ from ..services.tracks import (
     get_track_enriched,
     list_tracks,
     read_elevenlabs_voice,
+    clone_beatmap_record,
     rename_beatmap_record,
     set_active_beatmap,
     update_track_meta,
@@ -476,6 +477,16 @@ async def rename_beatmap(
     record = rename_beatmap_record(track_id, beatmap_id, song_name)
     if record is None:
         raise HTTPException(404, 'Beatmap not found, or song_name was empty')
+    return record
+
+
+@router.post('/{track_id}/beatmaps/{beatmap_id}/clone')
+async def clone_beatmap(track_id: str, beatmap_id: str):
+    """Duplicate this beatmap into a new editable copy. Useful for keeping a
+    pristine generated chart alongside hand-edited variants."""
+    record = clone_beatmap_record(track_id, beatmap_id)
+    if record is None:
+        raise HTTPException(404, 'Source beatmap not found')
     return record
 
 

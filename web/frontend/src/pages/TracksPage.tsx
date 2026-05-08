@@ -1429,6 +1429,8 @@ export default function TracksPage() {
                       const liveName = (bm.song_name || '').trim()
                       const dateStr = formatDate(bm.generated_at)
                       const isActive = !!bm.active
+                      const defaultName = `${selectedTrack.name} (${STEM_LABELS[stem] || stem})`
+                      const displayLabel = liveName && liveName !== defaultName ? liveName : dateStr
                       const activate = async () => {
                         if (isActive) return
                         try {
@@ -1458,9 +1460,9 @@ export default function TracksPage() {
                         <button
                           onClick={() => setStatsBeatmap(bm)}
                           className="flex-1 min-w-0 text-left text-[11px] text-gray-300 hover:text-gray-100 truncate transition-colors"
-                          title="View beatmap details"
+                          title={liveName ? `${liveName} · ${dateStr}` : 'View beatmap details'}
                         >
-                          {dateStr}
+                          {displayLabel}
                         </button>
                         <button
                           onClick={() => navigate(`/edit/${selectedTrack.id}/${bm.id}`)}
@@ -1715,6 +1717,10 @@ export default function TracksPage() {
             onRenamed={(updated) => {
               setStatsBeatmap((prev) => (prev ? { ...prev, song_name: updated.song_name } : prev))
               loadTracks()
+            }}
+            onCloned={(cloned) => {
+              setStatsBeatmap(null)
+              navigate(`/edit/${selectedTrack.id}/${cloned.id}`)
             }}
           />
         )}

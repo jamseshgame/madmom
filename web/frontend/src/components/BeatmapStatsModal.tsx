@@ -52,12 +52,14 @@ export default function BeatmapStatsModal({
   onClose,
   onDeleted,
   onRenamed,
+  onCloned,
 }: {
   trackId: string
   beatmap: BeatmapRecord
   onClose: () => void
   onDeleted?: () => void
   onRenamed?: (record: BeatmapRecord) => void
+  onCloned?: (record: BeatmapRecord) => void
 }) {
   const [data, setData] = useState<{
     sections: Record<string, Record<string, string>>
@@ -71,6 +73,8 @@ export default function BeatmapStatsModal({
   const [savingName, setSavingName] = useState(false)
   const [renameError, setRenameError] = useState('')
   const [currentName, setCurrentName] = useState(beatmap.song_name)
+  const [cloning, setCloning] = useState(false)
+  const [cloneError, setCloneError] = useState('')
 
   const handleRename = async () => {
     const next = draftName.trim()
@@ -108,6 +112,24 @@ export default function BeatmapStatsModal({
       .then(setData)
       .catch((e) => setError((e as Error).message))
   }, [trackId, beatmap.id])
+
+  const handleClone = async () => {
+    setCloning(true)
+    setCloneError('')
+    try {
+      const res = await fetch(`/api/tracks/${trackId}/beatmaps/${beatmap.id}/clone`, { method: 'POST' })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || `Clone failed (${res.status})`)
+      }
+      const cloned = (await res.json()) as BeatmapRecord
+      if (onCloned) onCloned(cloned)
+    } catch (e) {
+      setCloneError((e as Error).message)
+    } finally {
+      setCloning(false)
+    }
+  }
 
   const handleDelete = async () => {
     if (!onDeleted) return
@@ -201,11 +223,11 @@ export default function BeatmapStatsModal({
                   setEditingName(true)
                   setRenameError('')
                 }}
-                className="mt-0.5 group flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-300 font-mono truncate transition-colors"
+                className="mt-0.5 flex items-center gap-1.5 text-xs text-gray-400 hover:text-gray-200 font-mono truncate transition-colors"
                 title="Rename this beatmap"
               >
                 <span className="truncate">{currentName}</span>
-                <span className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px]">✏</span>
+                <span className="text-[10px] text-gray-500">✏ rename</span>
               </button>
             )}
             {renameError && (
@@ -443,6 +465,17 @@ export default function BeatmapStatsModal({
           >
             song.ini
           </a>
+          <button
+            onClick={handleClone}
+            disabled={cloning}
+            className="px-4 py-2 bg-jam-700/40 hover:bg-jam-600/60 disabled:opacity-50 border border-jam-600/40 hover:border-jam-500 text-jam-200 hover:text-jam-100 rounded-lg text-sm font-medium transition-colors"
+            title="Make an editable copy of this beatmap"
+          >
+            {cloning ? 'Cloning…' : 'Clone'}
+          </button>
+          {cloneError && (
+            <span className="text-xs text-red-400">{cloneError}</span>
+          )}
           {onDeleted && (
             <div className="ml-auto flex items-center gap-2">
               {!confirming ? (
