@@ -10,6 +10,30 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.7.0',
+    date: '2026-05-11',
+    summary:
+      'Major editor overhaul: tempo map editing, click track, hold-note authoring, sidebar split into two panels, and a much faster note-tool workflow.',
+    entries: [
+      { kind: 'added', text: 'Tempo map editor — full [SyncTrack] parsing now reads every B/TS/A marker (previously only the first BPM was kept). The right sidebar lists every tempo change with add-at-playhead / per-marker BPM input / delete buttons; the tick-0 origin is locked. Save round-trips the whole block including time-sig and anchor rows we don\'t edit yet.' },
+      { kind: 'changed', text: 'Every tick↔seconds conversion in the editor (runway draw, click placement, drag, arrow nudge, quantize, paste, VO firing, click track, timeline strips, section seeks) is now tempo-aware via a piecewise segment map. Multi-tempo charts stay phase-locked across the whole UI.' },
+      { kind: 'added', text: 'Click track — WebAudio metronome that walks the tempo map beat-by-beat with a 120 ms scheduler lookahead and drift-reseed on seek/pause/rate change. Downbeats (every 4th beat) get a higher pitch. Toggle + volume slider in the Transport card.' },
+      { kind: 'added', text: 'Hold-note authoring — in the Note tool, click a lane to drop a single hit; keep the mouse held and drag up before releasing to extend a sustain live (snapped to the current grid). The whole stroke is one undo entry.' },
+      { kind: 'added', text: 'Sustain panel — appears in Tools whenever 1+ gem/open is selected. Tick input plus ¼ / ½ / 1 / 2 / 4-beat preset buttons; applies to every selected sustainable note so you can convert a run of single hits to half-beat holds in one click.' },
+      { kind: 'added', text: 'Quantize-to-grid — = / + snaps every selected note\'s tick to the nearest snap-grid multiple in one undoable batch. Modifiers (HOPO/Tap) ride along with their parent gem.' },
+      { kind: 'changed', text: 'Note tool simplified — removed the "Lane to drop" picker; lane is inferred from the click x-position over the gem area. Shift-click drops an OPEN (full-width) note at the same tick. Updated canvas readout + button tooltip to match.' },
+      { kind: 'changed', text: 'Sidebar split into two panels — left holds Transport / Tools / Snap / Scroll, right keeps Difficulty / Sections / Tempo / Scene / Tutorial. Canvas stays the same width; the previously empty space to the left of the runway is finally used.' },
+      { kind: 'changed', text: 'Cover art moved out of the header and into the top of the left sidebar (track-level album.png, hides silently if missing). Header now reserved entirely for the tutorial + scene timeline strips, which fill the full freed width.' },
+      { kind: 'changed', text: 'Header Back button removed — browser back replaces it. A beforeunload listener still guards against losing unsaved edits via tab close or refresh.' },
+      { kind: 'changed', text: 'Tutorial events consolidated into a single editor panel with a dropdown picker — was previously a vertical stack of per-event cards. Sorted by tick; auto-selects the newly added event.' },
+      { kind: 'added', text: 'Transport controls — ⏮ rewind to start, − step back one snap unit, ▶ play/pause, + step forward one snap unit, ⏭ skip to end. Home / End keyboard shortcuts. Tempo-aware nudge so each step lands on a real grid boundary even on multi-tempo charts.' },
+      { kind: 'changed', text: 'Lanes legend removed (canvas already labels them at the strike line). Scroll-speed readout inlined with the section header to free vertical space.' },
+      { kind: 'changed', text: 'Shortcuts list condensed to a single inline paragraph and the in-canvas Note-tool hint now mentions click-drag for holds and shift-click for OPEN.' },
+      { kind: 'added', text: 'ElevenLabs API key wiring — settings.elevenlabs_api_key is read from web/.env so the VO engine radio flips from "not configured" to selectable without a code change.' },
+      { kind: 'fixed', text: 'Waveform-on-highway overlay — quiet stems were rendering as a column of 1-px dots strung on the centre spine. Apply a √ amplitude curve + a small floor so verses/intros read as a real ribbon and genuine silence renders as silence.' },
+    ],
+  },
+  {
     version: '1.6.8',
     date: '2026-05-08',
     summary:
