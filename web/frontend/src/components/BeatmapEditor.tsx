@@ -3,7 +3,7 @@ import {
   applySceneToFullText, parseSceneEvents, parseSceneFlags,
 } from './sceneEvents'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useParams } from 'react-router-dom'
 
 // .chart parsing ------------------------------------------------------------
 
@@ -89,12 +89,44 @@ interface ChartState {
   // Pulled out of sceneEventsPassthrough so the editor can edit them as
   // first-class objects; merged back at save time.
   sections: ChartSection[]
+  // [SyncTrack] entries. tempoMarkers is guaranteed to be non-empty and to
+  // have a marker at tick 0 (defaulted from the first marker's BPM if the
+  // chart didn't carry one explicitly). timeSigs and syncOther round-trip
+  // verbatim — we don't expose a UI for them but they must survive save.
+  tempoMarkers: TempoMarker[]
+  timeSigs: TimeSig[]
+  syncOther: SyncOtherRow[]
 }
 
 interface ChartSection {
   id: string
   tick: number
   name: string
+}
+
+interface TempoMarker {
+  tick: number
+  microBpm: number  // BPM × 1000, the integer .chart "B" value
+}
+
+interface TimeSig {
+  tick: number
+  num: number
+  denomPow: number  // .chart's optional second arg; denominator = 2^denomPow
+}
+
+interface SyncOtherRow {
+  tick: number
+  raw: string  // verbatim text after `tick = ` (e.g. "A 12345")
+}
+
+// Precomputed piecewise tempo map. `seconds` is the wall-clock time at `tick`
+// given the cumulative effect of every preceding B marker. Built once per
+// chart via buildTempoSegments and shared with every consumer.
+interface TempoSegment {
+  tick: number
+  seconds: number
+  microBpm: number
 }
 
 const SECTION_LINE_RE = /^\s*(\d+)\s*=\s*E\s+"section\s+([^"]*)"\s*$/
@@ -127,6 +159,132 @@ function sectionLines(sections: ChartSection[]): string[] {
     .slice()
     .sort((a, b) => a.tick - b.tick)
     .map((s) => `  ${s.tick} = E "section ${s.name}"`)
+}
+
+// [SyncTrack] parsing/serialization. The block carries B (tempo), TS (time
+// signature), and occasionally A (anchor) rows. We surface B as an editable
+// list; TS and anything else (including A rows authored by Moonscraper/PCE)
+// round-trip verbatim so we don't destroy data we don't have UI for yet.
+const SYNC_TRACK_RE = /\[SyncTrack\]\s*\{([\s\S]*?)\}/
+
+function parseSyncTrack(text: string): {
+  tempoMarkers: TempoMarker[]
+  timeSigs: TimeSig[]
+  syncOther: SyncOtherRow[]
+} {
+  const tempoMarkers: TempoMarker[] = []
+  const timeSigs: TimeSig[] = []
+  const syncOther: SyncOtherRow[] = []
+  const m = text.match(SYNC_TRACK_RE)
+  if (!m) {
+    tempoMarkers.push({ tick: 0, microBpm: 120000 })
+    return { tempoMarkers, timeSigs, syncOther }
+  }
+  for (const rawLine of m[1].split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line) continue
+    const eqIdx = line.indexOf('=')
+    if (eqIdx < 0) continue
+    const tickStr = line.slice(0, eqIdx).trim()
+    const tick = Number(tickStr)
+    if (!Number.isFinite(tick)) continue
+    const rhs = line.slice(eqIdx + 1).trim()
+    const bMatch = rhs.match(/^B\s+(\d+)\s*$/)
+    if (bMatch) {
+      tempoMarkers.push({ tick, microBpm: Number(bMatch[1]) })
+      continue
+    }
+    const tsMatch = rhs.match(/^TS\s+(\d+)(?:\s+(\d+))?\s*$/)
+    if (tsMatch) {
+      timeSigs.push({
+        tick,
+        num: Number(tsMatch[1]),
+        denomPow: tsMatch[2] !== undefined ? Number(tsMatch[2]) : 2,
+      })
+      continue
+    }
+    syncOther.push({ tick, raw: rhs })
+  }
+  tempoMarkers.sort((a, b) => a.tick - b.tick)
+  timeSigs.sort((a, b) => a.tick - b.tick)
+  if (tempoMarkers.length === 0) {
+    tempoMarkers.push({ tick: 0, microBpm: 120000 })
+  } else if (tempoMarkers[0].tick !== 0) {
+    // Synthesize a tick-0 marker so segments always start at the song origin.
+    // Use the earliest marker's BPM so wall-clock timing before that marker
+    // doesn't shift the rest of the chart.
+    tempoMarkers.unshift({ tick: 0, microBpm: tempoMarkers[0].microBpm })
+  }
+  return { tempoMarkers, timeSigs, syncOther }
+}
+
+function buildTempoSegments(markers: TempoMarker[], _resolution: number): TempoSegment[] {
+  if (markers.length === 0) return [{ tick: 0, seconds: 0, microBpm: 120000 }]
+  const out: TempoSegment[] = []
+  let cumSec = 0
+  for (let i = 0; i < markers.length; i++) {
+    if (i > 0) {
+      const prev = markers[i - 1]
+      const dtTicks = markers[i].tick - prev.tick
+      cumSec += (dtTicks / _resolution) * (60000 / prev.microBpm)
+    }
+    out.push({ tick: markers[i].tick, seconds: cumSec, microBpm: markers[i].microBpm })
+  }
+  return out
+}
+
+// tick → wall-clock seconds. Walks the segment list backwards to find the
+// segment whose start tick is ≤ the query tick, then extrapolates within it
+// at that segment's tempo. Constant-tempo charts hit the first segment and
+// degenerate to the old (tick / resolution) * (60 / bpm) formula.
+function tickToSec(segs: TempoSegment[], resolution: number, tick: number): number {
+  if (tick <= 0 || segs.length === 0) return 0
+  let i = segs.length - 1
+  while (i > 0 && segs[i].tick > tick) i--
+  const seg = segs[i]
+  const dt = tick - seg.tick
+  return seg.seconds + (dt / resolution) * (60000 / seg.microBpm)
+}
+
+function secToTick(segs: TempoSegment[], resolution: number, sec: number): number {
+  if (sec <= 0 || segs.length === 0) return 0
+  let i = segs.length - 1
+  while (i > 0 && segs[i].seconds > sec) i--
+  const seg = segs[i]
+  const ds = sec - seg.seconds
+  const dt = (ds * seg.microBpm * resolution) / 60000
+  return Math.max(0, Math.round(seg.tick + dt))
+}
+
+function applySyncTrackToFullText(
+  fullText: string,
+  tempoMarkers: TempoMarker[],
+  timeSigs: TimeSig[],
+  syncOther: SyncOtherRow[],
+): string {
+  type Row = { tick: number; sortKind: 0 | 1 | 2; text: string }
+  const rows: Row[] = []
+  for (const ts of timeSigs) {
+    const text = ts.denomPow === 2 ? `TS ${ts.num}` : `TS ${ts.num} ${ts.denomPow}`
+    rows.push({ tick: ts.tick, sortKind: 0, text })
+  }
+  for (const b of tempoMarkers) {
+    rows.push({ tick: b.tick, sortKind: 1, text: `B ${b.microBpm}` })
+  }
+  for (const o of syncOther) {
+    rows.push({ tick: o.tick, sortKind: 2, text: o.raw })
+  }
+  rows.sort((a, b) => (a.tick - b.tick) || (a.sortKind - b.sortKind))
+  const body = rows.map((r) => `  ${r.tick} = ${r.text}`).join('\n')
+  const block = `[SyncTrack]\n{\n${body}\n}`
+  if (SYNC_TRACK_RE.test(fullText)) {
+    return fullText.replace(SYNC_TRACK_RE, block)
+  }
+  const eventsIdx = fullText.indexOf('[Events]')
+  if (eventsIdx >= 0) {
+    return fullText.slice(0, eventsIdx) + block + '\n' + fullText.slice(eventsIdx)
+  }
+  return fullText + (fullText.endsWith('\n') ? '' : '\n') + block + '\n'
 }
 
 const DIFFICULTY_PREFERENCE = [
@@ -394,8 +552,11 @@ function parseChart(text: string, prefer?: string): ChartState {
   const resolution = resMatch ? Number(resMatch[1]) : 192
   const nameMatch = text.match(/Name\s*=\s*"([^"]*)"/)
   const songName = nameMatch ? nameMatch[1] : 'Untitled'
-  const bpmMatch = text.match(/=\s*B\s+(\d+)/)
-  const bpmRaw = bpmMatch ? Number(bpmMatch[1]) : 120000
+  const { tempoMarkers, timeSigs, syncOther } = parseSyncTrack(text)
+  // Legacy chart.bpm/bpmRaw expose the tick-0 tempo for tooltips and the
+  // approximate beat-grid in the timeline strips. Tempo-aware playback and
+  // canvas timing use tempoMarkers/buildTempoSegments instead.
+  const bpmRaw = tempoMarkers[0].microBpm
   const bpm = bpmRaw / 1000
 
   const availableSections = findNoteSections(text)
@@ -430,11 +591,8 @@ function parseChart(text: string, prefer?: string): ChartState {
     sceneEvents: sceneEventsParsed.events,
     sceneEventsPassthrough: passthroughWithoutSections,
     sections: chartSections,
+    tempoMarkers, timeSigs, syncOther,
   }
-}
-
-function tickToSeconds(tick: number, bpm: number, resolution: number): number {
-  return (tick / resolution) * (60 / bpm)
 }
 
 // Lane colors (Guitar Hero) -------------------------------------------------
@@ -469,7 +627,7 @@ interface BeatmapMeta {
 interface TimelineProps {
   duration: number
   currentTime: number
-  bpm: number
+  tempoSegments: TempoSegment[]
   resolution: number
   events: TutorialEvent[]
   snapDivisor: number
@@ -480,7 +638,7 @@ interface TimelineProps {
 function TutorialTimeline({
   duration,
   currentTime,
-  bpm,
+  tempoSegments,
   resolution,
   events,
   snapDivisor,
@@ -516,8 +674,8 @@ function TutorialTimeline({
   }, [])
 
   const span = Math.max(0.001, view.end - view.start)
-  const tickToSec = (t: number) => (t / resolution) * (60 / bpm)
-  const secToTick = (s: number) => Math.max(0, Math.round((s * bpm * resolution) / 60))
+  const tToSec = (t: number) => tickToSec(tempoSegments, resolution, t)
+  const sToTick = (s: number) => secToTick(tempoSegments, resolution, s)
   const secToX = (s: number) => ((s - view.start) / span) * width
   const xToSec = (x: number) => view.start + (x / Math.max(1, width)) * span
 
@@ -562,7 +720,7 @@ function TutorialTimeline({
       }
       if (!dragRef.current) return
       const targetSec = sec - dragRef.current.offset
-      const rawTick = secToTick(Math.max(0, targetSec))
+      const rawTick = sToTick(Math.max(0, targetSec))
       const snapTicks = Math.max(1, Math.round(resolution / snapDivisor))
       const snapped = Math.round(rawTick / snapTicks) * snapTicks
       if (snapped !== dragRef.current.lastTick) {
@@ -581,10 +739,14 @@ function TutorialTimeline({
       document.removeEventListener('mouseup', up)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scrubbing, view.start, view.end, width, duration, resolution, snapDivisor, bpm])
+  }, [scrubbing, view.start, view.end, width, duration, resolution, snapDivisor, tempoSegments])
 
-  // Beat-line ticks: draw a light line every beat when there's room.
-  const beatSpacingSec = 60 / Math.max(1, bpm)
+  // Beat-line ticks: draw a light line every beat when there's room. Variable
+  // tempo would make the grid non-uniform — for now we use the tick-0 BPM as
+  // a visual approximation. The event bands themselves use the full tempo
+  // map for positioning, so they stay accurate across mid-song tempo changes.
+  const firstBpm = (tempoSegments[0]?.microBpm ?? 120000) / 1000
+  const beatSpacingSec = 60 / Math.max(1, firstBpm)
   const visibleBeats = Math.ceil(span / beatSpacingSec)
   const beatStride = visibleBeats > 80 ? Math.ceil(visibleBeats / 80) : 1
 
@@ -657,7 +819,7 @@ function TutorialTimeline({
 
       {/* event blocks */}
       {ordered.map((ev) => {
-        const startSec = tickToSec(ev.tick)
+        const startSec = tToSec(ev.tick)
         const x = secToX(startSec)
         if (ev.kind === 'music') {
           const w = Math.max(8, secToX(startSec + ev.durationSeconds) - x)
@@ -768,7 +930,7 @@ function TutorialTimeline({
 
 interface SceneTimelineProps {
   duration: number
-  bpm: number
+  tempoSegments: TempoSegment[]
   resolution: number
   events: SceneEvent[]
   selectedId: string | null
@@ -778,7 +940,7 @@ interface SceneTimelineProps {
 }
 
 function SceneTimeline({
-  duration, bpm, resolution, events,
+  duration, tempoSegments, resolution, events,
   selectedId, onSelect, onMoveEvent, onResizeEvent,
 }: SceneTimelineProps) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -800,10 +962,10 @@ function SceneTimeline({
   }, [])
 
   const span = Math.max(0.001, duration)
-  const tickToSec = (t: number) => (t / resolution) * (60 / bpm)
+  const tToSec = (t: number) => tickToSec(tempoSegments, resolution, t)
+  const sToTick = (s: number) => secToTick(tempoSegments, resolution, s)
   const secToX = (s: number) => (s / span) * width
   const xToSec = (x: number) => (x / Math.max(1, width)) * span
-  const secToTick = (s: number) => Math.max(0, Math.round((s * bpm * resolution) / 60))
 
   const handleMouseMove = (e: React.MouseEvent) => {
     const drag = dragRef.current
@@ -812,11 +974,11 @@ function SceneTimeline({
     const x = e.clientX - rect.left
     if (drag.kind === 'move') {
       const sec = Math.max(0, Math.min(duration, xToSec(x - drag.offset)))
-      onMoveEvent(drag.id, secToTick(sec))
+      onMoveEvent(drag.id, sToTick(sec))
     } else {
       const ev = events.find((e) => e.id === drag.id)
       if (!ev) return
-      const cursorTick = secToTick(Math.max(0, xToSec(x)))
+      const cursorTick = sToTick(Math.max(0, xToSec(x)))
       const next = Math.max(0, cursorTick - drag.startTick)
       onResizeEvent(drag.id, next)
     }
@@ -836,8 +998,8 @@ function SceneTimeline({
       }}
     >
       {events.map((ev) => {
-        const startSec = tickToSec(ev.tick)
-        const endSec = tickToSec(ev.tick + ev.duration)
+        const startSec = tToSec(ev.tick)
+        const endSec = tToSec(ev.tick + ev.duration)
         const x = secToX(startSec)
         const w = Math.max(2, secToX(endSec) - x)
         const isSel = ev.id === selectedId
@@ -915,17 +1077,29 @@ function ScenePicker({
 
 export default function BeatmapEditor() {
   const params = useParams<{ trackId: string; beatmapId: string }>()
-  const navigate = useNavigate()
   const trackId = params.trackId!
   const beatmapId = params.beatmapId!
 
   const [chart, setChart] = useState<ChartState | null>(null)
   const [meta, setMeta] = useState<BeatmapMeta | null>(null)
   const [loadError, setLoadError] = useState('')
+  // Cover art may not exist for every beatmap (older imports, in-flight uploads).
+  // We render the <img> optimistically and hide it on the first onError so the
+  // header collapses cleanly instead of showing a broken-image icon.
+  const [coverArtMissing, setCoverArtMissing] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saveMsg, setSaveMsg] = useState('')
   const [dirty, setDirty] = useState(false)
   const [snapDivisor, setSnapDivisor] = useState(4)
+
+  // Piecewise tempo map — recomputed whenever the chart's markers or
+  // resolution change. Every tick↔seconds conversion in the editor (canvas
+  // draw, click placement, drag, arrow nudge, VO firing, click track,
+  // timelines) reads this so multi-tempo charts stay phase-locked.
+  const tempoSegments = useMemo(() => {
+    if (!chart) return [{ tick: 0, seconds: 0, microBpm: 120000 }]
+    return buildTempoSegments(chart.tempoMarkers, chart.resolution)
+  }, [chart])
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
   // VO audio playback during transport. Each VO with a non-empty `file` gets
@@ -947,6 +1121,14 @@ export default function BeatmapEditor() {
     startY: number
     moved: boolean
   } | null>(null)
+  // Note-tool placement state. mousedown places a gem at sustain=0 and
+  // captures the start y; subsequent mousemove (drag up) live-updates the
+  // sustain length until mouseup. Quick click = no drag = stays at sustain 0.
+  const placeRef = useRef<{
+    idx: number
+    noteTick: number
+    startCy: number
+  } | null>(null)
   const [canvasSize, setCanvasSize] = useState({ w: 800, h: 800 })
 
   const [playing, setPlaying] = useState(false)
@@ -955,7 +1137,6 @@ export default function BeatmapEditor() {
   const [scrollSpeed, setScrollSpeed] = useState(450)
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [tool, setTool] = useState<'select' | 'note'>('select')
-  const [noteToolLane, setNoteToolLane] = useState(0)  // lane chosen for click-to-place (0–4)
   // Undo/redo history. Each entry is a snapshot of `notes` (plus the active
   // section name so undo across difficulty switches is safe). We keep up to
   // 100 steps and push only on logical operations (add/delete/paste/move-end),
@@ -987,6 +1168,13 @@ export default function BeatmapEditor() {
   // audio peaks rendered across the full gem width so you can eyeball whether
   // gems are placed on transients.
   const [waveformOnHighway, setWaveformOnHighway] = useState(false)
+  // WebAudio metronome. Schedules click sounds at each beat boundary against
+  // the AudioContext clock for sample-accurate timing. Downbeats (every 4th
+  // beat at 4/4) get a higher pitch so charters can hear bar boundaries.
+  const [clickEnabled, setClickEnabled] = useState(false)
+  const [clickVolume, setClickVolume] = useState(0.4)
+  const clickCtxRef = useRef<AudioContext | null>(null)
+  const clickGainRef = useRef<GainNode | null>(null)
   const audioSrc = audioSource === 'track-song'
     ? `/api/tracks/${trackId}/stems/song`
     : `/api/tracks/${trackId}/beatmaps/${beatmapId}/download/song.ogg`
@@ -1025,10 +1213,74 @@ export default function BeatmapEditor() {
 
   const addSectionAtPlayhead = useCallback(() => {
     if (!chart) return
-    const tick = Math.max(0, Math.round((currentTime * chart.bpm * chart.resolution) / 60))
+    const tick = secToTick(tempoSegments, chart.resolution, currentTime)
     const id = `section-${tick}-${Date.now()}`
     updateSections((prev) => [...prev, { id, tick, name: 'New section' }].sort((a, b) => a.tick - b.tick))
-  }, [chart, currentTime, updateSections])
+  }, [chart, currentTime, updateSections, tempoSegments])
+
+  // Tempo map editing. tempoMarkers must always have a tick=0 entry (the song
+  // origin tempo) — we surface this by disabling the tick-0 delete button and
+  // keeping the tick field read-only on that row.
+  const updateTempoMarkerBpm = useCallback((idx: number, bpm: number) => {
+    if (!Number.isFinite(bpm) || bpm <= 0) return
+    const microBpm = Math.max(1, Math.round(bpm * 1000))
+    setChart((prev) => {
+      if (!prev) return prev
+      const next = prev.tempoMarkers.slice()
+      if (!next[idx]) return prev
+      next[idx] = { ...next[idx], microBpm }
+      // bpm/bpmRaw are legacy display fields keyed off tick 0
+      const bpmRaw = next[0]?.microBpm ?? prev.bpmRaw
+      return { ...prev, tempoMarkers: next, bpm: bpmRaw / 1000, bpmRaw }
+    })
+    setDirty(true)
+  }, [])
+
+  const updateTempoMarkerTick = useCallback((idx: number, tick: number) => {
+    if (!Number.isFinite(tick) || tick < 0) return
+    setChart((prev) => {
+      if (!prev) return prev
+      if (idx === 0) return prev  // tick-0 origin is fixed
+      const next = prev.tempoMarkers.slice()
+      if (!next[idx]) return prev
+      next[idx] = { ...next[idx], tick: Math.round(tick) }
+      next.sort((a, b) => a.tick - b.tick)
+      return { ...prev, tempoMarkers: next }
+    })
+    setDirty(true)
+  }, [])
+
+  const deleteTempoMarker = useCallback((idx: number) => {
+    setChart((prev) => {
+      if (!prev) return prev
+      if (idx === 0) return prev  // can't delete the song-origin marker
+      const next = prev.tempoMarkers.filter((_, i) => i !== idx)
+      if (next.length === 0) return prev
+      const bpmRaw = next[0].microBpm
+      return { ...prev, tempoMarkers: next, bpm: bpmRaw / 1000, bpmRaw }
+    })
+    setDirty(true)
+  }, [])
+
+  const addTempoMarkerAtPlayhead = useCallback(() => {
+    if (!chart) return
+    const tick = secToTick(tempoSegments, chart.resolution, currentTime)
+    // No-op if there's already a marker at this tick — editing the existing
+    // one is more discoverable than silently overwriting.
+    if (chart.tempoMarkers.some((m) => m.tick === tick)) return
+    // Default new tempo to the preceding segment's bpm so the timing line
+    // doesn't jolt the instant you add a marker.
+    let i = tempoSegments.length - 1
+    while (i > 0 && tempoSegments[i].tick > tick) i--
+    const microBpm = tempoSegments[i]?.microBpm ?? 120000
+    setChart((prev) => {
+      if (!prev) return prev
+      const next = [...prev.tempoMarkers, { tick, microBpm }].sort((a, b) => a.tick - b.tick)
+      const bpmRaw = next[0].microBpm
+      return { ...prev, tempoMarkers: next, bpm: bpmRaw / 1000, bpmRaw }
+    })
+    setDirty(true)
+  }, [chart, currentTime, tempoSegments])
 
   const undo = useCallback(() => {
     setChart((prev) => {
@@ -1131,6 +1383,128 @@ export default function BeatmapEditor() {
     ap.mozPreservesPitch = true
     ap.webkitPreservesPitch = true
   }, [playbackRate])
+
+  // Live-update the click track output gain. Keeping it on a useEffect (vs.
+  // reading clickVolume inside the scheduler) avoids restarting the scheduler
+  // when the slider moves.
+  useEffect(() => {
+    if (clickGainRef.current) {
+      clickGainRef.current.gain.value = clickVolume
+    }
+  }, [clickVolume])
+
+  // Click track scheduler. While the transport is playing and the click is
+  // enabled, schedule short oscillator blips at every beat boundary against
+  // the AudioContext clock. Downbeats (every 4th beat, 4/4 assumed) get a
+  // higher pitch so charters can hear bar lines. Walks the tempo map so beats
+  // stay aligned through mid-song tempo changes; reseeds on seek drift or
+  // playback-rate changes so the click never desyncs from the song.
+  useEffect(() => {
+    if (!clickEnabled || !playing || !chart) return
+    const audio = audioRef.current
+    if (!audio) return
+    if (!clickCtxRef.current) {
+      const AC = window.AudioContext || (window as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+      if (!AC) return
+      clickCtxRef.current = new AC()
+      const gain = clickCtxRef.current.createGain()
+      gain.gain.value = clickVolume
+      gain.connect(clickCtxRef.current.destination)
+      clickGainRef.current = gain
+    }
+    const ctx = clickCtxRef.current
+    const gain = clickGainRef.current!
+    // Some browsers start the AudioContext suspended until user gesture; the
+    // play button is one, so this should resume cleanly.
+    if (ctx.state === 'suspended') ctx.resume().catch(() => undefined)
+
+    const resolution = chart.resolution
+
+    // Anchor: at time `anchorCtx` (AudioContext clock), the song was at
+    // `anchorAudio` (audio.currentTime). Future beats convert to ctx time via
+    //   ctxTime = anchorCtx + (beatSec - anchorAudio) / playbackRate
+    let anchorAudio = audio.currentTime
+    let anchorCtx = ctx.currentTime
+
+    const reseedBeat = (): number => {
+      // Walk beats from 0 until we pass the current audio position. Charts
+      // top out around ~3000 beats for a 5-minute song at 120 BPM — fast.
+      let i = 0
+      while (i < 50000) {
+        const t = tickToSec(tempoSegments, resolution, i * resolution)
+        if (t >= anchorAudio - 0.001) break
+        i++
+      }
+      return i
+    }
+    let nextBeat = reseedBeat()
+
+    const LOOKAHEAD_SEC = 0.12
+    const TICK_MS = 25
+    const scheduleClick = (ctxTime: number, isDownbeat: boolean) => {
+      const osc = ctx.createOscillator()
+      osc.type = 'square'
+      osc.frequency.value = isDownbeat ? 1600 : 1000
+      const env = ctx.createGain()
+      env.gain.setValueAtTime(0.0001, ctxTime)
+      env.gain.exponentialRampToValueAtTime(1, ctxTime + 0.001)
+      env.gain.exponentialRampToValueAtTime(0.0001, ctxTime + 0.04)
+      osc.connect(env).connect(gain)
+      osc.start(ctxTime)
+      osc.stop(ctxTime + 0.05)
+    }
+
+    let timer: number | null = null
+    const tick = () => {
+      if (!audioRef.current) return
+      const a = audioRef.current
+      // Drift check: if the audio's currentTime no longer matches what the
+      // anchor predicts (a seek happened, or the audio paused/buffered),
+      // reseed both the anchor and the beat counter.
+      const expected = anchorAudio + (ctx.currentTime - anchorCtx) * playbackRate
+      if (Math.abs(a.currentTime - expected) > 0.06 || a.paused) {
+        anchorAudio = a.currentTime
+        anchorCtx = ctx.currentTime
+        nextBeat = reseedBeat()
+        if (a.paused) {
+          timer = window.setTimeout(tick, TICK_MS)
+          return
+        }
+      }
+      const horizon = ctx.currentTime + LOOKAHEAD_SEC
+      while (true) {
+        const beatSec = tickToSec(tempoSegments, resolution, nextBeat * resolution)
+        const beatCtxTime = anchorCtx + (beatSec - anchorAudio) / Math.max(0.01, playbackRate)
+        if (beatCtxTime > horizon) break
+        // Drop beats that are already in the past (post-seek) — they'd
+        // either fire late or all at once.
+        if (beatCtxTime >= ctx.currentTime - 0.01) {
+          scheduleClick(beatCtxTime, nextBeat % 4 === 0)
+        }
+        nextBeat++
+        if (nextBeat > 200000) break
+      }
+      timer = window.setTimeout(tick, TICK_MS)
+    }
+    tick()
+
+    return () => {
+      if (timer !== null) clearTimeout(timer)
+    }
+  }, [clickEnabled, playing, chart, tempoSegments, playbackRate, clickVolume])
+
+  // Tear down the AudioContext on unmount so a backgrounded editor doesn't
+  // hold onto audio resources.
+  useEffect(() => {
+    return () => {
+      const ctx = clickCtxRef.current
+      if (ctx) {
+        ctx.close().catch(() => undefined)
+        clickCtxRef.current = null
+        clickGainRef.current = null
+      }
+    }
+  }, [])
 
   // Decode song.ogg → peaks for waveform overlay. Bucket size of 20ms gives
   // ~50 peaks/second, enough resolution to read transients on the runway
@@ -1249,15 +1623,16 @@ export default function BeatmapEditor() {
       ctx.fillText(SIDECAR_LABELS[i], cx, 12)
     }
 
-    const t2s = (tick: number) => tickToSeconds(tick, chart.bpm, chart.resolution)
+    const t2s = (tick: number) => tickToSec(tempoSegments, chart.resolution, tick)
+    const s2t = (sec: number) => secToTick(tempoSegments, chart.resolution, sec)
     const beatStep = chart.resolution
     const snapTicks = Math.max(1, Math.round(chart.resolution / snapDivisor))
 
     // Compute visible tick range (a bit beyond top/bottom so lines crossing edges still draw)
     const topSec = currentTime + (HIT + 200) / scrollSpeed
     const bottomSec = currentTime - (H - HIT + 200) / scrollSpeed
-    const startTick = Math.max(0, Math.floor((bottomSec * chart.bpm * chart.resolution) / 60))
-    const endTick = Math.ceil((topSec * chart.bpm * chart.resolution) / 60)
+    const startTick = s2t(Math.max(0, bottomSec))
+    const endTick = s2t(Math.max(0, topSec))
     const startBeat = Math.floor(startTick / beatStep) * beatStep
 
     // Snap subdivision lines (faint)
@@ -1318,8 +1693,17 @@ export default function BeatmapEditor() {
       text: string
     }
 
-    const ticksPerSec = (chart.bpm * chart.resolution) / 60
-    const tickFromSec = (s: number) => Math.max(0, s * ticksPerSec)
+    // Local ticks/sec at the current playhead — only used for visual minimums
+    // and music-segment width estimates, so an approximation against the
+    // active tempo is fine. (Note positions still use the full piecewise map
+    // via t2s/s2t above.)
+    const localMicroBpm = (() => {
+      let i = tempoSegments.length - 1
+      while (i > 0 && tempoSegments[i].seconds > currentTime) i--
+      return tempoSegments[i].microBpm
+    })()
+    const ticksPerSec = (localMicroBpm * chart.resolution) / 60000
+    const tickFromSec = (sec: number) => Math.max(0, sec * ticksPerSec)
     // Minimum visual height for instantaneous events: ~8 px worth of ticks.
     const MIN_TICK_DUR = Math.max(1, Math.round((8 / scrollSpeed) * ticksPerSec))
 
@@ -1469,6 +1853,14 @@ export default function BeatmapEditor() {
       const startBucket = Math.max(0, Math.floor(Math.min(topT, botT) / bucketSec))
       const endBucket = Math.min(peaks.length - 1, Math.ceil(Math.max(topT, botT) / bucketSec))
 
+      // Perceptual curve: raw PCM peaks compress everything quiet into a
+      // razor-thin sliver at the bottom of the dynamic range. A √amp pre-curve
+      // (≈ +6dB visual gain on quiet content) makes verses, fingerpicking, and
+      // intros legible without blowing out loud sections. Skip rendering for
+      // values under a small floor so silence stays silent — better than the
+      // 1-px-wide "dot" minimum that drew even at 0.001 amplitude.
+      const ampCurve = (a: number) => (a <= 0 ? 0 : Math.sqrt(a))
+      const AMP_FLOOR = 0.02
       if (waveformOnHighway) {
         // Mirrored bar centred at the gem-area midline. Each bucket emits a
         // single 2px-tall horizontal line whose half-width tracks amplitude,
@@ -1477,11 +1869,11 @@ export default function BeatmapEditor() {
         const halfMax = GEM_W * 0.46  // leaves a little margin so loud peaks don't kiss the sidecar
         ctx.fillStyle = 'rgba(34, 211, 238, 0.28)'
         for (let b = startBucket; b <= endBucket; b++) {
+          const a = ampCurve(peaks[b])
+          if (a < AMP_FLOOR) continue
           const t = b * bucketSec
           const y = HIT - (t - currentTime) * scrollSpeed
-          const amp = peaks[b]
-          if (amp <= 0) continue
-          const halfW = Math.max(1, amp * halfMax)
+          const halfW = a * halfMax
           ctx.fillRect(centerX - halfW, y - 1, halfW * 2, 2)
         }
         // Faint vertical centre line so the spine reads even during silence.
@@ -1492,11 +1884,11 @@ export default function BeatmapEditor() {
         const COLUMN_W = 14
         ctx.fillStyle = 'rgba(34, 211, 238, 0.55)'
         for (let b = startBucket; b <= endBucket; b++) {
+          const a = ampCurve(peaks[b])
+          if (a < AMP_FLOOR) continue
           const t = b * bucketSec
           const y = HIT - (t - currentTime) * scrollSpeed
-          const amp = peaks[b]
-          if (amp <= 0) continue
-          const w = Math.max(1, amp * COLUMN_W)
+          const w = a * COLUMN_W
           ctx.fillRect(0, y - 1, w, 2)
         }
         ctx.fillStyle = 'rgba(34, 211, 238, 0.12)'
@@ -1596,34 +1988,6 @@ export default function BeatmapEditor() {
       }
     }
 
-    // Note-tool ghost: when the user is in click-to-place mode, render a
-    // translucent circle in the selected lane at the snapped tick under the
-    // playhead so it's clear *where* a click will drop a note. Open notes
-    // (lane 7) render as a wide bar instead.
-    if (tool === 'note' && chart) {
-      const ghostLane = noteToolLane
-      if (ghostLane === 7) {
-        ctx.fillStyle = '#a855f7' + '55'
-        ctx.fillRect(0, HIT - 7, GEM_W, 14)
-        ctx.strokeStyle = '#ffffff'
-        ctx.setLineDash([4, 4])
-        ctx.lineWidth = 1.5
-        ctx.strokeRect(0.5, HIT - 7 + 0.5, GEM_W - 1, 13)
-        ctx.setLineDash([])
-      } else {
-        const x = (ghostLane + 0.5) * LANE_W
-        ctx.beginPath()
-        ctx.arc(x, HIT, NOTE_R, 0, Math.PI * 2)
-        ctx.fillStyle = LANE_FILL[ghostLane] + '55'
-        ctx.fill()
-        ctx.strokeStyle = '#ffffff'
-        ctx.setLineDash([4, 4])
-        ctx.lineWidth = 1.5
-        ctx.stroke()
-        ctx.setLineDash([])
-      }
-    }
-
     // Lane labels at bottom — drum-type or colour name + colour swatch underneath
     ctx.textAlign = 'center'
     for (let lane = 0; lane < NUM_LANES; lane++) {
@@ -1664,11 +2028,9 @@ export default function BeatmapEditor() {
     }
     if (tool === 'note') {
       ctx.fillStyle = '#a78bfa'
-      const ghostLaneName = noteToolLane === 7 ? 'OPEN (full-width)'
-        : `lane ${noteToolLane + 1} (${laneLabels[noteToolLane] ?? ''})`
-      ctx.fillText(`Note tool · ${ghostLaneName}`, 12, 62)
+      ctx.fillText('Note tool · click a lane to drop a gem · shift-click for OPEN', 12, 62)
     }
-  }, [chart, currentTime, scrollSpeed, selectedIds, snapDivisor, isDrums, laneLabels, tool, noteToolLane, waveformOnHighway])
+  }, [chart, currentTime, scrollSpeed, selectedIds, snapDivisor, isDrums, laneLabels, tool, waveformOnHighway])
 
   // Resize canvas backing store on container size change
   useEffect(() => {
@@ -1713,7 +2075,7 @@ export default function BeatmapEditor() {
     let bestDist = 36
     for (let i = 0; i < chart.notes.length; i++) {
       const n = chart.notes[i]
-      const noteSec = tickToSeconds(n.tick, chart.bpm, chart.resolution)
+      const noteSec = tickToSec(tempoSegments, chart.resolution, n.tick)
       const y = HIT - (noteSec - currentTime) * scrollSpeed
       // Open notes (lane 7) span the full gem width — accept a click anywhere
       // along the bar but with a tighter vertical tolerance to match the bar
@@ -1772,21 +2134,30 @@ export default function BeatmapEditor() {
       return
     }
 
-    // Note tool: click on empty area drops a new note in the chosen lane at
-    // the snapped tick under the cursor. The new note becomes the only
-    // selection so further nudges/deletes are scoped to it.
+    // Note tool: click drops a gem at the cursor — lane is inferred from the
+    // x-position (gem area is split into five equal lanes) and tick from the
+    // y-position snapped to the current grid. Shift+click drops an Open note
+    // (lane 7) instead — full-width strum, ignoring the clicked lane. Clicks
+    // outside the gem area (in the sidecar) are ignored to avoid stray notes.
     if (tool === 'note') {
       const canvas = canvasRef.current!
       const HIT = canvas.height - 110
+      const GEM_W = canvas.width * 0.64
+      if (cx >= GEM_W) return  // sidecar click — ignore
+      const LANE_W = GEM_W / 5
+      const lane = e.shiftKey ? 7 : Math.max(0, Math.min(4, Math.floor(cx / LANE_W)))
       const targetSec = currentTime + (HIT - cy) / scrollSpeed
-      const targetTickRaw = Math.max(0, (targetSec * chart.bpm * chart.resolution) / 60)
+      const targetTickRaw = secToTick(tempoSegments, chart.resolution, Math.max(0, targetSec))
       const snapTicks = Math.max(1, Math.round(chart.resolution / snapDivisor))
       const newTick = Math.round(targetTickRaw / snapTicks) * snapTicks
-      const newNote: ChartNote = { tick: newTick, lane: noteToolLane, sustain: 0 }
+      const newNote: ChartNote = { tick: newTick, lane, sustain: 0 }
       const next = [...chart.notes, newNote].sort((a, b) => a.tick - b.tick || a.lane - b.lane)
       const newIdx = next.findIndex((n) => n === newNote)
       commitNotes(next)
       setSelectedIds(new Set([newIdx]))
+      // Stay engaged for a sustain-drag: if the user holds the mouse and drags
+      // up before releasing, we extend the just-placed note's sustain live.
+      placeRef.current = { idx: newIdx, noteTick: newTick, startCy: cy }
       return
     }
 
@@ -1795,9 +2166,42 @@ export default function BeatmapEditor() {
   }
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!chart || !dragRef.current) return
+    if (!chart) return
     const canvas = canvasRef.current!
     const { cx, cy } = canvasToCoords(e)
+
+    // Sustain-drag during note placement: convert the upward drag distance
+    // from startCy to a snapped tick count and apply it to the just-placed
+    // note's sustain. Quick clicks (dy small) leave sustain at 0.
+    if (placeRef.current) {
+      const p = placeRef.current
+      const dyUp = p.startCy - cy   // positive when dragging up
+      if (dyUp < 4) {
+        // Below threshold — keep sustain at 0 (allow undo of accidental tiny drift)
+        if (chart.notes[p.idx]?.sustain !== 0) {
+          const next = chart.notes.slice()
+          next[p.idx] = { ...next[p.idx], sustain: 0 }
+          setChart({ ...chart, notes: next })
+          setDirty(true)
+        }
+        return
+      }
+      const sustainSec = dyUp / scrollSpeed
+      const targetEndSec = tickToSec(tempoSegments, chart.resolution, p.noteTick) + sustainSec
+      const targetEndTick = secToTick(tempoSegments, chart.resolution, targetEndSec)
+      const snapTicks = Math.max(1, Math.round(chart.resolution / snapDivisor))
+      const snappedEnd = Math.round(targetEndTick / snapTicks) * snapTicks
+      const sustainTicks = Math.max(0, snappedEnd - p.noteTick)
+      const cur = chart.notes[p.idx]
+      if (!cur || cur.sustain === sustainTicks) return
+      const next = chart.notes.slice()
+      next[p.idx] = { ...cur, sustain: sustainTicks }
+      setChart({ ...chart, notes: next })
+      setDirty(true)
+      return
+    }
+
+    if (!dragRef.current) return
     const dx = cx - dragRef.current.startX
     const dy = cy - dragRef.current.startY
     if (!dragRef.current.moved && Math.hypot(dx, dy) < 4) return
@@ -1811,7 +2215,7 @@ export default function BeatmapEditor() {
 
     const newAnchorLane = Math.max(0, Math.min(4, Math.floor(cx / LANE_W)))
     const targetSec = currentTime + (HIT - cy) / scrollSpeed
-    const targetTickRaw = Math.max(0, (targetSec * chart.bpm * chart.resolution) / 60)
+    const targetTickRaw = secToTick(tempoSegments, chart.resolution, Math.max(0, targetSec))
     const snapTicks = Math.max(1, Math.round(chart.resolution / snapDivisor))
     const newAnchorTick = Math.round(targetTickRaw / snapTicks) * snapTicks
 
@@ -1858,6 +2262,11 @@ export default function BeatmapEditor() {
       })
     }
     dragRef.current = null
+    // The just-placed note is committed to chart.notes; any sustain extension
+    // during this drag is folded into the original placement's history entry.
+    // (commitNotes already pushed the pre-placement state onto the stack on
+    // mousedown — one undo reverts the whole hold-note authoring stroke.)
+    placeRef.current = null
   }
 
   // Keyboard
@@ -1892,6 +2301,16 @@ export default function BeatmapEditor() {
         if (a) { if (a.paused) a.play(); else a.pause() }
         return
       }
+      if (e.key === 'Home' && !isCtrl) {
+        e.preventDefault()
+        seekSeconds(0)
+        return
+      }
+      if (e.key === 'End' && !isCtrl) {
+        e.preventDefault()
+        seekSeconds(duration || 0)
+        return
+      }
 
       // Copy / cut: capture selected notes with ticks made relative to the
       // earliest selected note so paste can drop them at the playhead.
@@ -1916,7 +2335,7 @@ export default function BeatmapEditor() {
       }
       if (isCtrl && (e.key === 'v' || e.key === 'V')) {
         if (clipboardRef.current.length === 0) return
-        const playheadTickRaw = (currentTime * chart.bpm * chart.resolution) / 60
+        const playheadTickRaw = secToTick(tempoSegments, chart.resolution, currentTime)
         const snapTicks = Math.max(1, Math.round(chart.resolution / snapDivisor))
         const baseTick = Math.max(0, Math.round(playheadTickRaw / snapTicks) * snapTicks)
         const pasted = clipboardRef.current.map((n) => ({
@@ -1937,6 +2356,29 @@ export default function BeatmapEditor() {
       if (isCtrl && (e.key === 'a' || e.key === 'A')) {
         e.preventDefault()
         setSelectedIds(new Set(chart.notes.map((_, i) => i)))
+        return
+      }
+
+      // = quantizes every selected note's tick to the nearest snapDivisor
+      // multiple. Single history entry so undo reverts the whole batch.
+      // Modifiers (lane 5/6) and open notes ride along — they get snapped
+      // too so they stay aligned with the gem notes they accompany.
+      if (!isCtrl && (e.key === '=' || e.key === '+')) {
+        if (selectedIds.size === 0) return
+        e.preventDefault()
+        const snapTicks = Math.max(1, Math.round(chart.resolution / snapDivisor))
+        let anyChanged = false
+        const next = chart.notes.slice()
+        selectedIds.forEach((idx) => {
+          const cur = next[idx]
+          if (!cur) return
+          const snapped = Math.max(0, Math.round(cur.tick / snapTicks) * snapTicks)
+          if (snapped !== cur.tick) {
+            next[idx] = { ...cur, tick: snapped }
+            anyChanged = true
+          }
+        })
+        if (anyChanged) commitNotes(next)
         return
       }
 
@@ -2056,6 +2498,7 @@ export default function BeatmapEditor() {
     }
     let newFull = replaceSectionNotes(chart.fullText, chart.activeName, chart.notes)
     newFull = applyTutorialToFullText(newFull, chart.tutorial, chart.tutorialEnabled, chart.musicSections)
+    newFull = applySyncTrackToFullText(newFull, chart.tempoMarkers, chart.timeSigs, chart.syncOther)
     const passthroughWithSections = [...chart.sceneEventsPassthrough, ...sectionLines(chart.sections)]
     newFull = applySceneToFullText(
       newFull,
@@ -2087,6 +2530,7 @@ export default function BeatmapEditor() {
     try {
       let newFull = replaceSectionNotes(chart.fullText, chart.activeName, chart.notes)
       newFull = applyTutorialToFullText(newFull, chart.tutorial, chart.tutorialEnabled, chart.musicSections)
+      newFull = applySyncTrackToFullText(newFull, chart.tempoMarkers, chart.timeSigs, chart.syncOther)
       // Merge section markers back into passthrough so applySceneToFullText
       // re-emits them as standard `E "section ..."` rows in [Events].
       const passthroughWithSections = [...chart.sceneEventsPassthrough, ...sectionLines(chart.sections)]
@@ -2117,10 +2561,20 @@ export default function BeatmapEditor() {
     }
   }
 
-  const handleClose = () => {
-    if (dirty && !window.confirm('Discard unsaved changes?')) return
-    navigate(`/?id=${trackId}`)
-  }
+  // Dirty-aware exit guard. With the in-header Back button gone, the browser
+  // back / tab close path needs its own warning so we don't silently drop
+  // edits. beforeunload only fires for hard navigation (tab close, refresh) —
+  // for in-app navigation we still warn via the React Router blocker further
+  // down if/when it gets wired up.
+  useEffect(() => {
+    if (!dirty) return
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault()
+      e.returnValue = ''  // legacy Chrome path
+    }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+  }, [dirty])
 
   // ── Tutorial editing helpers ──────────────────────────────────────────────
   const updateTutorial = (next: TutorialEvent[], enabled?: boolean) => {
@@ -2145,9 +2599,9 @@ export default function BeatmapEditor() {
   const playheadTick = useMemo(() => {
     if (!chart) return 0
     const snap = Math.max(1, Math.round(chart.resolution / snapDivisor))
-    const raw = (currentTime * chart.bpm * chart.resolution) / 60
+    const raw = secToTick(tempoSegments, chart.resolution, currentTime)
     return Math.max(0, Math.round(raw / snap) * snap)
-  }, [chart, currentTime, snapDivisor])
+  }, [chart, currentTime, snapDivisor, tempoSegments])
 
   const addVo = () => {
     if (!chart) return
@@ -2161,7 +2615,13 @@ export default function BeatmapEditor() {
       voiceId: '',
     }
     updateTutorial([...chart.tutorial, ev], true)
+    setSelectedTutorialId(ev.id)
   }
+
+  // Tutorial events render as a single editor panel — pick one from the
+  // dropdown to edit it. Null means "nothing selected"; we auto-pick the
+  // first event after add/delete so the panel doesn't go blank.
+  const [selectedTutorialId, setSelectedTutorialId] = useState<string | null>(null)
 
   // ── Music segments — upload modal state + handler ────────────────────────
   const [musicModal, setMusicModal] = useState<{ tick: number; difficulty: string } | null>(null)
@@ -2213,6 +2673,7 @@ export default function BeatmapEditor() {
       })
       setDirty(true)
       setMusicModal(null)
+      setSelectedTutorialId(ev.id)
     } catch (e) {
       setMusicError((e as Error).message)
     } finally {
@@ -2234,6 +2695,7 @@ export default function BeatmapEditor() {
       musicSections: nextSections,
     })
     setDirty(true)
+    setSelectedTutorialId((cur) => (cur === ev.id ? null : cur))
   }
 
   const addStep = () => {
@@ -2249,11 +2711,13 @@ export default function BeatmapEditor() {
       next: '',
     }
     updateTutorial([...chart.tutorial, ev], true)
+    setSelectedTutorialId(ev.id)
   }
 
   const removeTutorialEvent = (id: string) => {
     if (!chart) return
     updateTutorial(chart.tutorial.filter((e) => e.id !== id))
+    setSelectedTutorialId((cur) => (cur === id ? null : cur))
   }
 
   const updateTutorialEvent = (id: string, patch: Partial<TutorialEvent>) => {
@@ -2318,7 +2782,7 @@ export default function BeatmapEditor() {
 
   const seekToTick = (tick: number) => {
     if (!chart || !audioRef.current) return
-    const sec = (tick / chart.resolution) * (60 / chart.bpm)
+    const sec = tickToSec(tempoSegments, chart.resolution, tick)
     audioRef.current.currentTime = sec
     setCurrentTime(sec)
   }
@@ -2364,7 +2828,7 @@ export default function BeatmapEditor() {
       firedVosRef.current = new Set()
       for (const ev of chart.tutorial) {
         if (ev.kind !== 'vo') continue
-        const voSec = (ev.tick / chart.resolution) * (60 / chart.bpm)
+        const voSec = tickToSec(tempoSegments, chart.resolution, ev.tick)
         if (currentTime > voSec + 0.05) {
           firedVosRef.current.add(ev.id)
         }
@@ -2378,7 +2842,7 @@ export default function BeatmapEditor() {
     if (!playing) return
     for (const ev of chart.tutorial) {
       if (ev.kind !== 'vo' || !ev.file) continue
-      const voSec = (ev.tick / chart.resolution) * (60 / chart.bpm)
+      const voSec = tickToSec(tempoSegments, chart.resolution, ev.tick)
       if (currentTime >= voSec && !firedVosRef.current.has(ev.id)) {
         const a = voAudiosRef.current.get(ev.id)
         if (a) {
@@ -2499,7 +2963,7 @@ export default function BeatmapEditor() {
 
   const fmtTick = (tick: number) => {
     if (!chart) return ''
-    const sec = (tick / chart.resolution) * (60 / chart.bpm)
+    const sec = tickToSec(tempoSegments, chart.resolution, tick)
     const m = Math.floor(sec / 60)
     const s = Math.floor(sec % 60)
     const cs = Math.floor((sec % 1) * 100)
@@ -2523,33 +2987,15 @@ export default function BeatmapEditor() {
   return (
     <div className="fixed inset-0 bg-black flex flex-col z-[60]">
       <header className="h-20 shrink-0 border-b border-gray-800 bg-gray-950 flex items-center px-3 gap-3">
-        <button
-          onClick={handleClose}
-          className="shrink-0 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-md text-sm font-medium transition-colors"
-        >
-          ← Back
-        </button>
-        <div className="w-44 shrink-0 min-w-0">
-          <h1 className="text-sm font-semibold text-gray-100 truncate">
-            {meta?.name || (loadError ? 'Failed to load' : 'Beatmap editor')}
-          </h1>
-          <p className="text-[11px] text-gray-500 truncate leading-tight">
-            {chart
-              ? `${chart.activeName || '—'} · ${noteCount} notes · ${chart.bpm.toFixed(1)} BPM · res ${chart.resolution}`
-              : loadError
-                ? `Error: ${loadError}`
-                : 'Loading…'}
-          </p>
-        </div>
-        {/* Full-song zoomable timeline. Sits between title and save button. */}
-        {/* Stacked timelines: tutorial events on top, scene events below. */}
+        {/* Title + cover live in the left sidebar now; use the browser back
+            button to leave. The whole header is the timelines. */}
         <div className="flex-1 min-w-0 flex flex-col gap-1">
           <div className="h-7">
             {chart && duration > 0 ? (
               <TutorialTimeline
                 duration={duration}
                 currentTime={currentTime}
-                bpm={chart.bpm}
+                tempoSegments={tempoSegments}
                 resolution={chart.resolution}
                 events={chart.tutorialEnabled ? chart.tutorial : []}
                 snapDivisor={snapDivisor}
@@ -2582,7 +3028,7 @@ export default function BeatmapEditor() {
               {chart && duration > 0 ? (
                 <SceneTimeline
                   duration={duration}
-                  bpm={chart.bpm}
+                  tempoSegments={tempoSegments}
                   resolution={chart.resolution}
                   events={chart.sceneEvents}
                   selectedId={sceneSelectedId}
@@ -2613,33 +3059,97 @@ export default function BeatmapEditor() {
             capped at ~420px so the lanes sit at a comfortable density even
             on wide monitors. The canvas backing-store is sized to this
             container by the ResizeObserver, not to the full viewport. */}
-        <div className="flex-1 flex justify-center bg-black min-w-0 px-4">
-          <div ref={containerRef} className="relative w-full max-w-[660px]">
-            <canvas
-              ref={canvasRef}
-              onMouseDown={handleMouseDown}
-              onMouseMove={handleMouseMove}
-              onMouseUp={handleMouseUp}
-              onMouseLeave={handleMouseUp}
-              className="absolute inset-0 w-full h-full cursor-crosshair"
-            />
-          </div>
-        </div>
+        <aside className="w-80 shrink-0 border-r border-gray-800 bg-gray-950 overflow-y-auto p-4 space-y-5">
+          <section className="flex items-center gap-3">
+            {!coverArtMissing && (
+              <img
+                src={`/api/tracks/${trackId}/stems/album_png`}
+                alt="cover"
+                onError={() => setCoverArtMissing(true)}
+                className="shrink-0 h-14 w-14 rounded object-cover border border-gray-800 bg-gray-900"
+              />
+            )}
+            <div className="min-w-0 flex-1">
+              <h1 className="text-sm font-semibold text-gray-100 truncate">
+                {meta?.name || (loadError ? 'Failed to load' : 'Beatmap editor')}
+              </h1>
+              <p className="text-[11px] text-gray-500 leading-tight truncate">
+                {chart
+                  ? `${chart.activeName || '—'} · ${noteCount} notes`
+                  : loadError
+                    ? `Error: ${loadError}`
+                    : 'Loading…'}
+              </p>
+              {chart && (
+                <p className="text-[11px] text-gray-500 leading-tight font-mono">
+                  {chart.bpm.toFixed(1)} BPM · res {chart.resolution}
+                </p>
+              )}
+            </div>
+          </section>
 
-        <aside className="w-80 shrink-0 border-l border-gray-800 bg-gray-950 overflow-y-auto p-4 space-y-5">
           <section>
             <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Transport</h3>
-            <div className="flex items-center gap-2 mb-2">
+            <div className="flex items-center gap-1 mb-2">
+              <button
+                onClick={() => seekSeconds(0)}
+                className="w-7 h-7 rounded bg-gray-800 hover:bg-gray-700 text-gray-200 flex items-center justify-center text-xs"
+                aria-label="Rewind to start"
+                title="Rewind to start (Home)"
+              >
+                ⏮
+              </button>
+              <button
+                onClick={() => {
+                  if (!chart) return
+                  const stepTicks = Math.max(1, Math.round(chart.resolution / snapDivisor))
+                  const curTick = secToTick(tempoSegments, chart.resolution, currentTime)
+                  const newTick = Math.max(0, curTick - stepTicks)
+                  seekSeconds(tickToSec(tempoSegments, chart.resolution, newTick))
+                }}
+                disabled={!chart}
+                className="w-7 h-7 rounded bg-gray-800 hover:bg-gray-700 disabled:opacity-30 text-gray-200 flex items-center justify-center text-[10px] font-mono"
+                aria-label="Nudge back one snap"
+                title="Back one snap unit (current grid)"
+              >
+                −
+              </button>
               <button
                 onClick={togglePlay}
                 className="w-9 h-9 rounded-full bg-jam-600 hover:bg-jam-500 text-white flex items-center justify-center text-sm"
                 aria-label={playing ? 'Pause' : 'Play'}
+                title={playing ? 'Pause (Space)' : 'Play (Space)'}
               >
                 {playing ? '❚❚' : '▶'}
               </button>
-              <span className="text-xs font-mono text-gray-400">
+              <button
+                onClick={() => {
+                  if (!chart) return
+                  const stepTicks = Math.max(1, Math.round(chart.resolution / snapDivisor))
+                  const curTick = secToTick(tempoSegments, chart.resolution, currentTime)
+                  const newTick = curTick + stepTicks
+                  const newSec = tickToSec(tempoSegments, chart.resolution, newTick)
+                  seekSeconds(duration > 0 ? Math.min(duration, newSec) : newSec)
+                }}
+                disabled={!chart}
+                className="w-7 h-7 rounded bg-gray-800 hover:bg-gray-700 disabled:opacity-30 text-gray-200 flex items-center justify-center text-[10px] font-mono"
+                aria-label="Nudge forward one snap"
+                title="Forward one snap unit (current grid)"
+              >
+                +
+              </button>
+              <button
+                onClick={() => seekSeconds(duration || 0)}
+                disabled={!duration}
+                className="w-7 h-7 rounded bg-gray-800 hover:bg-gray-700 disabled:opacity-30 text-gray-200 flex items-center justify-center text-xs"
+                aria-label="Skip to end"
+                title="Skip to end (End)"
+              >
+                ⏭
+              </button>
+              <span className="ml-1 text-[11px] font-mono text-gray-400 tabular-nums">
                 {Math.floor(currentTime / 60)}:{Math.floor(currentTime % 60).toString().padStart(2, '0')}
-                {' / '}
+                <span className="text-gray-600"> / </span>
                 {Math.floor(duration / 60)}:{Math.floor(duration % 60).toString().padStart(2, '0')}
               </span>
             </div>
@@ -2692,6 +3202,35 @@ export default function BeatmapEditor() {
                 {waveformOnHighway ? 'on' : 'off'}
               </span>
             </label>
+            <label className="mt-2 flex items-center gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={clickEnabled}
+                onChange={(e) => setClickEnabled(e.target.checked)}
+                className="h-3.5 w-3.5 rounded border-gray-600 bg-gray-900 accent-amber-500 cursor-pointer"
+              />
+              <span className="text-[11px] text-gray-300">Click track</span>
+              <span className="text-[10px] text-gray-500 ml-auto" title="Square-wave click on every beat. Higher pitch every 4th beat (downbeat).">
+                {clickEnabled ? 'on' : 'off'}
+              </span>
+            </label>
+            <div className="mt-1 flex items-center gap-2">
+              <span className="text-[11px] text-gray-500 shrink-0">Click vol</span>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                value={Math.round(clickVolume * 100)}
+                onChange={(e) => setClickVolume(Number(e.target.value) / 100)}
+                disabled={!clickEnabled}
+                className="flex-1 accent-amber-500 disabled:opacity-40"
+                title="Click volume"
+              />
+              <span className="text-[11px] font-mono text-gray-300 w-10 text-right shrink-0">
+                {Math.round(clickVolume * 100)}%
+              </span>
+            </div>
             <div className="mt-2 flex items-center gap-2">
               <span className="text-[11px] text-gray-500 shrink-0">Speed</span>
               <input
@@ -2739,44 +3278,11 @@ export default function BeatmapEditor() {
                     ? 'bg-jam-600 text-white'
                     : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
                 }`}
-                title="Note tool (2) — click on the runway to drop a note in the chosen lane"
+                title="Note tool (2) — click a lane to drop a gem · shift-click for OPEN"
               >
                 ✚ Note <span className="text-[10px] opacity-60">(2)</span>
               </button>
             </div>
-            {tool === 'note' && (
-              <div className="mb-2">
-                <span className="text-[11px] text-gray-500 block mb-1">Lane to drop</span>
-                <div className="grid grid-cols-5 gap-1">
-                  {[0, 1, 2, 3, 4].map((lane) => (
-                    <button
-                      key={lane}
-                      onClick={() => setNoteToolLane(lane)}
-                      className={`px-1 py-1.5 rounded text-[10px] font-mono transition-colors ${
-                        noteToolLane === lane
-                          ? 'ring-2 ring-white text-white'
-                          : 'text-gray-300 hover:opacity-80'
-                      }`}
-                      style={{ backgroundColor: LANE_FILL[lane] }}
-                      title={laneLabels[lane]}
-                    >
-                      {laneLabels[lane]}
-                    </button>
-                  ))}
-                </div>
-                <button
-                  onClick={() => setNoteToolLane(7)}
-                  className={`mt-1 w-full px-1 py-1.5 rounded text-[10px] font-mono transition-colors ${
-                    noteToolLane === 7
-                      ? 'ring-2 ring-white text-white bg-violet-600'
-                      : 'text-violet-200 hover:opacity-80 bg-violet-700/70'
-                  }`}
-                  title="Open note — full-width strum"
-                >
-                  Open (full-width)
-                </button>
-              </div>
-            )}
             <div className="flex items-stretch gap-1">
               <button
                 onClick={undo}
@@ -2798,10 +3304,152 @@ export default function BeatmapEditor() {
             <p className="text-[10px] text-gray-600 mt-1.5 leading-snug">
               Shift-click to multi-select. Ctrl/Cmd + C/X/V copy, cut, paste at playhead. Ctrl+A selects all.
               <br />
-              F = toggle force-HOPO · T = toggle tap · O = toggle open · H = toggle 1-beat sustain.
+              F = toggle force-HOPO · T = toggle tap · O = toggle open · H = toggle 1-beat sustain · = quantize to grid.
+              <br />
+              <span className="text-gray-500">Note tool: click a lane to drop a gem · drag up while clicking to set a hold · shift-click for OPEN.</span>
+            </p>
+            {chart && selectedIds.size >= 1 && (() => {
+              // Sustain editor — visible whenever at least one gem/open is
+              // selected. For multi-selection we show the value of the first
+              // selected note as a representative; quick-set buttons apply
+              // the same length to every selected gem/open.
+              const ids = Array.from(selectedIds)
+              const sustainable = ids
+                .map((i) => chart.notes[i])
+                .filter((n): n is ChartNote => !!n && (n.lane <= 4 || n.lane === 7))
+              if (sustainable.length === 0) return null
+              const first = sustainable[0]
+              const setSustain = (ticks: number) => {
+                const next = chart.notes.slice()
+                let changed = false
+                for (const idx of ids) {
+                  const cur = next[idx]
+                  if (!cur) continue
+                  if (cur.lane > 4 && cur.lane !== 7) continue
+                  if (cur.sustain !== ticks) {
+                    next[idx] = { ...cur, sustain: Math.max(0, Math.round(ticks)) }
+                    changed = true
+                  }
+                }
+                if (changed) commitNotes(next)
+              }
+              const beatPresets: { label: string; beats: number }[] = [
+                { label: '0', beats: 0 },
+                { label: '¼', beats: 0.25 },
+                { label: '½', beats: 0.5 },
+                { label: '1', beats: 1 },
+                { label: '2', beats: 2 },
+                { label: '4', beats: 4 },
+              ]
+              return (
+                <div className="mt-2 pt-2 border-t border-gray-800">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[11px] text-gray-400 font-medium">
+                      Sustain {sustainable.length > 1 ? `(${sustainable.length})` : ''}
+                    </span>
+                    <span className="text-[10px] text-gray-600 font-mono">
+                      {(first.sustain / chart.resolution).toFixed(2)} beats
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1 mb-1">
+                    <input
+                      type="number"
+                      min={0}
+                      step={1}
+                      value={first.sustain}
+                      onChange={(e) => setSustain(Number(e.target.value) || 0)}
+                      className="flex-1 min-w-0 bg-gray-800 border border-gray-700 rounded px-1.5 py-1 text-[11px] font-mono text-gray-200 focus:outline-none focus:border-jam-500"
+                      title="Sustain length in ticks"
+                    />
+                    <span className="text-[10px] text-gray-500 font-mono shrink-0">ticks</span>
+                  </div>
+                  <div className="grid grid-cols-6 gap-1">
+                    {beatPresets.map((p) => (
+                      <button
+                        key={p.label}
+                        onClick={() => setSustain(Math.round(p.beats * chart.resolution))}
+                        className={`px-1 py-1 rounded text-[10px] font-mono transition-colors ${
+                          first.sustain === Math.round(p.beats * chart.resolution)
+                            ? 'bg-jam-600 text-white'
+                            : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+                        }`}
+                        title={`${p.beats === 0 ? 'Single hit' : `${p.beats} beat${p.beats === 1 ? '' : 's'}`}`}
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )
+            })()}
+          </section>
+
+          <section>
+            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Snap to grid</h3>
+            <div className="grid grid-cols-4 gap-1">
+              {SNAP_OPTIONS.map((opt) => (
+                <button
+                  key={opt.divisor}
+                  onClick={() => setSnapDivisor(opt.divisor)}
+                  className={`px-2 py-1.5 rounded text-xs font-medium transition-colors ${
+                    snapDivisor === opt.divisor
+                      ? 'bg-jam-600 text-white'
+                      : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+            <p className="text-[11px] text-gray-600 mt-1">
+              Drag-to-move and arrow nudge snap to this beat fraction.
             </p>
           </section>
 
+          <section>
+            <div className="flex items-baseline justify-between mb-2">
+              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Scroll speed</h3>
+              <span className="text-[11px] font-mono text-gray-500 tabular-nums">{scrollSpeed} px/s</span>
+            </div>
+            <input
+              type="range"
+              min={150}
+              max={1200}
+              step={25}
+              value={scrollSpeed}
+              onChange={(e) => setScrollSpeed(Number(e.target.value))}
+              className="w-full accent-jam-500"
+            />
+          </section>
+
+          <section>
+            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Shortcuts</h3>
+            <p className="text-[10px] text-gray-500 leading-snug">
+              <span className="font-mono text-gray-300">Click</span> select ·
+              <span className="font-mono text-gray-300"> Drag</span> move ·
+              <span className="font-mono text-gray-300"> ←/→</span> nudge tick ·
+              <span className="font-mono text-gray-300"> ↑/↓</span> lane ·
+              <span className="font-mono text-gray-300"> H</span> hold ·
+              <span className="font-mono text-gray-300"> Del</span> delete ·
+              <span className="font-mono text-gray-300"> Space</span> play
+            </p>
+          </section>
+        </aside>
+
+        <div className="flex-1 flex justify-center bg-black min-w-0 px-4">
+          <div ref={containerRef} className="relative w-full max-w-[660px]">
+            <canvas
+              ref={canvasRef}
+              onMouseDown={handleMouseDown}
+              onMouseMove={handleMouseMove}
+              onMouseUp={handleMouseUp}
+              onMouseLeave={handleMouseUp}
+              className="absolute inset-0 w-full h-full cursor-crosshair"
+            />
+          </div>
+        </div>
+
+        <aside className="w-80 shrink-0 border-l border-gray-800 bg-gray-950 overflow-y-auto p-4 space-y-5">
           <section>
             <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Difficulty</h3>
             <select
@@ -2843,7 +3491,7 @@ export default function BeatmapEditor() {
                     <button
                       onClick={() => {
                         if (!audioRef.current || !chart) return
-                        const sec_t = (sec.tick / chart.resolution) * (60 / chart.bpm)
+                        const sec_t = tickToSec(tempoSegments, chart.resolution, sec.tick)
                         audioRef.current.currentTime = sec_t
                         setCurrentTime(sec_t)
                       }}
@@ -2875,72 +3523,70 @@ export default function BeatmapEditor() {
           </section>
 
           <section>
-            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Snap to grid</h3>
-            <div className="grid grid-cols-4 gap-1">
-              {SNAP_OPTIONS.map((opt) => (
-                <button
-                  key={opt.divisor}
-                  onClick={() => setSnapDivisor(opt.divisor)}
-                  className={`px-2 py-1.5 rounded text-xs font-medium transition-colors ${
-                    snapDivisor === opt.divisor
-                      ? 'bg-jam-600 text-white'
-                      : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
-                  }`}
-                >
-                  {opt.label}
-                </button>
-              ))}
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Tempo map</h3>
+              <button
+                onClick={addTempoMarkerAtPlayhead}
+                disabled={!chart}
+                className="text-[10px] px-1.5 py-0.5 bg-amber-700/40 hover:bg-amber-600/60 disabled:opacity-30 border border-amber-700/40 hover:border-amber-500 text-amber-200 hover:text-amber-100 rounded transition-colors"
+                title="Add a tempo change at the playhead"
+              >
+                + Add at playhead
+              </button>
             </div>
-            <p className="text-[11px] text-gray-600 mt-1">
-              Drag-to-move and arrow nudge snap to this beat fraction.
+            {!chart ? null : (
+              <ul className="space-y-1 max-h-44 overflow-y-auto">
+                {chart.tempoMarkers.map((m, idx) => (
+                  <li key={`${idx}-${m.tick}`} className="flex items-center gap-1">
+                    <button
+                      onClick={() => {
+                        if (!audioRef.current || !chart) return
+                        const sec_t = tickToSec(tempoSegments, chart.resolution, m.tick)
+                        audioRef.current.currentTime = sec_t
+                        setCurrentTime(sec_t)
+                      }}
+                      className="shrink-0 px-1.5 py-1 bg-gray-800 hover:bg-gray-700 text-amber-200 rounded text-[10px] font-mono transition-colors"
+                      title="Jump to this tempo change"
+                    >
+                      ↶
+                    </button>
+                    <input
+                      type="number"
+                      min={0}
+                      step={1}
+                      value={m.tick}
+                      disabled={idx === 0}
+                      onChange={(e) => updateTempoMarkerTick(idx, Number(e.target.value))}
+                      className="w-16 bg-gray-800 border border-gray-700 rounded px-1 py-1 text-[10px] font-mono text-gray-300 disabled:opacity-50 focus:outline-none focus:border-amber-500"
+                      title={idx === 0 ? 'The song-origin marker is locked at tick 0' : 'Tick'}
+                    />
+                    <input
+                      type="number"
+                      min={1}
+                      step={0.001}
+                      value={Number((m.microBpm / 1000).toFixed(3))}
+                      onChange={(e) => updateTempoMarkerBpm(idx, Number(e.target.value))}
+                      className="flex-1 min-w-0 bg-gray-800 border border-gray-700 rounded px-1.5 py-1 text-[11px] font-mono text-gray-200 focus:outline-none focus:border-amber-500"
+                      title="BPM"
+                    />
+                    <span className="text-[10px] text-gray-500 font-mono shrink-0">bpm</span>
+                    <button
+                      onClick={() => deleteTempoMarker(idx)}
+                      disabled={idx === 0}
+                      className="shrink-0 px-1.5 py-1 bg-red-900/30 hover:bg-red-800/60 disabled:opacity-20 border border-red-800/40 hover:border-red-700 text-red-300 hover:text-red-200 rounded text-[10px] transition-colors"
+                      title={idx === 0 ? 'The origin tempo can\'t be deleted' : 'Delete tempo change'}
+                      aria-label="Delete tempo marker"
+                    >
+                      ×
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="text-[10px] text-gray-600 mt-1.5 leading-snug">
+              First marker fixed at tick 0. Tempo changes phase-lock everything
+              downstream — notes, VOs, click track, timeline strips.
             </p>
-          </section>
-
-          <section>
-            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Scroll speed</h3>
-            <input
-              type="range"
-              min={150}
-              max={1200}
-              step={25}
-              value={scrollSpeed}
-              onChange={(e) => setScrollSpeed(Number(e.target.value))}
-              className="w-full accent-jam-500"
-            />
-            <span className="text-xs font-mono text-gray-500">{scrollSpeed} px/s</span>
-          </section>
-
-          <section>
-            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
-              Lanes {isDrums && <span className="text-gray-600 normal-case font-normal">(5-lane drums)</span>}
-            </h3>
-            <ul className="space-y-1 text-xs">
-              {laneLabels.map((label, i) => (
-                <li key={i} className="flex items-center gap-2">
-                  <span
-                    className="w-3 h-3 rounded-full inline-block shrink-0"
-                    style={{ backgroundColor: LANE_FILL[i] }}
-                  />
-                  <span className="text-gray-200">{label}</span>
-                  {isDrums && (
-                    <span className="text-gray-600 text-[11px] font-mono ml-auto">{GUITAR_LABELS[i]}</span>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </section>
-
-          <section>
-            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Shortcuts</h3>
-            <ul className="text-xs text-gray-400 space-y-1 leading-snug">
-              <li><span className="font-mono text-gray-300">Click</span> select a note</li>
-              <li><span className="font-mono text-gray-300">Drag</span> move note (snapped)</li>
-              <li><span className="font-mono text-gray-300">←/→</span> nudge tick by snap</li>
-              <li><span className="font-mono text-gray-300">↑/↓</span> change lane</li>
-              <li><span className="font-mono text-gray-300">H</span> toggle hold/sustain</li>
-              <li><span className="font-mono text-gray-300">Del</span> delete note</li>
-              <li><span className="font-mono text-gray-300">Space</span> play/pause</li>
-            </ul>
           </section>
 
           {chart && (
@@ -3043,12 +3689,36 @@ export default function BeatmapEditor() {
                   <p className="text-[11px] text-gray-600 mb-1.5">
                     Adding at <span className="font-mono text-gray-400">{fmtTick(playheadTick)}</span>
                   </p>
-                  <ul className="space-y-2">
-                    {[...chart.tutorial].sort((a, b) => a.tick - b.tick).map((ev) => {
-                      if (ev.kind === 'music') {
-                        return (
-                          <li
-                            key={ev.id}
+                  {(() => {
+                    const sorted = [...chart.tutorial].sort((a, b) => a.tick - b.tick)
+                    const labelFor = (ev: TutorialEvent) => {
+                      const t = fmtTick(ev.tick)
+                      if (ev.kind === 'vo') {
+                        const txt = ev.text ? ev.text.slice(0, 36) : (ev.file ? (ev.file.split('/').pop() || 'vo') : 'vo')
+                        return `${t} · VO · ${txt}`
+                      }
+                      if (ev.kind === 'step') return `${t} · STEP · ${ev.stepId || '(unnamed)'}`
+                      return `${t} · MUSIC · ${ev.file.split('/').pop() || ev.file}`
+                    }
+                    const selected = sorted.find((e) => e.id === selectedTutorialId) || null
+                    return (
+                      <>
+                        {sorted.length > 0 && (
+                          <select
+                            value={selected?.id ?? ''}
+                            onChange={(e) => setSelectedTutorialId(e.target.value || null)}
+                            className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-[11px] text-gray-200 font-mono mb-2 focus:outline-none focus:border-jam-500"
+                          >
+                            <option value="">— pick an event ({sorted.length}) —</option>
+                            {sorted.map((ev) => (
+                              <option key={ev.id} value={ev.id}>{labelFor(ev)}</option>
+                            ))}
+                          </select>
+                        )}
+                        {selected && selected.kind === 'music' && (() => {
+                          const ev = selected
+                          return (
+                          <div
                             className="bg-orange-900/20 border border-orange-800/40 rounded p-2 space-y-1.5"
                           >
                             <div className="flex items-center gap-1.5">
@@ -3121,12 +3791,13 @@ export default function BeatmapEditor() {
                                 className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-[11px] text-gray-200"
                               />
                             </label>
-                          </li>
-                        )
-                      }
-                      return ev.kind === 'vo' ? (
-                        <li
-                          key={ev.id}
+                          </div>
+                          )
+                        })()}
+                        {selected && selected.kind === 'vo' && (() => {
+                          const ev = selected
+                          return (
+                        <div
                           className="bg-sky-900/20 border border-sky-800/40 rounded p-2 space-y-1.5"
                         >
                           <div className="flex items-center gap-1.5">
@@ -3265,10 +3936,13 @@ export default function BeatmapEditor() {
                               title="Tick position"
                             />
                           </div>
-                        </li>
-                      ) : (
-                        <li
-                          key={ev.id}
+                        </div>
+                          )
+                        })()}
+                        {selected && selected.kind === 'step' && (() => {
+                          const ev = selected
+                          return (
+                        <div
                           className="bg-purple-900/20 border border-purple-800/40 rounded p-2 space-y-1.5"
                         >
                           <div className="flex items-center gap-1.5">
@@ -3337,15 +4011,22 @@ export default function BeatmapEditor() {
                               className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-[11px] text-gray-200"
                             />
                           </label>
-                        </li>
-                      )
-                    })}
-                  </ul>
-                  {chart.tutorial.length === 0 && (
-                    <p className="text-[11px] text-gray-600 mt-1">
-                      No tutorial events yet. Add a STEP to gate progression and a VO to play narration.
-                    </p>
-                  )}
+                        </div>
+                          )
+                        })()}
+                        {sorted.length > 0 && !selected && (
+                          <p className="text-[11px] text-gray-600">
+                            Pick an event from the dropdown to edit it.
+                          </p>
+                        )}
+                        {sorted.length === 0 && (
+                          <p className="text-[11px] text-gray-600">
+                            No tutorial events yet. Add a STEP to gate progression and a VO to play narration.
+                          </p>
+                        )}
+                      </>
+                    )
+                  })()}
                   <p className="text-[11px] text-gray-600 mt-2">
                     Set up the 10 instrument samples + voice clone reference on the
                     track detail page (Tutorial samples panel).
