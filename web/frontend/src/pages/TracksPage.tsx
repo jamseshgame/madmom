@@ -1373,10 +1373,11 @@ export default function TracksPage() {
                   {/* Surface the empty-editor entry point on every non-vocals,
                       non-song stem so users can start a fresh manual chart even
                       if a beatmap already exists. Vocals uses VocalmapButtons
-                      and doesn't need an empty-editor path. */}
-                  {stem !== 'song'
-                    && stem !== 'vocals'
-                    && !inlineBmJobs[stem] && (
+                      and doesn't need an empty-editor path. The song-stem
+                      gets the link too so tutorial tracks (whose only stem
+                      is 'song') aren't stranded without a way to drop new
+                      empty beatmaps. */}
+                  {stem !== 'vocals' && !inlineBmJobs[stem] && (
                       <button
                         type="button"
                         onClick={async () => {

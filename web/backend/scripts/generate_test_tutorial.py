@@ -469,7 +469,7 @@ async def main() -> None:
         add_beatmap_record(
             track_id=track.id,
             beatmap_id=beatmap_id,
-            stem='guitar',  # tutorial drives playback via [TutorialScript]
+            stem='song',  # tutorial tracks only have a 'song' stem, so file the beatmap there so it shows up in the picker
             folder_name=f'{ARTIST} - {NAME}',
             song_name=NAME,
             source_dir=bm_src,

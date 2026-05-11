@@ -738,7 +738,7 @@ async def create_blank_tutorial(
         _add_bm(
             track_id=track.id,
             beatmap_id=beatmap_id,
-            stem='guitar',  # nominal — tutorial chart drives playback via [TutorialScript]
+            stem='song',  # tutorial tracks only have a 'song' stem, so file the beatmap there so it appears in the track-detail picker
             folder_name=f'{artist} - {name}',
             song_name=name,
             source_dir=bm_src,
