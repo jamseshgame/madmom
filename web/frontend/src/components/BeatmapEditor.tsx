@@ -983,6 +983,10 @@ export default function BeatmapEditor() {
   // the song while authoring against one stem. Switching is non-destructive
   // — the playhead position is preserved across the swap.
   const [audioSource, setAudioSource] = useState<'beatmap' | 'track-song'>('beatmap')
+  // Off by default — many charters prefer a clean runway. Flip on to see the
+  // audio peaks rendered across the full gem width so you can eyeball whether
+  // gems are placed on transients.
+  const [waveformOnHighway, setWaveformOnHighway] = useState(false)
   const audioSrc = audioSource === 'track-song'
     ? `/api/tracks/${trackId}/stems/song`
     : `/api/tracks/${trackId}/beatmaps/${beatmapId}/download/song.ogg`
@@ -1452,29 +1456,52 @@ export default function BeatmapEditor() {
     // Waveform: thin column down the LEFT edge of the gem area. Time runs
     // vertically with currentTime at HIT (the strike line); each bucket draws
     // a horizontal bar whose width is the normalized peak amplitude. Drawn
-    // before notes so gems land on top.
+    // before notes so gems land on top. When the highway-overlay toggle is
+    // on, render a second visualisation that spans the FULL gem width as a
+    // mirrored bar around a centre spine — gems sit on top so charters can
+    // line up note onsets with audio transients.
     const peaks = wavePeaksRef.current
     if (peaks && peaks.length > 0) {
-      const COLUMN_W = 14
       const bucketSec = WAVE_BUCKET_MS / 1000
-      // Find the visible time range. y=0 is the future; y=H is the past.
       const tAtY = (y: number) => currentTime + (HIT - y) / scrollSpeed
       const topT = tAtY(0)
       const botT = tAtY(H)
       const startBucket = Math.max(0, Math.floor(Math.min(topT, botT) / bucketSec))
       const endBucket = Math.min(peaks.length - 1, Math.ceil(Math.max(topT, botT) / bucketSec))
-      ctx.fillStyle = 'rgba(34, 211, 238, 0.55)'  // cyan-400 at 55%
-      for (let b = startBucket; b <= endBucket; b++) {
-        const t = b * bucketSec
-        const y = HIT - (t - currentTime) * scrollSpeed
-        const amp = peaks[b]
-        if (amp <= 0) continue
-        const w = Math.max(1, amp * COLUMN_W)
-        ctx.fillRect(0, y - 1, w, 2)
+
+      if (waveformOnHighway) {
+        // Mirrored bar centred at the gem-area midline. Each bucket emits a
+        // single 2px-tall horizontal line whose half-width tracks amplitude,
+        // tinted cyan with low alpha so gems remain dominant.
+        const centerX = GEM_W / 2
+        const halfMax = GEM_W * 0.46  // leaves a little margin so loud peaks don't kiss the sidecar
+        ctx.fillStyle = 'rgba(34, 211, 238, 0.28)'
+        for (let b = startBucket; b <= endBucket; b++) {
+          const t = b * bucketSec
+          const y = HIT - (t - currentTime) * scrollSpeed
+          const amp = peaks[b]
+          if (amp <= 0) continue
+          const halfW = Math.max(1, amp * halfMax)
+          ctx.fillRect(centerX - halfW, y - 1, halfW * 2, 2)
+        }
+        // Faint vertical centre line so the spine reads even during silence.
+        ctx.fillStyle = 'rgba(34, 211, 238, 0.08)'
+        ctx.fillRect(centerX - 0.5, 0, 1, H)
+      } else {
+        // Default: thin amplitude ribbon down the left edge.
+        const COLUMN_W = 14
+        ctx.fillStyle = 'rgba(34, 211, 238, 0.55)'
+        for (let b = startBucket; b <= endBucket; b++) {
+          const t = b * bucketSec
+          const y = HIT - (t - currentTime) * scrollSpeed
+          const amp = peaks[b]
+          if (amp <= 0) continue
+          const w = Math.max(1, amp * COLUMN_W)
+          ctx.fillRect(0, y - 1, w, 2)
+        }
+        ctx.fillStyle = 'rgba(34, 211, 238, 0.12)'
+        ctx.fillRect(0, 0, 1, H)
       }
-      // Faint baseline so the column reads as one element.
-      ctx.fillStyle = 'rgba(34, 211, 238, 0.12)'
-      ctx.fillRect(0, 0, 1, H)
     }
 
     // Index modifiers by tick so each rendered note can pick up its HOPO/tap
@@ -1641,7 +1668,7 @@ export default function BeatmapEditor() {
         : `lane ${noteToolLane + 1} (${laneLabels[noteToolLane] ?? ''})`
       ctx.fillText(`Note tool · ${ghostLaneName}`, 12, 62)
     }
-  }, [chart, currentTime, scrollSpeed, selectedIds, snapDivisor, isDrums, laneLabels, tool, noteToolLane])
+  }, [chart, currentTime, scrollSpeed, selectedIds, snapDivisor, isDrums, laneLabels, tool, noteToolLane, waveformOnHighway])
 
   // Resize canvas backing store on container size change
   useEffect(() => {
@@ -2653,6 +2680,18 @@ export default function BeatmapEditor() {
                 Full mix
               </button>
             </div>
+            <label className="mt-2 flex items-center gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={waveformOnHighway}
+                onChange={(e) => setWaveformOnHighway(e.target.checked)}
+                className="h-3.5 w-3.5 rounded border-gray-600 bg-gray-900 accent-cyan-500 cursor-pointer"
+              />
+              <span className="text-[11px] text-gray-300">Waveform on highway</span>
+              <span className="text-[10px] text-gray-500 ml-auto" title="Useful for visually confirming gems are on transients">
+                {waveformOnHighway ? 'on' : 'off'}
+              </span>
+            </label>
             <div className="mt-2 flex items-center gap-2">
               <span className="text-[11px] text-gray-500 shrink-0">Speed</span>
               <input
