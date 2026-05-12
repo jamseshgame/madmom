@@ -1184,7 +1184,7 @@ export default function BeatmapEditor() {
   const [duration, setDuration] = useState(0)
   const [scrollSpeed, setScrollSpeed] = useState(450)
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
-  const [tool, setTool] = useState<'select' | 'note'>('select')
+  const [tool, setTool] = useState<'select' | 'note' | 'real'>('select')
   // Undo/redo history. Each entry is a snapshot of `notes` (plus the active
   // section name so undo across difficulty switches is safe). We keep up to
   // 100 steps and push only on logical operations (add/delete/paste/move-end),
@@ -2117,7 +2117,10 @@ export default function BeatmapEditor() {
     }
     if (tool === 'note') {
       ctx.fillStyle = '#a78bfa'
-      ctx.fillText('Note tool · click a lane to drop a gem · shift-click for OPEN', 12, 62)
+      ctx.fillText('Play note · click a lane to drop a gem · shift-click for OPEN', 12, 62)
+    } else if (tool === 'real') {
+      ctx.fillStyle = '#67e8f9'
+      ctx.fillText('Real note · click drops a gem with the real-note flag (cyan dot)', 12, 62)
     }
   }, [chart, currentTime, scrollSpeed, selectedIds, snapDivisor, isDrums, laneLabels, tool, waveformOnHighway])
 
@@ -2223,12 +2226,14 @@ export default function BeatmapEditor() {
       return
     }
 
-    // Note tool: click drops a gem at the cursor — lane is inferred from the
-    // x-position (gem area is split into five equal lanes) and tick from the
-    // y-position snapped to the current grid. Shift+click drops an Open note
-    // (lane 7) instead — full-width strum, ignoring the clicked lane. Clicks
-    // outside the gem area (in the sidecar) are ignored to avoid stray notes.
-    if (tool === 'note') {
+    // Note / Real-note tools: click drops a gem at the cursor — lane is
+    // inferred from the x-position (gem area is split into five equal
+    // lanes) and tick from the y-position snapped to the current grid.
+    // Shift+click drops an Open note (lane 7) instead — full-width strum.
+    // The Real-note tool additionally writes a lane-8 modifier at the same
+    // tick so the game plays the matching pitched sample on hit.
+    // Clicks outside the gem area (sidecar) are ignored.
+    if (tool === 'note' || tool === 'real') {
       const canvas = canvasRef.current!
       const HIT = canvas.height - 110
       const GEM_W = canvas.width * 0.64
@@ -2240,7 +2245,14 @@ export default function BeatmapEditor() {
       const snapTicks = Math.max(1, Math.round(chart.resolution / snapDivisor))
       const newTick = Math.round(targetTickRaw / snapTicks) * snapTicks
       const newNote: ChartNote = { tick: newTick, lane, sustain: 0 }
-      const next = [...chart.notes, newNote].sort((a, b) => a.tick - b.tick || a.lane - b.lane)
+      const placed = [...chart.notes, newNote]
+      // Real-note tool: also write a lane-8 modifier at the same tick if
+      // there isn't one already (so re-clicking the same tick doesn't
+      // duplicate the marker).
+      if (tool === 'real' && !placed.some((n) => n.tick === newTick && n.lane === 8)) {
+        placed.push({ tick: newTick, lane: 8, sustain: 0 })
+      }
+      const next = placed.sort((a, b) => a.tick - b.tick || a.lane - b.lane)
       const newIdx = next.findIndex((n) => n === newNote)
       commitNotes(next)
       setSelectedIds(new Set([newIdx]))
@@ -2395,6 +2407,7 @@ export default function BeatmapEditor() {
       // mode) pick the lane the next click drops into.
       if (e.key === '1' && !isCtrl) { setTool('select'); e.preventDefault(); return }
       if (e.key === '2' && !isCtrl) { setTool('note'); e.preventDefault(); return }
+      if (e.key === '3' && !isCtrl) { setTool('real'); e.preventDefault(); return }
 
       if (e.code === 'Space') {
         e.preventDefault()
@@ -3457,10 +3470,10 @@ export default function BeatmapEditor() {
 
           <section>
             <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Tools</h3>
-            <div className="grid grid-cols-2 gap-1 mb-2">
+            <div className="grid grid-cols-3 gap-1 mb-2">
               <button
                 onClick={() => setTool('select')}
-                className={`px-2 py-1.5 rounded text-xs font-medium transition-colors ${
+                className={`px-1.5 py-1.5 rounded text-[11px] font-medium transition-colors ${
                   tool === 'select'
                     ? 'bg-jam-600 text-white'
                     : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
@@ -3471,14 +3484,25 @@ export default function BeatmapEditor() {
               </button>
               <button
                 onClick={() => setTool('note')}
-                className={`px-2 py-1.5 rounded text-xs font-medium transition-colors ${
+                className={`px-1.5 py-1.5 rounded text-[11px] font-medium transition-colors ${
                   tool === 'note'
                     ? 'bg-jam-600 text-white'
                     : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
                 }`}
-                title="Note tool (2) — click a lane to drop a gem · shift-click for OPEN"
+                title="Play note (2) — click a lane to drop a normal gem · shift-click for OPEN"
               >
-                ✚ Note <span className="text-[10px] opacity-60">(2)</span>
+                ✚ Play <span className="text-[10px] opacity-60">(2)</span>
+              </button>
+              <button
+                onClick={() => setTool('real')}
+                className={`px-1.5 py-1.5 rounded text-[11px] font-medium transition-colors ${
+                  tool === 'real'
+                    ? 'bg-cyan-600 text-white'
+                    : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+                }`}
+                title="Real note (3) — click drops a gem flagged to play a pitched sample on hit · shift-click for OPEN"
+              >
+                <span className="text-cyan-200">●</span> Real <span className="text-[10px] opacity-60">(3)</span>
               </button>
             </div>
             <div className="flex items-stretch gap-1">

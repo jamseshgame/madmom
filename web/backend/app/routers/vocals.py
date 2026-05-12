@@ -43,6 +43,20 @@ async def get_vocals(
     return data
 
 
+@router.get('/exists')
+async def vocals_exists(
+    job_id: str | None = Query(default=None),
+    track_id: str | None = Query(default=None),
+):
+    """Presence probe — always returns 200 so the frontend can check whether
+    a scope has a vocal_notes.json without logging a 404 in the console.
+    Companion to GET / above which returns the data (or 404 when missing).
+    """
+    target = _resolve_dir(job_id=job_id, track_id=track_id)
+    data = vocals_service.load_vocal_notes(target)
+    return {'exists': data is not None}
+
+
 @router.put('')
 async def put_vocals(
     body: dict = Body(...),

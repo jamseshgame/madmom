@@ -1185,8 +1185,13 @@ export default function TracksPage() {
   const refetchHasVocalNotes = useCallback(async () => {
     if (!selectedId) { setHasVocalNotes(false); return }
     try {
-      const r = await fetch(`/api/vocals?track_id=${selectedId}`)
-      setHasVocalNotes(r.ok)
+      // Presence probe — /api/vocals/exists returns 200 with {exists: bool}
+      // so the console isn't littered with 404s for tracks that haven't had
+      // a vocal beatmap generated yet.
+      const r = await fetch(`/api/vocals/exists?track_id=${selectedId}`)
+      if (!r.ok) { setHasVocalNotes(false); return }
+      const data = await r.json()
+      setHasVocalNotes(!!data.exists)
     } catch {
       setHasVocalNotes(false)
     }
