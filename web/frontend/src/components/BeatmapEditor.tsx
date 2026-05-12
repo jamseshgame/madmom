@@ -237,6 +237,57 @@ function buildTempoSegments(markers: TempoMarker[], _resolution: number): TempoS
 // segment whose start tick is ≤ the query tick, then extrapolates within it
 // at that segment's tempo. Constant-tempo charts hit the first segment and
 // degenerate to the old (tick / resolution) * (60 / bpm) formula.
+// Chart authoring rules — enforced when committing edits.
+//
+//   R1: At most 2 gem notes (lanes 0–4) on a single tick. Open notes (lane 7)
+//       are mutually exclusive with gems at the same tick and count as 1.
+//   R2: A "chord" must be exactly aligned: any two gem notes in different
+//       lanes within CHORD_NEAR ticks of each other must share a tick. This
+//       catches near-miss authoring slip-ups (e.g. dragging a chord partner
+//       off by 1/32) without flagging legitimate fast runs at higher snap.
+//
+// Pure function — returns null when the chart is clean, or a human-readable
+// message describing the first violation found.
+function checkNoteRules(notes: ChartNote[], resolution: number): string | null {
+  const CHORD_NEAR = Math.max(1, Math.round(resolution / 16))  // ≈ 1/16 beat
+  // Group gem + open notes by tick. Modifiers (lanes 5/6) are skipped — they
+  // attach to the underlying note and don't add to the chord count.
+  const tickLanes = new Map<number, number[]>()
+  for (const n of notes) {
+    if (n.lane > 4 && n.lane !== 7) continue
+    const arr = tickLanes.get(n.tick)
+    if (arr) arr.push(n.lane); else tickLanes.set(n.tick, [n.lane])
+  }
+  // R1: max 2 notes per tick. An open + any gem at the same tick is a
+  // gameplay-conflict (open = full strum) → also flagged.
+  for (const [tick, lanes] of tickLanes) {
+    if (lanes.length > 2) {
+      return `Max 2 notes per beat (tick ${tick} has ${lanes.length})`
+    }
+    if (lanes.length === 2 && lanes.includes(7)) {
+      return `Open notes can't be chorded with gems (tick ${tick})`
+    }
+  }
+  // R2: near-miss chord check. Walk gem notes in tick order — any two within
+  // CHORD_NEAR ticks that are NOT at the same tick are a misaligned chord.
+  const gems = notes
+    .filter((n) => n.lane <= 4)
+    .map((n) => ({ tick: n.tick, lane: n.lane }))
+    .sort((a, b) => a.tick - b.tick)
+  for (let i = 0; i < gems.length; i++) {
+    for (let j = i + 1; j < gems.length; j++) {
+      const a = gems[i], b = gems[j]
+      const gap = b.tick - a.tick
+      if (gap === 0) continue          // same-tick chord — counted by R1
+      if (gap >= CHORD_NEAR) break     // sorted: nothing closer further on
+      if (b.lane !== a.lane) {
+        return `Chord notes must share a tick (ticks ${a.tick} and ${b.tick} are too close)`
+      }
+    }
+  }
+  return null
+}
+
 function tickToSec(segs: TempoSegment[], resolution: number, tick: number): number {
   if (tick <= 0 || segs.length === 0) return 0
   let i = segs.length - 1
@@ -1187,21 +1238,39 @@ export default function BeatmapEditor() {
     setAudioSource(next)
   }
 
+  // Transient rule-violation banner shown above the runway. Anything that
+  // tries to commit an invalid chart state (placement, drag, paste, nudge)
+  // calls flashRuleError instead of committing.
+  const [ruleError, setRuleError] = useState('')
+  const ruleErrorTimerRef = useRef<number | null>(null)
+  const flashRuleError = useCallback((msg: string) => {
+    setRuleError(msg)
+    if (ruleErrorTimerRef.current) clearTimeout(ruleErrorTimerRef.current)
+    ruleErrorTimerRef.current = window.setTimeout(() => setRuleError(''), 2500)
+  }, [])
+
   // Push the current notes snapshot onto the undo stack and apply the new one.
   // Use this for any change the user would expect Ctrl+Z to revert: add, delete,
   // paste, drag-end, arrow-nudge, sustain-toggle. Avoid pushing on every frame
   // mid-drag (handleMouseMove writes through directly).
   const commitNotes = useCallback((nextNotes: ChartNote[]) => {
+    let rejected = false
     setChart((prev) => {
       if (!prev) return prev
+      const err = checkNoteRules(nextNotes, prev.resolution)
+      if (err) {
+        rejected = true
+        flashRuleError(err)
+        return prev
+      }
       historyRef.current.push({ activeName: prev.activeName, notes: prev.notes })
       if (historyRef.current.length > 100) historyRef.current.shift()
       futureRef.current = []
       setHistoryTick((n) => n + 1)
       return { ...prev, notes: nextNotes }
     })
-    setDirty(true)
-  }, [])
+    if (!rejected) setDirty(true)
+  }, [flashRuleError])
 
   const updateSections = useCallback((updater: (prev: ChartSection[]) => ChartSection[]) => {
     setChart((prev) => {
@@ -2245,10 +2314,22 @@ export default function BeatmapEditor() {
 
   const handleMouseUp = () => {
     if (dragRef.current?.moved) {
-      // Push a single history entry capturing the pre-drag positions so undo
-      // returns the group to where the drag started.
+      // Validate the final drag position. If it violates the chart rules,
+      // revert every dragged note to its pre-drag snapshot and flash an
+      // error — otherwise push a history entry so undo returns the whole
+      // drag to where it started.
       setChart((prev) => {
         if (!prev || !dragRef.current) return prev
+        const err = checkNoteRules(prev.notes, prev.resolution)
+        if (err) {
+          const reverted = prev.notes.slice()
+          dragRef.current.snapshot.forEach((orig, idx) => {
+            const cur = reverted[idx]
+            if (cur) reverted[idx] = { ...cur, tick: orig.tick, lane: orig.lane }
+          })
+          flashRuleError(err)
+          return { ...prev, notes: reverted }
+        }
         const restored = prev.notes.slice()
         dragRef.current.snapshot.forEach((orig, idx) => {
           const cur = restored[idx]
@@ -2622,6 +2703,108 @@ export default function BeatmapEditor() {
   // dropdown to edit it. Null means "nothing selected"; we auto-pick the
   // first event after add/delete so the panel doesn't go blank.
   const [selectedTutorialId, setSelectedTutorialId] = useState<string | null>(null)
+
+  // ── VO import — two paths in one modal:
+  //   (a) Paste an ElevenLabs Studio URL; backend pulls the chapter's latest
+  //       rendered audio + script. Requires Studio API access on the account.
+  //   (b) Upload an audio file directly (works without Studio access — you
+  //       download the rendered audio from Studio in your browser first).
+  //       Optional script text is stored on the VO so a future Generate
+  //       (Chatterbox / ElevenLabs TTS) can regenerate it.
+  const [studioImportOpen, setStudioImportOpen] = useState(false)
+  const [studioImportUrl, setStudioImportUrl] = useState('')
+  const [studioImportBusy, setStudioImportBusy] = useState(false)
+  const [studioImportError, setStudioImportError] = useState('')
+  const [studioUploadFile, setStudioUploadFile] = useState<File | null>(null)
+  const [studioUploadText, setStudioUploadText] = useState('')
+  const studioUploadRef = useRef<HTMLInputElement | null>(null)
+
+  const runStudioImport = async () => {
+    if (!chart) return
+    const url = studioImportUrl.trim()
+    if (!url) {
+      setStudioImportError('Paste a Studio URL first')
+      return
+    }
+    setStudioImportBusy(true)
+    setStudioImportError('')
+    try {
+      const fd = new FormData()
+      fd.append('track_id', trackId)
+      fd.append('beatmap_id', beatmapId)
+      fd.append('studio_url', url)
+      const res = await fetch('/api/elevenlabs/studio/import', { method: 'POST', body: fd })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || `Import failed (${res.status})`)
+      }
+      const data = await res.json() as {
+        rel_path: string
+        name: string
+        text: string
+        project_id: string
+        chapter_id: string
+      }
+      const ev: TutorialVoEvent = {
+        kind: 'vo',
+        id: `vo-${Date.now()}`,
+        tick: playheadTick,
+        file: data.rel_path,
+        text: data.text || data.name,
+        engine: 'elevenlabs',
+        voiceId: '',
+      }
+      updateTutorial([...chart.tutorial, ev], true)
+      setSelectedTutorialId(ev.id)
+      setStudioImportOpen(false)
+      setStudioImportUrl('')
+    } catch (e) {
+      setStudioImportError((e as Error).message)
+    } finally {
+      setStudioImportBusy(false)
+    }
+  }
+
+  const runStudioUpload = async () => {
+    if (!chart || !studioUploadFile) {
+      setStudioImportError('Pick an audio file first')
+      return
+    }
+    setStudioImportBusy(true)
+    setStudioImportError('')
+    try {
+      const fd = new FormData()
+      fd.append('file', studioUploadFile)
+      const res = await fetch(`/api/tutorial/${trackId}/beatmaps/${beatmapId}/vo/upload`, {
+        method: 'POST',
+        body: fd,
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || `Upload failed (${res.status})`)
+      }
+      const data = await res.json() as { rel_path: string }
+      const ev: TutorialVoEvent = {
+        kind: 'vo',
+        id: `vo-${Date.now()}`,
+        tick: playheadTick,
+        file: data.rel_path,
+        text: studioUploadText.trim(),
+        engine: 'elevenlabs',
+        voiceId: '',
+      }
+      updateTutorial([...chart.tutorial, ev], true)
+      setSelectedTutorialId(ev.id)
+      setStudioImportOpen(false)
+      setStudioUploadFile(null)
+      setStudioUploadText('')
+      if (studioUploadRef.current) studioUploadRef.current.value = ''
+    } catch (e) {
+      setStudioImportError((e as Error).message)
+    } finally {
+      setStudioImportBusy(false)
+    }
+  }
 
   // ── Music segments — upload modal state + handler ────────────────────────
   const [musicModal, setMusicModal] = useState<{ tick: number; difficulty: string } | null>(null)
@@ -3008,38 +3191,21 @@ export default function BeatmapEditor() {
               </div>
             )}
           </div>
-          <div className="h-6 flex items-stretch gap-1">
-            <div className="relative shrink-0">
-              <button
-                onClick={() => setScenePickerOpen((v) => !v)}
-                className="h-full px-2 bg-emerald-700/50 hover:bg-emerald-600/60 border border-emerald-700/60 text-emerald-100 rounded text-[10px] font-medium transition-colors"
-                title="Add a scene event at the playhead"
-              >
-                + Scene
-              </button>
-              {scenePickerOpen && (
-                <ScenePicker
-                  onPick={addSceneEvent}
-                  onClose={() => setScenePickerOpen(false)}
-                />
-              )}
-            </div>
-            <div className="flex-1 min-w-0">
-              {chart && duration > 0 ? (
-                <SceneTimeline
-                  duration={duration}
-                  tempoSegments={tempoSegments}
-                  resolution={chart.resolution}
-                  events={chart.sceneEvents}
-                  selectedId={sceneSelectedId}
-                  onSelect={setSceneSelectedId}
-                  onMoveEvent={moveSceneEvent}
-                  onResizeEvent={resizeSceneEvent}
-                />
-              ) : (
-                <div className="h-full bg-gray-950 border border-gray-800 rounded" />
-              )}
-            </div>
+          <div className="h-6">
+            {chart && duration > 0 ? (
+              <SceneTimeline
+                duration={duration}
+                tempoSegments={tempoSegments}
+                resolution={chart.resolution}
+                events={chart.sceneEvents}
+                selectedId={sceneSelectedId}
+                onSelect={setSceneSelectedId}
+                onMoveEvent={moveSceneEvent}
+                onResizeEvent={resizeSceneEvent}
+              />
+            ) : (
+              <div className="h-full bg-gray-950 border border-gray-800 rounded" />
+            )}
           </div>
         </div>
         {saveMsg && (
@@ -3446,6 +3612,11 @@ export default function BeatmapEditor() {
               onMouseLeave={handleMouseUp}
               className="absolute inset-0 w-full h-full cursor-crosshair"
             />
+            {ruleError && (
+              <div className="absolute top-3 left-1/2 -translate-x-1/2 bg-red-900/90 border border-red-700 text-red-100 text-[12px] font-medium px-3 py-1.5 rounded shadow-lg pointer-events-none max-w-[90%] text-center">
+                ⚠ {ruleError}
+              </div>
+            )}
           </div>
         </div>
 
@@ -3621,6 +3792,60 @@ export default function BeatmapEditor() {
 
           {chart && (
             <section className="border-t border-gray-800 pt-4">
+              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Add at playhead</h3>
+              <div className="grid grid-cols-4 gap-1 mb-1">
+                <div className="relative">
+                  <button
+                    onClick={() => setScenePickerOpen((v) => !v)}
+                    className="w-full px-1 py-1 bg-emerald-700/50 hover:bg-emerald-600/60 border border-emerald-700/60 text-emerald-100 rounded text-[11px] font-medium transition-colors"
+                    title={`Add a scene event at the playhead (tick ${playheadTick})`}
+                  >
+                    + Scene
+                  </button>
+                  {scenePickerOpen && (
+                    <ScenePicker
+                      onPick={addSceneEvent}
+                      onClose={() => setScenePickerOpen(false)}
+                    />
+                  )}
+                </div>
+                <button
+                  onClick={addVo}
+                  className="px-1 py-1 bg-sky-700/40 hover:bg-sky-600/60 border border-sky-700/60 text-sky-200 rounded text-[11px] font-medium transition-colors"
+                  title={`Add VO at playhead (tick ${playheadTick}) — auto-enables tutorial mode`}
+                >
+                  + VO
+                </button>
+                <button
+                  onClick={addStep}
+                  className="px-1 py-1 bg-purple-700/40 hover:bg-purple-600/60 border border-purple-700/60 text-purple-200 rounded text-[11px] font-medium transition-colors"
+                  title={`Add STEP boundary at playhead (tick ${playheadTick}) — auto-enables tutorial mode`}
+                >
+                  + STEP
+                </button>
+                <button
+                  onClick={() => setMusicModal({ tick: playheadTick, difficulty: chart.activeName || 'ExpertSingle' })}
+                  className="px-1 py-1 bg-orange-700/40 hover:bg-orange-600/60 border border-orange-700/60 text-orange-200 rounded text-[11px] font-medium transition-colors"
+                  title={`Drop a music segment at playhead (tick ${playheadTick}) — auto-enables tutorial mode`}
+                >
+                  + MUSIC
+                </button>
+              </div>
+              <p className="text-[11px] text-gray-600 mb-2">
+                Adding at <span className="font-mono text-gray-400">{fmtTick(playheadTick)}</span>
+              </p>
+              <button
+                onClick={() => { setStudioImportOpen(true); setStudioImportError('') }}
+                className="w-full px-2 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-jam-600 text-gray-200 rounded text-[11px] font-medium transition-colors"
+                title="Paste an elevenlabs.io/app/studio/... link to pull a rendered chapter as a VO"
+              >
+                ↓ Import VO from ElevenLabs Studio
+              </button>
+            </section>
+          )}
+
+          {chart && (
+            <section className="border-t border-gray-800 pt-4">
               <div className="flex items-center justify-between mb-2">
                 <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Tutorial</h3>
                 <label className="flex items-center gap-1 text-[11px] text-gray-400">
@@ -3663,32 +3888,6 @@ export default function BeatmapEditor() {
                       VOs set to ElevenLabs use this voice unless overridden per-VO.
                     </p>
                   </div>
-                  <div className="grid grid-cols-3 gap-1 mb-2">
-                    <button
-                      onClick={addVo}
-                      className="px-1.5 py-1 bg-sky-700/40 hover:bg-sky-600/60 border border-sky-700/60 text-sky-200 rounded text-[11px] font-medium transition-colors"
-                      title={`Add VO at playhead (tick ${playheadTick})`}
-                    >
-                      + VO
-                    </button>
-                    <button
-                      onClick={addStep}
-                      className="px-1.5 py-1 bg-purple-700/40 hover:bg-purple-600/60 border border-purple-700/60 text-purple-200 rounded text-[11px] font-medium transition-colors"
-                      title={`Add STEP boundary at playhead (tick ${playheadTick})`}
-                    >
-                      + STEP
-                    </button>
-                    <button
-                      onClick={() => setMusicModal({ tick: playheadTick, difficulty: chart.activeName || 'ExpertSingle' })}
-                      className="px-1.5 py-1 bg-orange-700/40 hover:bg-orange-600/60 border border-orange-700/60 text-orange-200 rounded text-[11px] font-medium transition-colors"
-                      title={`Drop a music segment at playhead (tick ${playheadTick})`}
-                    >
-                      + MUSIC
-                    </button>
-                  </div>
-                  <p className="text-[11px] text-gray-600 mb-1.5">
-                    Adding at <span className="font-mono text-gray-400">{fmtTick(playheadTick)}</span>
-                  </p>
                   {(() => {
                     const sorted = [...chart.tutorial].sort((a, b) => a.tick - b.tick)
                     const labelFor = (ev: TutorialEvent) => {
@@ -4057,6 +4256,101 @@ export default function BeatmapEditor() {
         onPause={() => setPlaying(false)}
         onEnded={() => setPlaying(false)}
       />
+
+      {studioImportOpen && (
+        <div
+          className="fixed inset-0 bg-black/70 backdrop-blur-sm z-[70] flex items-center justify-center px-4"
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !studioImportBusy) setStudioImportOpen(false)
+          }}
+        >
+          <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-md p-5 space-y-4">
+            <div>
+              <h3 className="text-lg font-semibold text-sky-300">Import VO from ElevenLabs Studio</h3>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Either paste a Studio URL (requires Studio API access on your
+                account) or upload an audio file you've already downloaded
+                from Studio. Either path drops a VO at the playhead.
+              </p>
+            </div>
+
+            {/* Path A: Studio URL — works only if the account is whitelisted */}
+            <div className="space-y-1">
+              <label className="block text-xs text-gray-400">Paste Studio URL</label>
+              <input
+                type="text"
+                value={studioImportUrl}
+                onChange={(e) => setStudioImportUrl(e.target.value)}
+                placeholder="https://elevenlabs.io/app/studio/<project>?chapterId=<chapter>"
+                disabled={studioImportBusy}
+                autoFocus
+                className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-[12px] font-mono text-gray-200 focus:outline-none focus:border-sky-500 disabled:opacity-50"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !studioImportBusy) runStudioImport()
+                }}
+              />
+              <button
+                onClick={runStudioImport}
+                disabled={studioImportBusy || !studioImportUrl.trim()}
+                className="w-full mt-1 px-3 py-1.5 bg-sky-600 hover:bg-sky-500 disabled:opacity-40 text-white rounded text-xs font-medium"
+              >
+                {studioImportBusy ? 'Fetching…' : 'Fetch from Studio'}
+              </button>
+            </div>
+
+            <div className="flex items-center gap-2 text-[10px] text-gray-600 uppercase tracking-wider">
+              <div className="flex-1 h-px bg-gray-800" />
+              or upload manually
+              <div className="flex-1 h-px bg-gray-800" />
+            </div>
+
+            {/* Path B: Manual file upload — always works */}
+            <div className="space-y-1">
+              <label className="block text-xs text-gray-400">Audio file</label>
+              <input
+                ref={studioUploadRef}
+                type="file"
+                accept=".ogg,.mp3,.wav,.flac,.m4a,audio/*"
+                onChange={(e) => setStudioUploadFile(e.target.files?.[0] || null)}
+                disabled={studioImportBusy}
+                className="w-full text-[11px] text-gray-300 file:mr-2 file:px-2 file:py-1 file:rounded file:border-0 file:bg-gray-700 file:hover:bg-gray-600 file:text-gray-100 file:text-[11px] file:cursor-pointer cursor-pointer disabled:opacity-50"
+              />
+              <label className="block text-xs text-gray-400 mt-2">Script text (optional)</label>
+              <textarea
+                value={studioUploadText}
+                onChange={(e) => setStudioUploadText(e.target.value)}
+                placeholder="What the VO says — stored on the event so you can re-generate later."
+                rows={2}
+                disabled={studioImportBusy}
+                className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-[11px] text-gray-200 focus:outline-none focus:border-sky-500 resize-y disabled:opacity-50"
+              />
+              <button
+                onClick={runStudioUpload}
+                disabled={studioImportBusy || !studioUploadFile}
+                className="w-full mt-1 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white rounded text-xs font-medium"
+              >
+                {studioImportBusy ? 'Uploading…' : 'Upload + add VO'}
+              </button>
+            </div>
+
+            {studioImportError && (
+              <p className="text-xs text-red-400 break-words">{studioImportError}</p>
+            )}
+            <p className="text-[10px] text-gray-600">
+              Adding at <span className="font-mono text-gray-400">{fmtTick(playheadTick)}</span>.
+            </p>
+            <div className="flex justify-end pt-1">
+              <button
+                onClick={() => setStudioImportOpen(false)}
+                disabled={studioImportBusy}
+                className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-gray-300 rounded text-xs"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {musicModal && (
         <div
