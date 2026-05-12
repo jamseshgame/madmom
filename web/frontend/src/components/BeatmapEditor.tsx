@@ -663,6 +663,7 @@ const SNAP_OPTIONS = [
 interface BeatmapMeta {
   name: string
   stem: string
+  hasAlbumArt: boolean
 }
 
 // ── TutorialTimeline ────────────────────────────────────────────────────────
@@ -1134,10 +1135,6 @@ export default function BeatmapEditor() {
   const [chart, setChart] = useState<ChartState | null>(null)
   const [meta, setMeta] = useState<BeatmapMeta | null>(null)
   const [loadError, setLoadError] = useState('')
-  // Cover art may not exist for every beatmap (older imports, in-flight uploads).
-  // We render the <img> optimistically and hide it on the first onError so the
-  // header collapses cleanly instead of showing a broken-image icon.
-  const [coverArtMissing, setCoverArtMissing] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saveMsg, setSaveMsg] = useState('')
   const [dirty, setDirty] = useState(false)
@@ -1401,7 +1398,11 @@ export default function BeatmapEditor() {
       .then((track) => {
         if (!track) return
         const bm = (track.beatmaps || []).find((b: { id: string }) => b.id === beatmapId)
-        if (bm) setMeta({ name: bm.song_name, stem: bm.stem })
+        // track.stems is a dict keyed by stem name; album_png is the cover-art
+        // entry written when the track is published. If it's absent we skip
+        // rendering the <img> entirely instead of triggering a 404 + onError.
+        const hasAlbumArt = !!(track.stems && track.stems.album_png)
+        if (bm) setMeta({ name: bm.song_name, stem: bm.stem, hasAlbumArt })
       })
       .catch(() => undefined)
   }, [trackId, beatmapId])
@@ -3227,11 +3228,10 @@ export default function BeatmapEditor() {
             container by the ResizeObserver, not to the full viewport. */}
         <aside className="w-80 shrink-0 border-r border-gray-800 bg-gray-950 overflow-y-auto p-4 space-y-5">
           <section className="flex items-center gap-3">
-            {!coverArtMissing && (
+            {meta?.hasAlbumArt && (
               <img
                 src={`/api/tracks/${trackId}/stems/album_png`}
                 alt="cover"
-                onError={() => setCoverArtMissing(true)}
                 className="shrink-0 h-14 w-14 rounded object-cover border border-gray-800 bg-gray-900"
               />
             )}
@@ -3812,14 +3812,14 @@ export default function BeatmapEditor() {
                 <button
                   onClick={addVo}
                   className="px-1 py-1 bg-sky-700/40 hover:bg-sky-600/60 border border-sky-700/60 text-sky-200 rounded text-[11px] font-medium transition-colors"
-                  title={`Add VO at playhead (tick ${playheadTick}) — auto-enables tutorial mode`}
+                  title={`Add a standalone VO at playhead (tick ${playheadTick}). VOs fire on their own tick — no STEP required.`}
                 >
                   + VO
                 </button>
                 <button
                   onClick={addStep}
                   className="px-1 py-1 bg-purple-700/40 hover:bg-purple-600/60 border border-purple-700/60 text-purple-200 rounded text-[11px] font-medium transition-colors"
-                  title={`Add STEP boundary at playhead (tick ${playheadTick}) — auto-enables tutorial mode`}
+                  title={`Add a STEP pass/fail boundary at playhead (tick ${playheadTick}). Only used to gate note-hit criteria — VOs play independently.`}
                 >
                   + STEP
                 </button>
@@ -3831,8 +3831,11 @@ export default function BeatmapEditor() {
                   + MUSIC
                 </button>
               </div>
-              <p className="text-[11px] text-gray-600 mb-2">
+              <p className="text-[11px] text-gray-600 mb-1">
                 Adding at <span className="font-mono text-gray-400">{fmtTick(playheadTick)}</span>
+              </p>
+              <p className="text-[10px] text-gray-600 leading-snug mb-2">
+                VOs fire on their own tick — STEPs only gate note pass/fail. Drop VOs anywhere; you don't need a STEP first.
               </p>
               <button
                 onClick={() => { setStudioImportOpen(true); setStudioImportError('') }}
@@ -4093,23 +4096,24 @@ export default function BeatmapEditor() {
                               />
                               ElevenLabs{elVoicesError ? ` (${elVoicesError})` : ''}
                             </label>
-                            {ev.engine === 'elevenlabs' && (
-                              <select
-                                value={ev.voiceId}
-                                onChange={(e) => updateTutorialEvent(ev.id, { voiceId: e.target.value })}
-                                className="ml-auto bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-[10px] text-gray-200 max-w-[140px]"
-                              >
-                                <option value="">
-                                  inherit{trackVoiceId
-                                    ? ` (${(elVoices.find((v) => v.voice_id === trackVoiceId)?.name || 'track default')})`
-                                    : ' (no track default)'}
-                                </option>
-                                {elVoices.map((v) => (
-                                  <option key={v.voice_id} value={v.voice_id}>{v.name}</option>
-                                ))}
-                              </select>
-                            )}
                           </div>
+                          {ev.engine === 'elevenlabs' && (
+                            <select
+                              value={ev.voiceId}
+                              onChange={(e) => updateTutorialEvent(ev.id, { voiceId: e.target.value })}
+                              className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-1 text-[10px] text-gray-200 truncate"
+                              title="Voice for this VO — overrides the track default"
+                            >
+                              <option value="">
+                                inherit{trackVoiceId
+                                  ? ` (${(elVoices.find((v) => v.voice_id === trackVoiceId)?.name || 'track default')})`
+                                  : ' (no track default)'}
+                              </option>
+                              {elVoices.map((v) => (
+                                <option key={v.voice_id} value={v.voice_id}>{v.name}</option>
+                              ))}
+                            </select>
+                          )}
                           <div className="flex items-center gap-1.5">
                             <button
                               onClick={() => generateVoAudio(ev)}

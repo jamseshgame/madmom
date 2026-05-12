@@ -21,6 +21,7 @@ from .routers import (
     game_songs,
     jobs,
     lyrics,
+    sample_packs,
     stems,
     tracks,
     tutorial,
@@ -78,6 +79,7 @@ app.include_router(tutorial.router, dependencies=_auth_dep)
 app.include_router(elevenlabs.router, dependencies=_auth_dep)
 app.include_router(lyrics.router, dependencies=_auth_dep)
 app.include_router(vocals.router, dependencies=_auth_dep)
+app.include_router(sample_packs.router, dependencies=_auth_dep)
 # users router has its own require_admin / require_auth Depends per route
 app.include_router(users.router)
 

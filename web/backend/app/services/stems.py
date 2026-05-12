@@ -111,6 +111,20 @@ def write_song_ini(output_dir: Path, fields: dict) -> Path:
             if v != '' and v is not None:
                 lines.append(f'{k} = {v}')
 
+    # Real-notes mode shares the sample_<slot> infrastructure with tutorials
+    # (the slots, the file layout, the runtime sample lookup) but is gated
+    # by its own [real_notes] section so a chart can be a real-notes song
+    # without being a tutorial. Keys: real_notes (bool), real_notes_pack
+    # (catalog id), real_notes_scale (catalog id).
+    realnote_keys = sorted(k for k in fields if k.startswith('real_notes'))
+    if realnote_keys and any(str(fields.get(k, '')).strip() for k in realnote_keys):
+        lines.append('')
+        lines.append('[real_notes]')
+        for k in realnote_keys:
+            v = fields.get(k, '')
+            if v != '' and v is not None:
+                lines.append(f'{k} = {v}')
+
     ini_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
     return ini_path
 

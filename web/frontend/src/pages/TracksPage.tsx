@@ -358,6 +358,167 @@ const TUTORIAL_SAMPLE_SLOTS: { slot: string; label: string; cls: string }[] = [
   { slot: 'open', label: 'Open strum', cls: 'text-purple-300' },
 ]
 
+// ── Real-notes sound packs — pick a curated pack + scale; backend renders
+// all 10 sample slots into the track's stems_dir/tutorial_samples/ and turns
+// on the [real_notes] flag in song.ini. Reuses the tutorial-samples slot
+// layout so a track can carry tutorial-mode samples and real-notes samples
+// from the same files.
+interface SoundPack {
+  pack_id: string
+  name: string
+  family: string
+  description: string
+}
+interface SoundScale {
+  scale_id: string
+  name: string
+  description: string
+}
+
+function SoundPackPanel({ track }: { track: Track }) {
+  const [expanded, setExpanded] = useState(false)
+  const [packs, setPacks] = useState<SoundPack[]>([])
+  const [scales, setScales] = useState<SoundScale[]>([])
+  const [packId, setPackId] = useState('')
+  const [scaleId, setScaleId] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [status, setStatus] = useState('')
+
+  useEffect(() => {
+    if (!expanded) return
+    fetch('/api/sample-packs')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!data) return
+        setPacks(data.packs || [])
+        setScales(data.scales || [])
+        // Default selections: first of each.
+        if (data.packs?.length) setPackId((cur) => cur || data.packs[0].pack_id)
+        if (data.scales?.length) setScaleId((cur) => cur || data.scales[0].scale_id)
+      })
+      .catch(() => undefined)
+  }, [expanded])
+
+  const apply = async () => {
+    if (!packId || !scaleId) return
+    setBusy(true)
+    setError('')
+    setStatus('')
+    try {
+      const fd = new FormData()
+      fd.append('pack_id', packId)
+      fd.append('scale_id', scaleId)
+      const res = await fetch(`/api/tracks/${track.id}/apply-sample-pack`, {
+        method: 'POST',
+        body: fd,
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || `Apply failed (${res.status})`)
+      }
+      const data = await res.json() as { slots: Record<string, string> }
+      setStatus(`Rendered ${Object.keys(data.slots).length} samples · real-notes mode is on for this track.`)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Detect existing real-notes setup from track.stems (any sample_* entry that
+  // points at tutorial_samples/ implies a pack has already been applied).
+  const hasRealNotes = Object.entries(track.stems || {}).some(
+    ([k, v]) => k.startsWith('sample_') && typeof v === 'string' && v.startsWith('tutorial_samples/'),
+  )
+
+  if (!expanded) {
+    return (
+      <button
+        onClick={() => setExpanded(true)}
+        className="mt-3 w-full py-2.5 border border-cyan-800 bg-cyan-900/20 hover:bg-cyan-900/40 text-cyan-300 rounded-lg text-sm font-medium transition-colors"
+      >
+        Real-notes sound pack{hasRealNotes ? ' · applied' : ''}
+      </button>
+    )
+  }
+
+  return (
+    <div className="mt-3 border border-cyan-800 bg-cyan-900/10 rounded-lg p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <h4 className="text-sm font-semibold text-cyan-300">Real-notes sound pack</h4>
+        <button
+          onClick={() => setExpanded(false)}
+          className="text-xs text-gray-500 hover:text-gray-300"
+        >
+          ✕ close
+        </button>
+      </div>
+      <p className="text-[11px] text-gray-500 leading-snug">
+        Pick a timbre + scale. The backend renders 10 OGGs (lane_1..lane_5,
+        chord_12..chord_45, open) into this track's stems folder and flags
+        real-notes mode on in song.ini. The game client plays the matching
+        sample whenever a note is hit successfully — even outside tutorial mode.
+      </p>
+
+      <div>
+        <label className="block text-[11px] text-gray-400 mb-1">Sound pack</label>
+        <select
+          value={packId}
+          onChange={(e) => setPackId(e.target.value)}
+          disabled={busy || packs.length === 0}
+          className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-[12px] text-gray-200 focus:outline-none focus:border-cyan-500 disabled:opacity-50"
+        >
+          {packs.map((p) => (
+            <option key={p.pack_id} value={p.pack_id}>
+              {p.name} — {p.family}
+            </option>
+          ))}
+        </select>
+        {packs.find((p) => p.pack_id === packId) && (
+          <p className="text-[10px] text-gray-600 mt-1">
+            {packs.find((p) => p.pack_id === packId)?.description}
+          </p>
+        )}
+      </div>
+
+      <div>
+        <label className="block text-[11px] text-gray-400 mb-1">Scale (10 pitches)</label>
+        <select
+          value={scaleId}
+          onChange={(e) => setScaleId(e.target.value)}
+          disabled={busy || scales.length === 0}
+          className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-[12px] text-gray-200 focus:outline-none focus:border-cyan-500 disabled:opacity-50"
+        >
+          {scales.map((s) => (
+            <option key={s.scale_id} value={s.scale_id}>{s.name}</option>
+          ))}
+        </select>
+        {scales.find((s) => s.scale_id === scaleId) && (
+          <p className="text-[10px] text-gray-600 mt-1">
+            {scales.find((s) => s.scale_id === scaleId)?.description}
+          </p>
+        )}
+      </div>
+
+      {error && <p className="text-xs text-red-400 break-words">{error}</p>}
+      {status && <p className="text-xs text-emerald-400">{status}</p>}
+
+      <button
+        onClick={apply}
+        disabled={busy || !packId || !scaleId}
+        className="w-full px-3 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 text-white rounded text-xs font-medium"
+      >
+        {busy ? 'Rendering…' : hasRealNotes ? 'Re-render with this pack' : 'Apply pack to track'}
+      </button>
+      <p className="text-[10px] text-gray-600">
+        Overwrites this track's tutorial_samples/ folder. Manual sample uploads
+        in the panel below will be replaced.
+      </p>
+    </div>
+  )
+}
+
 function TutorialSamplesPanel({ track }: { track: Track }) {
   const [expanded, setExpanded] = useState(false)
   const [samples, setSamples] = useState<Record<string, { filename: string; size_bytes: number; mtime: number }>>({})
@@ -1697,6 +1858,7 @@ export default function TracksPage() {
             </div>
           </div>
 
+          <SoundPackPanel track={selectedTrack} />
           <TutorialSamplesPanel track={selectedTrack} />
           <InlinePublish track={selectedTrack} />
         </div>
