@@ -1177,6 +1177,15 @@ export default function BeatmapEditor() {
     noteTick: number
     startCy: number
   } | null>(null)
+  // Click-and-drag-to-scrub state. Armed on mousedown in empty canvas area
+  // (no note hit, Select tool); the drag handler converts y-delta to a
+  // currentTime delta. If the user never drags far enough, the gesture is
+  // treated as a plain click on mouseup (clears selection).
+  const scrubRef = useRef<{
+    startCy: number
+    startCurrentTime: number
+    moved: boolean
+  } | null>(null)
   const [canvasSize, setCanvasSize] = useState({ w: 800, h: 800 })
 
   const [playing, setPlaying] = useState(false)
@@ -2619,14 +2628,45 @@ export default function BeatmapEditor() {
       return
     }
 
-    // Click on empty space in select tool: clear selection.
-    setSelectedIds(new Set())
+    // Empty click in the Select tool: arm a scrub-or-clear. The handler
+    // resolves the gesture on mouseup — drag-of-significant-distance =
+    // scrub (currentTime drifted by then), no-drag = treat as click and
+    // clear the selection.
+    scrubRef.current = { startCy: cy, startCurrentTime: currentTime, moved: false }
   }
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!chart) return
     const canvas = canvasRef.current!
     const { cx, cy } = canvasToCoords(e)
+
+    // Empty-area drag = scrub the playhead. Map y-delta (in canvas pixels)
+    // through scrollSpeed back to a seconds-delta so 1 px of drag matches
+    // 1 px of runway scroll. Dragging DOWN advances time (the runway
+    // visually flows down toward the strike line as time progresses;
+    // pulling the chart down is "look further ahead").
+    if (scrubRef.current) {
+      const s = scrubRef.current
+      const dy = cy - s.startCy  // positive when dragging down
+      if (!s.moved && Math.abs(dy) < 4) {
+        // Below threshold — treat as still-a-click; don't shift time yet.
+        return
+      }
+      s.moved = true
+      const rect = canvas.getBoundingClientRect()
+      // Convert canvas-space dy back to CSS-pixel velocity so the drag
+      // tracks the cursor 1:1 regardless of canvas backing-store scale.
+      const cssDy = dy * (rect.height / Math.max(1, canvas.height))
+      const next = s.startCurrentTime + cssDy / Math.max(1, scrollSpeed)
+      const clamped = duration > 0
+        ? Math.max(0, Math.min(duration, next))
+        : Math.max(0, next)
+      if (Math.abs(clamped - currentTime) > 0.001) {
+        if (audioRef.current) audioRef.current.currentTime = clamped
+        setCurrentTime(clamped)
+      }
+      return
+    }
 
     // Sustain-drag during note placement: convert the upward drag distance
     // from startCy to a snapped tick count and apply it to the just-placed
@@ -2701,6 +2741,23 @@ export default function BeatmapEditor() {
     setDirty(true)
   }
 
+  // Mouse-wheel over the runway scrolls the playhead. The runway has time
+  // flowing up (future is above the strike line) so natural-scroll
+  // semantics map a wheel-down (positive deltaY) to "going back in time"
+  // and wheel-up to "advancing forward" — matching how documents scroll.
+  // Shift-wheel scrolls 4× faster for fast traversal.
+  const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
+    if (!chart) return
+    const sensitivity = e.shiftKey ? 4 : 1
+    const next = currentTime - (e.deltaY / Math.max(1, scrollSpeed)) * sensitivity
+    const clamped = duration > 0
+      ? Math.max(0, Math.min(duration, next))
+      : Math.max(0, next)
+    if (Math.abs(clamped - currentTime) < 0.001) return
+    if (audioRef.current) audioRef.current.currentTime = clamped
+    setCurrentTime(clamped)
+  }
+
   const handleMouseUp = () => {
     if (dragRef.current?.moved) {
       // Validate the final drag position. If it violates the chart rules,
@@ -2737,6 +2794,13 @@ export default function BeatmapEditor() {
     // (commitNotes already pushed the pre-placement state onto the stack on
     // mousedown — one undo reverts the whole hold-note authoring stroke.)
     placeRef.current = null
+    // Scrub gesture cleanup. A scrub that never moved past the 4-px
+    // threshold counts as a plain click on empty space → clear selection.
+    if (scrubRef.current) {
+      const s = scrubRef.current
+      if (!s.moved) setSelectedIds(new Set())
+      scrubRef.current = null
+    }
   }
 
   // Keyboard
@@ -4122,6 +4186,7 @@ export default function BeatmapEditor() {
               onMouseMove={handleMouseMove}
               onMouseUp={handleMouseUp}
               onMouseLeave={handleMouseUp}
+              onWheel={handleWheel}
               className="absolute inset-0 w-full h-full cursor-crosshair"
             />
             {ruleError && (
