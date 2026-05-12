@@ -2084,16 +2084,59 @@ export default function BeatmapEditor() {
         ctx.stroke()
       }
     }
-    // Beat lines (stronger)
-    ctx.strokeStyle = '#1f2937'
-    ctx.lineWidth = 1
+    // Beat lines (stronger) + ruler labels. Bars are emphasised (brighter
+    // stroke + timestamp label); every beat gets a small "bar.beat" mark
+    // on the left edge. Tick number is shown next to bars to help when
+    // discussing chart positions in absolute terms.
+    //
+    // Assumes 4/4 — that's the only time signature the editor surfaces
+    // today; when chart.timeSigs is exposed in the future, swap `4` here
+    // for the active TS numerator at this tick.
+    const BEATS_PER_BAR = 4
+    // Skip labels that would collide vertically — happens at high BPM or
+    // very low scroll-speed. 14 px is roughly the rendered text height.
+    const beatYStride = beatStep * (1 / chart.resolution) * (60 / Math.max(1, chart.bpm)) * scrollSpeed
+    const labelEveryBeat = beatYStride >= 14
+    const labelEveryBar = beatYStride * BEATS_PER_BAR >= 18
+
+    ctx.font = '10px monospace'
+    ctx.textAlign = 'left'
     for (let t = startBeat; t <= endTick; t += beatStep) {
       const y = HIT - (t2s(t) - currentTime) * scrollSpeed
-      if (y < -10 || y > H + 10) continue
+      if (y < -16 || y > H + 16) continue
+      const beatIdx = Math.round(t / beatStep)
+      const isBar = beatIdx % BEATS_PER_BAR === 0
+      // Bar lines slightly brighter so the eye can latch onto downbeats.
+      ctx.strokeStyle = isBar ? '#374151' : '#1f2937'
+      ctx.lineWidth = isBar ? 1.5 : 1
       ctx.beginPath()
       ctx.moveTo(0, y)
       ctx.lineTo(W, y)
       ctx.stroke()
+      // Labels — drawn on the LEFT edge so they don't intrude on the
+      // playable lanes. y - 2 puts the baseline just above the line.
+      if (isBar) {
+        const bar = Math.floor(beatIdx / BEATS_PER_BAR) + 1
+        ctx.fillStyle = '#9ca3af'
+        ctx.fillText(`${bar}.1`, 4, y - 2)
+        if (labelEveryBar) {
+          const sec = t2s(t)
+          const m = Math.floor(sec / 60)
+          const ss = Math.floor(sec % 60)
+          const cs = Math.floor((sec % 1) * 100)
+          const timeStr = `${m}:${ss.toString().padStart(2, '0')}.${cs.toString().padStart(2, '0')}`
+          ctx.fillStyle = '#6b7280'
+          ctx.fillText(timeStr, 28, y - 2)
+          // Tick number (useful for cross-referencing with rules/quantize).
+          ctx.fillStyle = '#4b5563'
+          ctx.fillText(`t${t}`, 78, y - 2)
+        }
+      } else if (labelEveryBeat) {
+        const bar = Math.floor(beatIdx / BEATS_PER_BAR) + 1
+        const beatInBar = (beatIdx % BEATS_PER_BAR) + 1
+        ctx.fillStyle = '#4b5563'
+        ctx.fillText(`${bar}.${beatInBar}`, 4, y - 2)
+      }
     }
 
     // Hit line + lane circles
