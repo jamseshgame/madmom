@@ -1222,6 +1222,22 @@ export default function BeatmapEditor() {
   const [clickEnabled, setClickEnabled] = useState(false)
   const [clickVolume, setClickVolume] = useState(0.4)
   const clickCtxRef = useRef<AudioContext | null>(null)
+  // Real-notes preview — when this track has a sound pack applied, fire the
+  // matching sample whenever the playhead crosses a real-note tick. Uses
+  // WebAudio with pre-decoded AudioBuffers; the slot resolution is in
+  // _resolveRealNoteSlot below.
+  const [realNotesEnabled, setRealNotesEnabled] = useState(true)
+  const [realNotesVolume, setRealNotesVolume] = useState(0.8)
+  const [realNotesReady, setRealNotesReady] = useState(false)
+  const realNotesCtxRef = useRef<AudioContext | null>(null)
+  const realNotesGainRef = useRef<GainNode | null>(null)
+  const realNotesBuffersRef = useRef<Map<string, AudioBuffer> | null>(null)
+  // Pre-computed list of (seconds, slot) for every real-note in the chart,
+  // sorted by seconds. Rebuilt when the chart or tempo map changes.
+  const realNotesEntriesRef = useRef<Array<{ sec: number; slot: string }>>([])
+  // Last currentTime we processed — used to detect playback range so we don't
+  // re-fire samples on every animation frame.
+  const realNotesLastTimeRef = useRef<number>(0)
   const clickGainRef = useRef<GainNode | null>(null)
   const audioSrc = audioSource === 'track-song'
     ? `/api/tracks/${trackId}/stems/song`
@@ -1573,8 +1589,166 @@ export default function BeatmapEditor() {
         clickCtxRef.current = null
         clickGainRef.current = null
       }
+      const rctx = realNotesCtxRef.current
+      if (rctx) {
+        rctx.close().catch(() => undefined)
+        realNotesCtxRef.current = null
+        realNotesGainRef.current = null
+        realNotesBuffersRef.current = null
+      }
     }
   }, [])
+
+  // ── Real-notes sample playback ────────────────────────────────────────────
+  // Resolve which sample slot a real-note at `tick` should play. Mirrors the
+  // game-side rule:
+  //   - lane 7 present → 'open'
+  //   - exactly 1 fret lane → 'lane_{N+1}'
+  //   - exactly 2 fret lanes → 'chord_{a}{b}' with adjacent-lane fallback
+  //   - 3+ fret lanes (forbidden by R1 but defensive) → first lane's sample
+  const _resolveRealNoteSlot = useCallback((tick: number): string | null => {
+    if (!chart) return null
+    const fretLanes: number[] = []
+    let hasOpen = false
+    for (const n of chart.notes) {
+      if (n.tick !== tick) continue
+      if (n.lane === 7) hasOpen = true
+      else if (n.lane <= 4) fretLanes.push(n.lane)
+    }
+    if (hasOpen) return 'open'
+    if (fretLanes.length === 0) return null
+    if (fretLanes.length === 1) return `lane_${fretLanes[0] + 1}`
+    if (fretLanes.length >= 2) {
+      const sorted = [...fretLanes].sort((a, b) => a - b)
+      // Only canonical adjacent-lane chords have a pre-rendered sample
+      // (chord_12 / chord_23 / chord_34 / chord_45). For wider chords fall
+      // back to the lower lane's solo sample.
+      if (sorted[1] - sorted[0] === 1) {
+        return `chord_${sorted[0] + 1}${sorted[1] + 1}`
+      }
+      return `lane_${sorted[0] + 1}`
+    }
+    return null
+  }, [chart])
+
+  // Fetch + decode all 10 slot samples on track-id change. If any slot 404s,
+  // we treat the track as "no sound pack" and leave realNotesReady false —
+  // the playback effect bails out silently.
+  useEffect(() => {
+    let cancelled = false
+    setRealNotesReady(false)
+    realNotesBuffersRef.current = null
+    if (!trackId) return
+    const SLOTS = ['lane_1', 'lane_2', 'lane_3', 'lane_4', 'lane_5',
+                   'chord_12', 'chord_23', 'chord_34', 'chord_45', 'open']
+    ;(async () => {
+      // Probe one slot first so the common "no pack applied" case doesn't
+      // generate ten 404s in the console.
+      const probe = await fetch(`/api/tracks/${trackId}/stems/sample_lane_1`, { method: 'HEAD' })
+        .catch(() => null)
+      if (cancelled) return
+      if (!probe || !probe.ok) return  // no pack applied — silent
+      // Lazy-init the AudioContext + master gain.
+      if (!realNotesCtxRef.current) {
+        const AC = window.AudioContext
+          || (window as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+        if (!AC) return
+        realNotesCtxRef.current = new AC()
+        const gain = realNotesCtxRef.current.createGain()
+        gain.gain.value = realNotesVolume
+        gain.connect(realNotesCtxRef.current.destination)
+        realNotesGainRef.current = gain
+      }
+      const ctx = realNotesCtxRef.current
+      const map = new Map<string, AudioBuffer>()
+      for (const slot of SLOTS) {
+        try {
+          const r = await fetch(`/api/tracks/${trackId}/stems/sample_${slot}`)
+          if (!r.ok) continue
+          const ab = await r.arrayBuffer()
+          const decoded = await ctx.decodeAudioData(ab)
+          if (cancelled) return
+          map.set(slot, decoded)
+        } catch {
+          // Per-slot failure isn't fatal — others may still play.
+        }
+      }
+      if (cancelled) return
+      if (map.size === 0) return  // no decodable samples
+      realNotesBuffersRef.current = map
+      setRealNotesReady(true)
+    })()
+    return () => { cancelled = true }
+  }, [trackId])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Keep the master gain in sync with the volume slider without restarting
+  // any in-flight buffer sources.
+  useEffect(() => {
+    if (realNotesGainRef.current) {
+      realNotesGainRef.current.gain.value = realNotesVolume
+    }
+  }, [realNotesVolume])
+
+  // Rebuild the (sec, slot) entry list whenever the chart or tempo map
+  // changes. Pre-sorted by sec so the fire-on-cross effect can scan a
+  // bounded window in O(crossings).
+  useEffect(() => {
+    if (!chart) {
+      realNotesEntriesRef.current = []
+      return
+    }
+    const realTicks = new Set<number>()
+    for (const n of chart.notes) if (n.lane === 8) realTicks.add(n.tick)
+    const entries: Array<{ sec: number; slot: string }> = []
+    for (const tick of realTicks) {
+      const slot = _resolveRealNoteSlot(tick)
+      if (!slot) continue
+      entries.push({
+        sec: tickToSec(tempoSegments, chart.resolution, tick),
+        slot,
+      })
+    }
+    entries.sort((a, b) => a.sec - b.sec)
+    realNotesEntriesRef.current = entries
+  }, [chart, tempoSegments, _resolveRealNoteSlot])
+
+  // Fire matching samples as the playhead crosses real-notes during playback.
+  // Detects seeks via a delta threshold and rebases without firing.
+  useEffect(() => {
+    if (!playing || !realNotesEnabled || !realNotesReady) {
+      realNotesLastTimeRef.current = currentTime
+      return
+    }
+    const ctx = realNotesCtxRef.current
+    const gain = realNotesGainRef.current
+    const buffers = realNotesBuffersRef.current
+    if (!ctx || !gain || !buffers) return
+    if (ctx.state === 'suspended') ctx.resume().catch(() => undefined)
+    const prev = realNotesLastTimeRef.current
+    const delta = currentTime - prev
+    // Detect seeks / pause-resume gaps and rebase without firing.
+    if (delta < 0 || delta > 0.5) {
+      realNotesLastTimeRef.current = currentTime
+      return
+    }
+    if (delta <= 0) return  // playhead hasn't advanced (paused)
+    const entries = realNotesEntriesRef.current
+    // Binary search would be nicer but this is < 1000 entries on typical
+    // charts; linear scan with early break is plenty fast.
+    for (const e of entries) {
+      if (e.sec <= prev) continue
+      if (e.sec > currentTime) break
+      const buf = buffers.get(e.slot)
+      if (!buf) continue
+      const src = ctx.createBufferSource()
+      src.buffer = buf
+      src.connect(gain)
+      // Schedule slightly into the future (~5ms) so all simultaneous notes
+      // start phase-locked rather than smearing across frames.
+      src.start(ctx.currentTime + 0.005)
+    }
+    realNotesLastTimeRef.current = currentTime
+  }, [currentTime, playing, realNotesEnabled, realNotesReady])
 
   // Decode song.ogg → peaks for waveform overlay. Bucket size of 20ms gives
   // ~50 peaks/second, enough resolution to read transients on the runway
@@ -3440,6 +3614,38 @@ export default function BeatmapEditor() {
               />
               <span className="text-[11px] font-mono text-gray-300 w-10 text-right shrink-0">
                 {Math.round(clickVolume * 100)}%
+              </span>
+            </div>
+            <label className="mt-2 flex items-center gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={realNotesEnabled}
+                onChange={(e) => setRealNotesEnabled(e.target.checked)}
+                disabled={!realNotesReady}
+                className="h-3.5 w-3.5 rounded border-gray-600 bg-gray-900 accent-cyan-500 cursor-pointer disabled:cursor-not-allowed"
+              />
+              <span className={`text-[11px] ${realNotesReady ? 'text-gray-300' : 'text-gray-600'}`}>
+                Real-note playback
+              </span>
+              <span className="text-[10px] text-gray-500 ml-auto" title={realNotesReady ? 'Plays the sample pack on every real-note (cyan-dotted gem) as the playhead crosses it.' : 'Apply a sound pack on the track page to enable this.'}>
+                {realNotesReady ? (realNotesEnabled ? 'on' : 'off') : 'no pack'}
+              </span>
+            </label>
+            <div className="mt-1 flex items-center gap-2">
+              <span className="text-[11px] text-gray-500 shrink-0">Real vol</span>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                value={Math.round(realNotesVolume * 100)}
+                onChange={(e) => setRealNotesVolume(Number(e.target.value) / 100)}
+                disabled={!realNotesReady || !realNotesEnabled}
+                className="flex-1 accent-cyan-500 disabled:opacity-40"
+                title="Real-note sample volume"
+              />
+              <span className="text-[11px] font-mono text-gray-300 w-10 text-right shrink-0">
+                {Math.round(realNotesVolume * 100)}%
               </span>
             </div>
             <div className="mt-2 flex items-center gap-2">
