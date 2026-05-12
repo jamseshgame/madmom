@@ -11,7 +11,7 @@ from fastapi import APIRouter, Form, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 
 from ..services import sample_packs
-from ..services.tracks import get_track
+from ..services.tracks import get_beatmap_dir, get_track
 
 router = APIRouter(prefix='/api', tags=['sample-packs'])
 
@@ -22,6 +22,116 @@ async def list_packs() -> JSONResponse:
         'packs': sample_packs.pack_catalog(),
         'scales': sample_packs.scale_catalog(),
     })
+
+
+@router.get('/tracks/{track_id}/beatmaps/{beatmap_id}/sample-pack')
+async def get_beatmap_pack(track_id: str, beatmap_id: str) -> JSONResponse:
+    """Return the pack/scale applied to this beatmap (or `null`s) plus a
+    list of which slot OGGs are actually on disk. The editor uses this to
+    decide whether to wire up real-notes preview playback."""
+    track = get_track(track_id)
+    if track is None:
+        raise HTTPException(404, 'Track not found')
+    rec = next((b for b in track.beatmaps if b.get('id') == beatmap_id), None)
+    if rec is None:
+        raise HTTPException(404, 'Beatmap not found')
+    bm_dir = get_beatmap_dir(track_id, beatmap_id)
+    samples_dir = bm_dir / 'tutorial_samples' if bm_dir else None
+    slots_present: list[str] = []
+    if samples_dir and samples_dir.is_dir():
+        for slot in sample_packs.SLOT_ORDER:
+            if (samples_dir / f'{slot}.ogg').exists():
+                slots_present.append(slot)
+    pack_info = rec.get('sample_pack') or {}
+    return JSONResponse(content={
+        'pack_id': pack_info.get('pack_id'),
+        'scale_id': pack_info.get('scale_id'),
+        'slots_present': slots_present,
+    })
+
+
+@router.post('/tracks/{track_id}/beatmaps/{beatmap_id}/apply-sample-pack')
+async def apply_beatmap_pack(
+    track_id: str,
+    beatmap_id: str,
+    pack_id: str = Form(...),
+    scale_id: str = Form(...),
+):
+    """Per-beatmap sample-pack apply. Renders 10 OGGs into
+    `<beatmap_dir>/tutorial_samples/` and records pack/scale on the beatmap
+    metadata so the editor can show the current selection across reloads."""
+    track = get_track(track_id)
+    if track is None:
+        raise HTTPException(404, 'Track not found')
+    bm_dir = get_beatmap_dir(track_id, beatmap_id)
+    if bm_dir is None:
+        raise HTTPException(404, 'Beatmap not found')
+    pack = sample_packs.get_pack(pack_id)
+    if pack is None:
+        raise HTTPException(404, f'Unknown pack: {pack_id}')
+    scale = sample_packs.get_scale(scale_id)
+    if scale is None:
+        raise HTTPException(404, f'Unknown scale: {scale_id}')
+    out_dir = bm_dir / 'tutorial_samples'
+    try:
+        rel_paths = sample_packs.render_pack(pack, scale, out_dir)
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
+    # Persist the (pack, scale) choice on the beatmap record so the editor
+    # can reflect it on reload and publish can stamp song.ini per beatmap.
+    for rec in track.beatmaps:
+        if rec.get('id') == beatmap_id:
+            rec['sample_pack'] = {'pack_id': pack.pack_id, 'scale_id': scale.scale_id}
+            break
+    track.save()
+    return {
+        'pack_id': pack.pack_id,
+        'scale_id': scale.scale_id,
+        'slots': rel_paths,
+        'sample_count': len(rel_paths),
+    }
+
+
+@router.delete('/tracks/{track_id}/beatmaps/{beatmap_id}/sample-pack')
+async def clear_beatmap_pack(track_id: str, beatmap_id: str):
+    """Drop the rendered tutorial_samples folder and clear the pack record
+    on this beatmap. Useful for switching from one pack to none without
+    leaving stale OGGs behind."""
+    track = get_track(track_id)
+    if track is None:
+        raise HTTPException(404, 'Track not found')
+    bm_dir = get_beatmap_dir(track_id, beatmap_id)
+    if bm_dir is None:
+        raise HTTPException(404, 'Beatmap not found')
+    samples_dir = bm_dir / 'tutorial_samples'
+    if samples_dir.is_dir():
+        import shutil as _sh
+        _sh.rmtree(samples_dir, ignore_errors=True)
+    cleared = False
+    for rec in track.beatmaps:
+        if rec.get('id') == beatmap_id:
+            if 'sample_pack' in rec:
+                rec.pop('sample_pack', None)
+                cleared = True
+            break
+    if cleared:
+        track.save()
+    return {'cleared': cleared}
+
+
+@router.get('/tracks/{track_id}/beatmaps/{beatmap_id}/sample/{slot}')
+async def get_beatmap_sample(track_id: str, beatmap_id: str, slot: str):
+    """Serve one of the rendered slot OGGs from the beatmap's
+    tutorial_samples/ folder. Used by the editor preview playback."""
+    if slot not in sample_packs.SLOT_ORDER:
+        raise HTTPException(400, f'Unknown slot: {slot}')
+    bm_dir = get_beatmap_dir(track_id, beatmap_id)
+    if bm_dir is None:
+        raise HTTPException(404, 'Beatmap not found')
+    p = bm_dir / 'tutorial_samples' / f'{slot}.ogg'
+    if not p.exists():
+        raise HTTPException(404, 'Sample not rendered for this beatmap')
+    return FileResponse(str(p), media_type='audio/ogg', filename=f'{slot}.ogg')
 
 
 @router.get('/sample-packs/{pack_id}/{scale_id}/preview')

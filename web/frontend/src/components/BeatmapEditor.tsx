@@ -664,7 +664,6 @@ interface BeatmapMeta {
   name: string
   stem: string
   hasAlbumArt: boolean
-  hasSamplePack: boolean
 }
 
 // ── TutorialTimeline ────────────────────────────────────────────────────────
@@ -1223,7 +1222,26 @@ export default function BeatmapEditor() {
   const [clickEnabled, setClickEnabled] = useState(false)
   const [clickVolume, setClickVolume] = useState(0.4)
   const clickCtxRef = useRef<AudioContext | null>(null)
-  // Real-notes preview — when this track has a sound pack applied, fire the
+  // Per-beatmap sound pack. Distinct from the track-level concept: a track
+  // with three beatmaps (guitar / bass / drums) can pick a different pack
+  // for each. Backend stores the choice on the beatmap record and renders
+  // the 10 OGGs into <beatmap_dir>/tutorial_samples/.
+  const [packCatalog, setPackCatalog] = useState<Array<{
+    pack_id: string; name: string; family: string; description: string
+  }>>([])
+  const [scaleCatalog, setScaleCatalog] = useState<Array<{
+    scale_id: string; name: string; description: string
+  }>>([])
+  const [pickedPackId, setPickedPackId] = useState('')
+  const [pickedScaleId, setPickedScaleId] = useState('')
+  const [appliedPackId, setAppliedPackId] = useState<string | null>(null)
+  const [appliedScaleId, setAppliedScaleId] = useState<string | null>(null)
+  const [packBusy, setPackBusy] = useState(false)
+  const [packError, setPackError] = useState('')
+  const [packPreviewing, setPackPreviewing] = useState(false)
+  const packPreviewRef = useRef<HTMLAudioElement | null>(null)
+
+  // Real-notes preview — when this beatmap has a sound pack applied, fire the
   // matching sample whenever the playhead crosses a real-note tick. Uses
   // WebAudio with pre-decoded AudioBuffers; the slot resolution is in
   // _resolveRealNoteSlot below.
@@ -1419,12 +1437,7 @@ export default function BeatmapEditor() {
         // entry written when the track is published. If it's absent we skip
         // rendering the <img> entirely instead of triggering a 404 + onError.
         const hasAlbumArt = !!(track.stems && track.stems.album_png)
-        // A sound pack writes sample_<slot> entries into track.stems when
-        // applied. Presence of sample_lane_1 is a sufficient proxy for "real-
-        // notes preview is wired" — skips a HEAD probe that the route doesn't
-        // allow.
-        const hasSamplePack = !!(track.stems && track.stems.sample_lane_1)
-        if (bm) setMeta({ name: bm.song_name, stem: bm.stem, hasAlbumArt, hasSamplePack })
+        if (bm) setMeta({ name: bm.song_name, stem: bm.stem, hasAlbumArt })
       })
       .catch(() => undefined)
   }, [trackId, beatmapId])
@@ -1605,6 +1618,105 @@ export default function BeatmapEditor() {
     }
   }, [])
 
+  // ── Sound pack picker ─────────────────────────────────────────────────────
+  // Catalog is shared across all beatmaps, fetched once.
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/sample-packs')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (cancelled || !data) return
+        setPackCatalog(data.packs || [])
+        setScaleCatalog(data.scales || [])
+        if (data.packs?.length) setPickedPackId((cur) => cur || data.packs[0].pack_id)
+        if (data.scales?.length) setPickedScaleId((cur) => cur || data.scales[0].scale_id)
+      })
+      .catch(() => undefined)
+    return () => { cancelled = true }
+  }, [])
+
+  const refetchBeatmapPack = useCallback(() => {
+    if (!trackId || !beatmapId) return
+    fetch(`/api/tracks/${trackId}/beatmaps/${beatmapId}/sample-pack`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!data) return
+        setAppliedPackId(data.pack_id || null)
+        setAppliedScaleId(data.scale_id || null)
+        if (data.pack_id) setPickedPackId(data.pack_id)
+        if (data.scale_id) setPickedScaleId(data.scale_id)
+      })
+      .catch(() => undefined)
+  }, [trackId, beatmapId])
+  useEffect(() => { refetchBeatmapPack() }, [refetchBeatmapPack])
+
+  const applySoundPack = async () => {
+    if (!pickedPackId || !pickedScaleId) return
+    setPackBusy(true)
+    setPackError('')
+    try {
+      const fd = new FormData()
+      fd.append('pack_id', pickedPackId)
+      fd.append('scale_id', pickedScaleId)
+      const res = await fetch(
+        `/api/tracks/${trackId}/beatmaps/${beatmapId}/apply-sample-pack`,
+        { method: 'POST', body: fd },
+      )
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || `Apply failed (${res.status})`)
+      }
+      setAppliedPackId(pickedPackId)
+      setAppliedScaleId(pickedScaleId)
+    } catch (e) {
+      setPackError((e as Error).message)
+    } finally {
+      setPackBusy(false)
+    }
+  }
+
+  const clearSoundPack = async () => {
+    if (!appliedPackId) return
+    if (!window.confirm('Remove the sound pack from this beatmap? Real-notes will stop playing samples.')) return
+    setPackBusy(true)
+    setPackError('')
+    try {
+      await fetch(`/api/tracks/${trackId}/beatmaps/${beatmapId}/sample-pack`, { method: 'DELETE' })
+      setAppliedPackId(null)
+      setAppliedScaleId(null)
+    } catch (e) {
+      setPackError((e as Error).message)
+    } finally {
+      setPackBusy(false)
+    }
+  }
+
+  const playPackPreview = () => {
+    if (!pickedPackId || !pickedScaleId) return
+    if (packPreviewRef.current) {
+      packPreviewRef.current.pause()
+      packPreviewRef.current = null
+      setPackPreviewing(false)
+      return
+    }
+    const url = `/api/sample-packs/${encodeURIComponent(pickedPackId)}/${encodeURIComponent(pickedScaleId)}/preview`
+    const a = new Audio(url)
+    a.onended = () => { setPackPreviewing(false); packPreviewRef.current = null }
+    a.onerror = () => { setPackPreviewing(false); packPreviewRef.current = null }
+    packPreviewRef.current = a
+    setPackPreviewing(true)
+    a.play().catch(() => { setPackPreviewing(false); packPreviewRef.current = null })
+  }
+
+  // Cancel any in-flight preview when the user switches pack or scale.
+  useEffect(() => {
+    if (packPreviewRef.current) {
+      packPreviewRef.current.pause()
+      packPreviewRef.current = null
+      setPackPreviewing(false)
+    }
+  }, [pickedPackId, pickedScaleId])
+
   // ── Real-notes sample playback ────────────────────────────────────────────
   // Resolve which sample slot a real-note at `tick` should play. Mirrors the
   // game-side rule:
@@ -1637,15 +1749,14 @@ export default function BeatmapEditor() {
     return null
   }, [chart])
 
-  // Fetch + decode all 10 slot samples once the track meta confirms a sound
-  // pack has been applied (meta.hasSamplePack reads track.stems.sample_lane_1
-  // from /api/tracks/<id>, so no probe HEAD/GET is needed). If a track has
-  // no pack, this effect is a no-op and realNotesReady stays false.
+  // Fetch + decode all 10 slot samples once this beatmap has a pack applied
+  // (appliedPackId is non-null when the sample-pack endpoint reports one).
+  // No-op when no pack has been applied to this specific beatmap.
   useEffect(() => {
     let cancelled = false
     setRealNotesReady(false)
     realNotesBuffersRef.current = null
-    if (!trackId || !meta?.hasSamplePack) return
+    if (!trackId || !beatmapId || !appliedPackId) return
     const SLOTS = ['lane_1', 'lane_2', 'lane_3', 'lane_4', 'lane_5',
                    'chord_12', 'chord_23', 'chord_34', 'chord_45', 'open']
     ;(async () => {
@@ -1663,7 +1774,7 @@ export default function BeatmapEditor() {
       const map = new Map<string, AudioBuffer>()
       for (const slot of SLOTS) {
         try {
-          const r = await fetch(`/api/tracks/${trackId}/stems/sample_${slot}`)
+          const r = await fetch(`/api/tracks/${trackId}/beatmaps/${beatmapId}/sample/${slot}`)
           if (!r.ok) continue
           const ab = await r.arrayBuffer()
           const decoded = await ctx.decodeAudioData(ab)
@@ -1679,7 +1790,7 @@ export default function BeatmapEditor() {
       setRealNotesReady(true)
     })()
     return () => { cancelled = true }
-  }, [trackId, meta?.hasSamplePack])  // eslint-disable-line react-hooks/exhaustive-deps
+  }, [trackId, beatmapId, appliedPackId, appliedScaleId])  // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep the master gain in sync with the volume slider without restarting
   // any in-flight buffer sources.
@@ -4048,6 +4159,81 @@ export default function BeatmapEditor() {
                     />
                   </label>
                 ))}
+              </div>
+            </section>
+          )}
+
+          {chart && (
+            <section className="border-t border-gray-800 pt-4">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Sound pack</h3>
+                {appliedPackId && (
+                  <span className="text-[10px] text-cyan-300 font-mono" title="A sample pack is rendered into this beatmap's tutorial_samples/.">
+                    ● applied
+                  </span>
+                )}
+              </div>
+              <p className="text-[10px] text-gray-600 mb-2 leading-snug">
+                Picks the soundfont + 10-pitch scale for this beatmap's real-notes. Stored per-beatmap, so guitar / bass / drums charts on the same track can sound different.
+              </p>
+              <div className="space-y-2">
+                <div>
+                  <label className="block text-[10px] text-gray-500 mb-1 uppercase tracking-wider">Pack</label>
+                  <select
+                    value={pickedPackId}
+                    onChange={(e) => setPickedPackId(e.target.value)}
+                    disabled={packBusy || packCatalog.length === 0}
+                    className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-200 focus:outline-none focus:border-cyan-500 disabled:opacity-50"
+                  >
+                    {packCatalog.map((p) => (
+                      <option key={p.pack_id} value={p.pack_id}>{p.name} — {p.family}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[10px] text-gray-500 mb-1 uppercase tracking-wider">Chord progression (scale)</label>
+                  <select
+                    value={pickedScaleId}
+                    onChange={(e) => setPickedScaleId(e.target.value)}
+                    disabled={packBusy || scaleCatalog.length === 0}
+                    className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-200 focus:outline-none focus:border-cyan-500 disabled:opacity-50"
+                  >
+                    {scaleCatalog.map((s) => (
+                      <option key={s.scale_id} value={s.scale_id}>{s.name}</option>
+                    ))}
+                  </select>
+                </div>
+                {packError && <p className="text-[11px] text-red-400 break-words">{packError}</p>}
+                <div className="flex gap-1">
+                  <button
+                    onClick={playPackPreview}
+                    disabled={!pickedPackId || !pickedScaleId}
+                    className="shrink-0 px-2 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-gray-200 rounded text-[11px] font-medium"
+                    title="Audition the scale root (lane_1) without applying"
+                  >
+                    {packPreviewing ? '❚❚' : '▶'}
+                  </button>
+                  <button
+                    onClick={applySoundPack}
+                    disabled={packBusy || !pickedPackId || !pickedScaleId}
+                    className="flex-1 px-2 py-1 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 text-white rounded text-[11px] font-medium"
+                  >
+                    {packBusy ? 'Rendering…'
+                      : appliedPackId === pickedPackId && appliedScaleId === pickedScaleId
+                        ? 'Re-apply'
+                        : appliedPackId ? 'Switch pack' : 'Apply'}
+                  </button>
+                  {appliedPackId && (
+                    <button
+                      onClick={clearSoundPack}
+                      disabled={packBusy}
+                      className="shrink-0 px-2 py-1 bg-red-900/30 hover:bg-red-800/60 disabled:opacity-30 border border-red-800/40 hover:border-red-700 text-red-300 hover:text-red-200 rounded text-[11px]"
+                      title="Remove the pack from this beatmap (deletes tutorial_samples/)"
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
               </div>
             </section>
           )}
