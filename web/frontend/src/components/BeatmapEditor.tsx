@@ -1222,20 +1222,32 @@ export default function BeatmapEditor() {
   const [clickEnabled, setClickEnabled] = useState(false)
   const [clickVolume, setClickVolume] = useState(0.4)
   const clickCtxRef = useRef<AudioContext | null>(null)
-  // Per-beatmap sound pack. Distinct from the track-level concept: a track
-  // with three beatmaps (guitar / bass / drums) can pick a different pack
-  // for each. Backend stores the choice on the beatmap record and renders
-  // the 10 OGGs into <beatmap_dir>/tutorial_samples/.
+  // Per-beatmap sound packs — unlimited list with stable slot indices.
+  // A real-note's chart marker (`tick = N 8 <slot>`) points at one entry,
+  // so removing a pack tombstones (null) its slot rather than renumbering.
+  // Different lanes/notes can play different packs by carrying different
+  // slot indices.
   const [packCatalog, setPackCatalog] = useState<Array<{
     pack_id: string; name: string; family: string; description: string
   }>>([])
   const [scaleCatalog, setScaleCatalog] = useState<Array<{
     scale_id: string; name: string; description: string
   }>>([])
+  interface AppliedPack {
+    slot: number
+    pack_id: string
+    scale_id: string
+    slots_present: string[]
+  }
+  const [appliedPacks, setAppliedPacks] = useState<Array<AppliedPack | null>>([])
   const [pickedPackId, setPickedPackId] = useState('')
   const [pickedScaleId, setPickedScaleId] = useState('')
-  const [appliedPackId, setAppliedPackId] = useState<string | null>(null)
-  const [appliedScaleId, setAppliedScaleId] = useState<string | null>(null)
+  // When the user opens "Edit" on an existing pack chip, this captures
+  // which slot they're editing. null = the form is in "add a new pack" mode.
+  const [editingSlot, setEditingSlot] = useState<number | null>(null)
+  // Slot the Real-note tool tags newly-dropped notes with. Defaults to the
+  // first applied pack; falls back to 0 when nothing has been applied yet.
+  const [activeRealSlot, setActiveRealSlot] = useState(0)
   const [packBusy, setPackBusy] = useState(false)
   const [packError, setPackError] = useState('')
   const [packPreviewing, setPackPreviewing] = useState(false)
@@ -1250,10 +1262,14 @@ export default function BeatmapEditor() {
   const [realNotesReady, setRealNotesReady] = useState(false)
   const realNotesCtxRef = useRef<AudioContext | null>(null)
   const realNotesGainRef = useRef<GainNode | null>(null)
-  const realNotesBuffersRef = useRef<Map<string, AudioBuffer> | null>(null)
-  // Pre-computed list of (seconds, slot) for every real-note in the chart,
-  // sorted by seconds. Rebuilt when the chart or tempo map changes.
-  const realNotesEntriesRef = useRef<Array<{ sec: number; slot: string }>>([])
+  // Nested: pack-slot index → sample-name → AudioBuffer. Each applied pack
+  // (slot 0, slot 1, …) gets its own inner map so a single beatmap can use
+  // multiple packs simultaneously.
+  const realNotesBuffersRef = useRef<Map<number, Map<string, AudioBuffer>> | null>(null)
+  // Pre-computed list of (seconds, pack-slot, sample-name) for every real-
+  // note in the chart, sorted by seconds. Rebuilt when the chart or tempo
+  // map changes.
+  const realNotesEntriesRef = useRef<Array<{ sec: number; packSlot: number; sampleName: string }>>([])
   // Last currentTime we processed — used to detect playback range so we don't
   // re-fire samples on every animation frame.
   const realNotesLastTimeRef = useRef<number>(0)
@@ -1641,14 +1657,28 @@ export default function BeatmapEditor() {
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (!data) return
-        setAppliedPackId(data.pack_id || null)
-        setAppliedScaleId(data.scale_id || null)
-        if (data.pack_id) setPickedPackId(data.pack_id)
-        if (data.scale_id) setPickedScaleId(data.scale_id)
+        const packs = (data.packs || []) as Array<AppliedPack | null>
+        setAppliedPacks(packs)
+        // Default the picker to the first applied pack so re-clicking
+        // "Add pack" doesn't reset the form to the catalog's first entry.
+        const first = packs.find((p): p is AppliedPack => !!p)
+        if (first && !editingSlot) {
+          setPickedPackId((cur) => cur || first.pack_id)
+          setPickedScaleId((cur) => cur || first.scale_id)
+        }
       })
       .catch(() => undefined)
-  }, [trackId, beatmapId])
+  }, [trackId, beatmapId])  // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { refetchBeatmapPack() }, [refetchBeatmapPack])
+
+  // Keep the Real-tool active slot pointing at the first non-empty slot if
+  // the current target was tombstoned out from under us.
+  useEffect(() => {
+    const cur = appliedPacks[activeRealSlot]
+    if (cur) return
+    const idx = appliedPacks.findIndex((p) => !!p)
+    if (idx >= 0) setActiveRealSlot(idx)
+  }, [appliedPacks, activeRealSlot])
 
   const applySoundPack = async () => {
     if (!pickedPackId || !pickedScaleId) return
@@ -1658,16 +1688,17 @@ export default function BeatmapEditor() {
       const fd = new FormData()
       fd.append('pack_id', pickedPackId)
       fd.append('scale_id', pickedScaleId)
+      if (editingSlot !== null) fd.append('slot', String(editingSlot))
       const res = await fetch(
-        `/api/tracks/${trackId}/beatmaps/${beatmapId}/apply-sample-pack`,
+        `/api/tracks/${trackId}/beatmaps/${beatmapId}/sample-pack`,
         { method: 'POST', body: fd },
       )
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
         throw new Error(err.detail || `Apply failed (${res.status})`)
       }
-      setAppliedPackId(pickedPackId)
-      setAppliedScaleId(pickedScaleId)
+      setEditingSlot(null)
+      await refetchBeatmapPack()
     } catch (e) {
       setPackError((e as Error).message)
     } finally {
@@ -1675,20 +1706,40 @@ export default function BeatmapEditor() {
     }
   }
 
-  const clearSoundPack = async () => {
-    if (!appliedPackId) return
-    if (!window.confirm('Remove the sound pack from this beatmap? Real-notes will stop playing samples.')) return
+  const deletePackSlot = async (slot: number) => {
+    const entry = appliedPacks[slot]
+    if (!entry) return
+    if (!window.confirm(
+      `Remove "${entry.pack_id}" (slot ${slot}) from this beatmap? Real-notes assigned to this slot will fall back to slot 0.`,
+    )) return
     setPackBusy(true)
     setPackError('')
     try {
-      await fetch(`/api/tracks/${trackId}/beatmaps/${beatmapId}/sample-pack`, { method: 'DELETE' })
-      setAppliedPackId(null)
-      setAppliedScaleId(null)
+      const res = await fetch(
+        `/api/tracks/${trackId}/beatmaps/${beatmapId}/sample-pack/${slot}`,
+        { method: 'DELETE' },
+      )
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || `Delete failed (${res.status})`)
+      }
+      await refetchBeatmapPack()
     } catch (e) {
       setPackError((e as Error).message)
     } finally {
       setPackBusy(false)
     }
+  }
+
+  const startEditSlot = (slot: number) => {
+    const entry = appliedPacks[slot]
+    if (!entry) return
+    setEditingSlot(slot)
+    setPickedPackId(entry.pack_id)
+    setPickedScaleId(entry.scale_id)
+  }
+  const cancelEditSlot = () => {
+    setEditingSlot(null)
   }
 
   const playPackPreview = () => {
@@ -1724,39 +1775,49 @@ export default function BeatmapEditor() {
   //   - exactly 1 fret lane → 'lane_{N+1}'
   //   - exactly 2 fret lanes → 'chord_{a}{b}' with adjacent-lane fallback
   //   - 3+ fret lanes (forbidden by R1 but defensive) → first lane's sample
-  const _resolveRealNoteSlot = useCallback((tick: number): string | null => {
+  const _resolveRealNoteSlot = useCallback((tick: number): { packSlot: number; sampleName: string } | null => {
     if (!chart) return null
     const fretLanes: number[] = []
     let hasOpen = false
+    // Pack slot comes from the lane-8 modifier's sustain field. Defaults to
+    // 0 when the marker is absent (legacy charts) or sustain is unset.
+    let packSlot = 0
     for (const n of chart.notes) {
       if (n.tick !== tick) continue
       if (n.lane === 7) hasOpen = true
       else if (n.lane <= 4) fretLanes.push(n.lane)
+      else if (n.lane === 8) packSlot = Math.max(0, Math.round(n.sustain))
     }
-    if (hasOpen) return 'open'
-    if (fretLanes.length === 0) return null
-    if (fretLanes.length === 1) return `lane_${fretLanes[0] + 1}`
-    if (fretLanes.length >= 2) {
+    let sampleName: string | null = null
+    if (hasOpen) sampleName = 'open'
+    else if (fretLanes.length === 1) sampleName = `lane_${fretLanes[0] + 1}`
+    else if (fretLanes.length >= 2) {
       const sorted = [...fretLanes].sort((a, b) => a - b)
       // Only canonical adjacent-lane chords have a pre-rendered sample
-      // (chord_12 / chord_23 / chord_34 / chord_45). For wider chords fall
-      // back to the lower lane's solo sample.
-      if (sorted[1] - sorted[0] === 1) {
-        return `chord_${sorted[0] + 1}${sorted[1] + 1}`
-      }
-      return `lane_${sorted[0] + 1}`
+      // (chord_12 / chord_23 / chord_34 / chord_45). Wider chords fall back
+      // to the lower lane's solo sample.
+      sampleName = (sorted[1] - sorted[0] === 1)
+        ? `chord_${sorted[0] + 1}${sorted[1] + 1}`
+        : `lane_${sorted[0] + 1}`
     }
-    return null
+    if (!sampleName) return null
+    return { packSlot, sampleName }
   }, [chart])
 
-  // Fetch + decode all 10 slot samples once this beatmap has a pack applied
-  // (appliedPackId is non-null when the sample-pack endpoint reports one).
-  // No-op when no pack has been applied to this specific beatmap.
+  // Decode every applied pack's slot OGGs into AudioBuffers. Re-runs when
+  // the pack list changes shape (add / replace / delete) — uses a fingerprint
+  // string of (slot, pack_id, scale_id) tuples to avoid spurious refetches.
+  const appliedPacksFingerprint = appliedPacks
+    .map((p, i) => p ? `${i}:${p.pack_id}/${p.scale_id}` : `${i}:_`)
+    .join('|')
   useEffect(() => {
     let cancelled = false
     setRealNotesReady(false)
     realNotesBuffersRef.current = null
-    if (!trackId || !beatmapId || !appliedPackId) return
+    if (!trackId || !beatmapId) return
+    const liveSlots: number[] = []
+    appliedPacks.forEach((p, i) => { if (p) liveSlots.push(i) })
+    if (liveSlots.length === 0) return
     const SLOTS = ['lane_1', 'lane_2', 'lane_3', 'lane_4', 'lane_5',
                    'chord_12', 'chord_23', 'chord_34', 'chord_45', 'open']
     ;(async () => {
@@ -1771,26 +1832,30 @@ export default function BeatmapEditor() {
         realNotesGainRef.current = gain
       }
       const ctx = realNotesCtxRef.current
-      const map = new Map<string, AudioBuffer>()
-      for (const slot of SLOTS) {
-        try {
-          const r = await fetch(`/api/tracks/${trackId}/beatmaps/${beatmapId}/sample/${slot}`)
-          if (!r.ok) continue
-          const ab = await r.arrayBuffer()
-          const decoded = await ctx.decodeAudioData(ab)
-          if (cancelled) return
-          map.set(slot, decoded)
-        } catch {
-          // Per-slot failure isn't fatal — others may still play.
+      const outer = new Map<number, Map<string, AudioBuffer>>()
+      for (const packSlot of liveSlots) {
+        const inner = new Map<string, AudioBuffer>()
+        for (const sampleName of SLOTS) {
+          try {
+            const r = await fetch(`/api/tracks/${trackId}/beatmaps/${beatmapId}/sample/${packSlot}/${sampleName}`)
+            if (!r.ok) continue
+            const ab = await r.arrayBuffer()
+            const decoded = await ctx.decodeAudioData(ab)
+            if (cancelled) return
+            inner.set(sampleName, decoded)
+          } catch {
+            // Per-sample failure isn't fatal — others may still play.
+          }
         }
+        if (inner.size > 0) outer.set(packSlot, inner)
       }
       if (cancelled) return
-      if (map.size === 0) return  // no decodable samples
-      realNotesBuffersRef.current = map
+      if (outer.size === 0) return
+      realNotesBuffersRef.current = outer
       setRealNotesReady(true)
     })()
     return () => { cancelled = true }
-  }, [trackId, beatmapId, appliedPackId, appliedScaleId])  // eslint-disable-line react-hooks/exhaustive-deps
+  }, [trackId, beatmapId, appliedPacksFingerprint])  // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep the master gain in sync with the volume slider without restarting
   // any in-flight buffer sources.
@@ -1800,9 +1865,9 @@ export default function BeatmapEditor() {
     }
   }, [realNotesVolume])
 
-  // Rebuild the (sec, slot) entry list whenever the chart or tempo map
-  // changes. Pre-sorted by sec so the fire-on-cross effect can scan a
-  // bounded window in O(crossings).
+  // Rebuild the (sec, packSlot, sampleName) entry list whenever the chart
+  // or tempo map changes. Pre-sorted by sec so the fire-on-cross effect can
+  // scan a bounded window in O(crossings).
   useEffect(() => {
     if (!chart) {
       realNotesEntriesRef.current = []
@@ -1810,13 +1875,14 @@ export default function BeatmapEditor() {
     }
     const realTicks = new Set<number>()
     for (const n of chart.notes) if (n.lane === 8) realTicks.add(n.tick)
-    const entries: Array<{ sec: number; slot: string }> = []
+    const entries: Array<{ sec: number; packSlot: number; sampleName: string }> = []
     for (const tick of realTicks) {
-      const slot = _resolveRealNoteSlot(tick)
-      if (!slot) continue
+      const resolved = _resolveRealNoteSlot(tick)
+      if (!resolved) continue
       entries.push({
         sec: tickToSec(tempoSegments, chart.resolution, tick),
-        slot,
+        packSlot: resolved.packSlot,
+        sampleName: resolved.sampleName,
       })
     }
     entries.sort((a, b) => a.sec - b.sec)
@@ -1849,7 +1915,12 @@ export default function BeatmapEditor() {
     for (const e of entries) {
       if (e.sec <= prev) continue
       if (e.sec > currentTime) break
-      const buf = buffers.get(e.slot)
+      // Try the requested pack-slot first; if that slot has no decoded
+      // buffer (tombstoned, missing file, decode failure) fall back to
+      // pack-slot 0 so the note still audibly fires.
+      let inner = buffers.get(e.packSlot)
+      if (!inner || !inner.has(e.sampleName)) inner = buffers.get(0)
+      const buf = inner?.get(e.sampleName)
       if (!buf) continue
       const src = ctx.createBufferSource()
       src.buffer = buf
@@ -2532,10 +2603,11 @@ export default function BeatmapEditor() {
       const newNote: ChartNote = { tick: newTick, lane, sustain: 0 }
       const placed = [...chart.notes, newNote]
       // Real-note tool: also write a lane-8 modifier at the same tick if
-      // there isn't one already (so re-clicking the same tick doesn't
-      // duplicate the marker).
+      // there isn't one already (re-clicking the same tick shouldn't
+      // duplicate the marker). The sustain field encodes which pack slot
+      // this real-note plays — driven by the sidebar's active slot.
       if (tool === 'real' && !placed.some((n) => n.tick === newTick && n.lane === 8)) {
-        placed.push({ tick: newTick, lane: 8, sustain: 0 })
+        placed.push({ tick: newTick, lane: 8, sustain: Math.max(0, activeRealSlot) })
       }
       const next = placed.sort((a, b) => a.tick - b.tick || a.lane - b.lane)
       const newIdx = next.findIndex((n) => n === newNote)
@@ -3921,6 +3993,73 @@ export default function BeatmapEditor() {
                 </div>
               )
             })()}
+            {chart && selectedIds.size >= 1 && (() => {
+              // Per-note pack dropdown. Visible when at least one selected
+              // note carries a lane-8 modifier (real-note). The dropdown
+              // changes the modifier's sustain field — that's where the
+              // pack-slot index lives in the chart format.
+              const ids = Array.from(selectedIds)
+              const selectedTicks = new Set<number>()
+              for (const idx of ids) {
+                const n = chart.notes[idx]
+                if (!n) continue
+                if (n.lane <= 4 || n.lane === 7 || n.lane === 8) selectedTicks.add(n.tick)
+              }
+              const realTicks: number[] = []
+              for (const t of selectedTicks) {
+                if (chart.notes.some((n) => n.tick === t && n.lane === 8)) realTicks.push(t)
+              }
+              if (realTicks.length === 0) return null
+              // Representative slot = the first selected real-note's slot.
+              const firstSlot = (() => {
+                const t = realTicks[0]
+                const mod = chart.notes.find((n) => n.tick === t && n.lane === 8)
+                return mod ? Math.max(0, Math.round(mod.sustain)) : 0
+              })()
+              const setPackSlot = (slot: number) => {
+                const next = chart.notes.slice()
+                let changed = false
+                for (let i = 0; i < next.length; i++) {
+                  const n = next[i]
+                  if (n.lane === 8 && realTicks.includes(n.tick) && n.sustain !== slot) {
+                    next[i] = { ...n, sustain: slot }
+                    changed = true
+                  }
+                }
+                if (changed) commitNotes(next)
+              }
+              return (
+                <div className="mt-2 pt-2 border-t border-gray-800">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[11px] text-cyan-300 font-medium">
+                      Real-note pack {realTicks.length > 1 ? `(${realTicks.length})` : ''}
+                    </span>
+                    <span className="text-[10px] text-gray-600 font-mono">slot {firstSlot}</span>
+                  </div>
+                  <select
+                    value={firstSlot}
+                    onChange={(e) => setPackSlot(Number(e.target.value))}
+                    className="w-full bg-gray-800 border border-gray-700 rounded px-1.5 py-1 text-[11px] text-gray-200 focus:outline-none focus:border-cyan-500"
+                  >
+                    {appliedPacks.map((p, i) => {
+                      if (!p) return null
+                      const packName = packCatalog.find((c) => c.pack_id === p.pack_id)?.name || p.pack_id
+                      return (
+                        <option key={i} value={i}>slot {i} — {packName}</option>
+                      )
+                    })}
+                    {/* Always allow slot 0 as a fallback even when no pack is
+                        applied yet — keeps existing legacy notes valid. */}
+                    {appliedPacks.every((p) => !p) && (
+                      <option value={0}>slot 0 — (no pack applied)</option>
+                    )}
+                  </select>
+                  <p className="text-[10px] text-gray-600 mt-1 leading-snug">
+                    Stored as the sustain field of the lane-8 marker. Slot 0 is the default; notes pointing at a deleted slot fall back to slot 0 on playback.
+                  </p>
+                </div>
+              )
+            })()}
           </section>
 
           <section>
@@ -4163,80 +4302,149 @@ export default function BeatmapEditor() {
             </section>
           )}
 
-          {chart && (
-            <section className="border-t border-gray-800 pt-4">
-              <div className="flex items-center justify-between mb-2">
-                <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Sound pack</h3>
-                {appliedPackId && (
-                  <span className="text-[10px] text-cyan-300 font-mono" title="A sample pack is rendered into this beatmap's tutorial_samples/.">
-                    ● applied
-                  </span>
-                )}
-              </div>
-              <p className="text-[10px] text-gray-600 mb-2 leading-snug">
-                Picks the soundfont + 10-pitch scale for this beatmap's real-notes. Stored per-beatmap, so guitar / bass / drums charts on the same track can sound different.
-              </p>
-              <div className="space-y-2">
-                <div>
-                  <label className="block text-[10px] text-gray-500 mb-1 uppercase tracking-wider">Pack</label>
-                  <select
-                    value={pickedPackId}
-                    onChange={(e) => setPickedPackId(e.target.value)}
-                    disabled={packBusy || packCatalog.length === 0}
-                    className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-200 focus:outline-none focus:border-cyan-500 disabled:opacity-50"
-                  >
-                    {packCatalog.map((p) => (
-                      <option key={p.pack_id} value={p.pack_id}>{p.name} — {p.family}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-[10px] text-gray-500 mb-1 uppercase tracking-wider">Chord progression (scale)</label>
-                  <select
-                    value={pickedScaleId}
-                    onChange={(e) => setPickedScaleId(e.target.value)}
-                    disabled={packBusy || scaleCatalog.length === 0}
-                    className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-200 focus:outline-none focus:border-cyan-500 disabled:opacity-50"
-                  >
-                    {scaleCatalog.map((s) => (
-                      <option key={s.scale_id} value={s.scale_id}>{s.name}</option>
-                    ))}
-                  </select>
-                </div>
-                {packError && <p className="text-[11px] text-red-400 break-words">{packError}</p>}
-                <div className="flex gap-1">
-                  <button
-                    onClick={playPackPreview}
-                    disabled={!pickedPackId || !pickedScaleId}
-                    className="shrink-0 px-2 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-gray-200 rounded text-[11px] font-medium"
-                    title="Audition the scale root (lane_1) without applying"
-                  >
-                    {packPreviewing ? '❚❚' : '▶'}
-                  </button>
-                  <button
-                    onClick={applySoundPack}
-                    disabled={packBusy || !pickedPackId || !pickedScaleId}
-                    className="flex-1 px-2 py-1 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 text-white rounded text-[11px] font-medium"
-                  >
-                    {packBusy ? 'Rendering…'
-                      : appliedPackId === pickedPackId && appliedScaleId === pickedScaleId
-                        ? 'Re-apply'
-                        : appliedPackId ? 'Switch pack' : 'Apply'}
-                  </button>
-                  {appliedPackId && (
-                    <button
-                      onClick={clearSoundPack}
-                      disabled={packBusy}
-                      className="shrink-0 px-2 py-1 bg-red-900/30 hover:bg-red-800/60 disabled:opacity-30 border border-red-800/40 hover:border-red-700 text-red-300 hover:text-red-200 rounded text-[11px]"
-                      title="Remove the pack from this beatmap (deletes tutorial_samples/)"
-                    >
-                      ×
-                    </button>
+          {chart && (() => {
+            // Active applied packs (skip tombstones in the list).
+            const livePacks = appliedPacks
+              .map((p, i) => ({ p, i }))
+              .filter((x): x is { p: AppliedPack; i: number } => !!x.p)
+            const isEditing = editingSlot !== null
+            const isPickerOpenForNew = !isEditing && livePacks.length === 0
+            return (
+              <section className="border-t border-gray-800 pt-4">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Sound packs</h3>
+                  {livePacks.length > 0 && (
+                    <span className="text-[10px] text-cyan-300 font-mono">
+                      {livePacks.length} pack{livePacks.length === 1 ? '' : 's'}
+                    </span>
                   )}
                 </div>
-              </div>
-            </section>
-          )}
+                <p className="text-[10px] text-gray-600 mb-2 leading-snug">
+                  Add as many packs as you want; each Real-note can point at any one of them. Per-note pack assignment lives below in the selected-note editor.
+                </p>
+
+                {/* Applied pack list */}
+                {livePacks.length > 0 && (
+                  <ul className="space-y-1 mb-2">
+                    {livePacks.map(({ p, i }) => {
+                      const packName = packCatalog.find((c) => c.pack_id === p.pack_id)?.name || p.pack_id
+                      const scaleName = scaleCatalog.find((c) => c.scale_id === p.scale_id)?.name || p.scale_id
+                      const isActive = i === activeRealSlot
+                      return (
+                        <li
+                          key={i}
+                          className={`flex items-center gap-1 px-2 py-1 rounded border ${
+                            isActive ? 'border-cyan-600 bg-cyan-900/15' : 'border-gray-800 bg-gray-900/40'
+                          }`}
+                        >
+                          <button
+                            onClick={() => setActiveRealSlot(i)}
+                            className={`shrink-0 w-5 h-5 rounded text-[10px] font-mono ${
+                              isActive ? 'bg-cyan-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+                            }`}
+                            title={`Slot ${i} — Real-note tool drops will tag notes with this slot when active`}
+                          >
+                            {i}
+                          </button>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-[11px] text-gray-200 truncate" title={packName}>{packName}</div>
+                            <div className="text-[10px] text-gray-500 truncate" title={scaleName}>{scaleName}</div>
+                          </div>
+                          <button
+                            onClick={() => startEditSlot(i)}
+                            disabled={packBusy}
+                            className="text-[10px] px-1.5 py-0.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-30 text-gray-300 rounded"
+                            title="Replace this slot's pack/scale"
+                          >
+                            edit
+                          </button>
+                          <button
+                            onClick={() => deletePackSlot(i)}
+                            disabled={packBusy}
+                            className="text-[10px] px-1.5 py-0.5 bg-red-900/30 hover:bg-red-800/60 disabled:opacity-30 border border-red-800/40 text-red-300 rounded"
+                            title="Remove this slot. Notes referencing it fall back to slot 0."
+                          >
+                            ×
+                          </button>
+                        </li>
+                      )
+                    })}
+                  </ul>
+                )}
+
+                {/* Add / Edit form */}
+                {(isEditing || isPickerOpenForNew) ? (
+                  <div className="space-y-2 p-2 bg-gray-900/50 rounded border border-gray-800">
+                    <div className="text-[10px] text-cyan-300 uppercase tracking-wider">
+                      {isEditing ? `Editing slot ${editingSlot}` : 'Add a sound pack'}
+                    </div>
+                    <div>
+                      <label className="block text-[10px] text-gray-500 mb-1 uppercase tracking-wider">Pack</label>
+                      <select
+                        value={pickedPackId}
+                        onChange={(e) => setPickedPackId(e.target.value)}
+                        disabled={packBusy || packCatalog.length === 0}
+                        className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-200 focus:outline-none focus:border-cyan-500 disabled:opacity-50"
+                      >
+                        {packCatalog.map((p) => (
+                          <option key={p.pack_id} value={p.pack_id}>{p.name} — {p.family}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] text-gray-500 mb-1 uppercase tracking-wider">Chord progression (scale)</label>
+                      <select
+                        value={pickedScaleId}
+                        onChange={(e) => setPickedScaleId(e.target.value)}
+                        disabled={packBusy || scaleCatalog.length === 0}
+                        className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-200 focus:outline-none focus:border-cyan-500 disabled:opacity-50"
+                      >
+                        {scaleCatalog.map((s) => (
+                          <option key={s.scale_id} value={s.scale_id}>{s.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    {packError && <p className="text-[11px] text-red-400 break-words">{packError}</p>}
+                    <div className="flex gap-1">
+                      <button
+                        onClick={playPackPreview}
+                        disabled={!pickedPackId || !pickedScaleId}
+                        className="shrink-0 px-2 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-gray-200 rounded text-[11px]"
+                        title="Audition the scale root (lane_1)"
+                      >
+                        {packPreviewing ? '❚❚' : '▶'}
+                      </button>
+                      <button
+                        onClick={applySoundPack}
+                        disabled={packBusy || !pickedPackId || !pickedScaleId}
+                        className="flex-1 px-2 py-1 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 text-white rounded text-[11px] font-medium"
+                      >
+                        {packBusy ? 'Rendering…' : (isEditing ? 'Replace pack' : 'Add pack')}
+                      </button>
+                      {isEditing && (
+                        <button
+                          onClick={cancelEditSlot}
+                          disabled={packBusy}
+                          className="shrink-0 px-2 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-gray-300 rounded text-[11px]"
+                        >
+                          cancel
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => { setEditingSlot(null); setPackError('') }}
+                    disabled={packBusy}
+                    className="w-full px-2 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-gray-300 rounded text-[11px] font-medium"
+                    title="Add another sound pack to this beatmap"
+                  >
+                    + Add sound pack
+                  </button>
+                )}
+              </section>
+            )
+          })()}
 
           {chart && (
             <section className="border-t border-gray-800 pt-4">
