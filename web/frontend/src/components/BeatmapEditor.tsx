@@ -664,6 +664,7 @@ interface BeatmapMeta {
   name: string
   stem: string
   hasAlbumArt: boolean
+  hasSamplePack: boolean
 }
 
 // ── TutorialTimeline ────────────────────────────────────────────────────────
@@ -1418,7 +1419,12 @@ export default function BeatmapEditor() {
         // entry written when the track is published. If it's absent we skip
         // rendering the <img> entirely instead of triggering a 404 + onError.
         const hasAlbumArt = !!(track.stems && track.stems.album_png)
-        if (bm) setMeta({ name: bm.song_name, stem: bm.stem, hasAlbumArt })
+        // A sound pack writes sample_<slot> entries into track.stems when
+        // applied. Presence of sample_lane_1 is a sufficient proxy for "real-
+        // notes preview is wired" — skips a HEAD probe that the route doesn't
+        // allow.
+        const hasSamplePack = !!(track.stems && track.stems.sample_lane_1)
+        if (bm) setMeta({ name: bm.song_name, stem: bm.stem, hasAlbumArt, hasSamplePack })
       })
       .catch(() => undefined)
   }, [trackId, beatmapId])
@@ -1631,24 +1637,18 @@ export default function BeatmapEditor() {
     return null
   }, [chart])
 
-  // Fetch + decode all 10 slot samples on track-id change. If any slot 404s,
-  // we treat the track as "no sound pack" and leave realNotesReady false —
-  // the playback effect bails out silently.
+  // Fetch + decode all 10 slot samples once the track meta confirms a sound
+  // pack has been applied (meta.hasSamplePack reads track.stems.sample_lane_1
+  // from /api/tracks/<id>, so no probe HEAD/GET is needed). If a track has
+  // no pack, this effect is a no-op and realNotesReady stays false.
   useEffect(() => {
     let cancelled = false
     setRealNotesReady(false)
     realNotesBuffersRef.current = null
-    if (!trackId) return
+    if (!trackId || !meta?.hasSamplePack) return
     const SLOTS = ['lane_1', 'lane_2', 'lane_3', 'lane_4', 'lane_5',
                    'chord_12', 'chord_23', 'chord_34', 'chord_45', 'open']
     ;(async () => {
-      // Probe one slot first so the common "no pack applied" case doesn't
-      // generate ten 404s in the console.
-      const probe = await fetch(`/api/tracks/${trackId}/stems/sample_lane_1`, { method: 'HEAD' })
-        .catch(() => null)
-      if (cancelled) return
-      if (!probe || !probe.ok) return  // no pack applied — silent
-      // Lazy-init the AudioContext + master gain.
       if (!realNotesCtxRef.current) {
         const AC = window.AudioContext
           || (window as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
@@ -1679,7 +1679,7 @@ export default function BeatmapEditor() {
       setRealNotesReady(true)
     })()
     return () => { cancelled = true }
-  }, [trackId])  // eslint-disable-line react-hooks/exhaustive-deps
+  }, [trackId, meta?.hasSamplePack])  // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep the master gain in sync with the volume slider without restarting
   // any in-flight buffer sources.
