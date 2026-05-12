@@ -8,7 +8,7 @@ the game client knows to play samples on hit even outside tutorial mode.
 from __future__ import annotations
 
 from fastapi import APIRouter, Form, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from ..services import sample_packs
 from ..services.tracks import get_track
@@ -22,6 +22,28 @@ async def list_packs() -> JSONResponse:
         'packs': sample_packs.pack_catalog(),
         'scales': sample_packs.scale_catalog(),
     })
+
+
+@router.get('/sample-packs/{pack_id}/{scale_id}/preview')
+async def preview_pack(pack_id: str, scale_id: str):
+    """Stream a single pre-rendered slot so the picker UI can audition a
+    pack before the user commits to applying it. Currently returns lane_1
+    (the scale root) — short, representative of the pack's timbre.
+
+    Only pre-rendered packs have previews — on-demand SF2/synth rendering
+    isn't worth the latency just to play a button.
+    """
+    if pack_id not in sample_packs.PACKS:
+        raise HTTPException(404, f'Unknown pack: {pack_id}')
+    if scale_id not in sample_packs.SCALES:
+        raise HTTPException(404, f'Unknown scale: {scale_id}')
+    pre = sample_packs.prerendered_path(pack_id, scale_id)
+    if pre is None:
+        raise HTTPException(404, 'No pre-rendered preview for this combo')
+    preview = pre / 'lane_1.ogg'
+    if not preview.exists():
+        raise HTTPException(404, 'Preview missing')
+    return FileResponse(str(preview), media_type='audio/ogg', filename=f'{pack_id}-{scale_id}-preview.ogg')
 
 
 @router.post('/tracks/{track_id}/apply-sample-pack')

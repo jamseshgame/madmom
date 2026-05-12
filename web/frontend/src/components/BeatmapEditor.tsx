@@ -9,7 +9,7 @@ import { useParams } from 'react-router-dom'
 
 interface ChartNote {
   tick: number
-  lane: number       // 0-4 colored frets, 5 force-hopo, 6 tap, 7 open
+  lane: number       // 0-4 colored frets, 5 force-hopo, 6 tap, 7 open, 8 real-note (plays sample on hit)
   sustain: number    // sustain length in ticks (0 = single hit)
 }
 
@@ -1970,14 +1970,15 @@ export default function BeatmapEditor() {
     // companion (lane 5 / 6) without an O(n²) inner loop. Open notes (lane 7)
     // are stored separately because they render as a runway-wide bar, not a
     // single gem.
-    const modByTick = new Map<number, { hopo: boolean; tap: boolean }>()
+    const modByTick = new Map<number, { hopo: boolean; tap: boolean; real: boolean }>()
     const openIdsByTick = new Map<number, number[]>()
     for (let i = 0; i < chart.notes.length; i++) {
       const n = chart.notes[i]
-      if (n.lane === 5 || n.lane === 6) {
-        const cur = modByTick.get(n.tick) || { hopo: false, tap: false }
+      if (n.lane === 5 || n.lane === 6 || n.lane === 8) {
+        const cur = modByTick.get(n.tick) || { hopo: false, tap: false, real: false }
         if (n.lane === 5) cur.hopo = true
-        else cur.tap = true
+        else if (n.lane === 6) cur.tap = true
+        else cur.real = true
         modByTick.set(n.tick, cur)
       } else if (n.lane === 7) {
         const arr = openIdsByTick.get(n.tick) || []
@@ -2007,6 +2008,12 @@ export default function BeatmapEditor() {
       ctx.lineWidth = isSelected ? 3 : 1.5
       ctx.strokeStyle = isSelected ? '#ffffff' : '#3b0764'
       ctx.strokeRect(0.5, y - barH / 2 + 0.5, GEM_W - 1, barH - 1)
+      // Real-note indicator on opens: a cyan stripe near the right edge.
+      const openMods = modByTick.get(tick)
+      if (openMods?.real) {
+        ctx.fillStyle = '#22d3ee'
+        ctx.fillRect(GEM_W - 8, y - barH / 2 + 2, 4, barH - 4)
+      }
       // Label
       ctx.fillStyle = '#ffffff'
       ctx.font = 'bold 10px sans-serif'
@@ -2056,6 +2063,17 @@ export default function BeatmapEditor() {
         ctx.lineWidth = 1
         ctx.stroke()
       }
+      // Real-note indicator: small cyan dot inside the gem signalling the
+      // game will play a pitched sample on hit.
+      if (mods?.real) {
+        ctx.fillStyle = '#22d3ee'
+        ctx.beginPath()
+        ctx.arc(x, y, Math.max(3, NOTE_R * 0.28), 0, Math.PI * 2)
+        ctx.fill()
+        ctx.strokeStyle = '#0e7490'
+        ctx.lineWidth = 1
+        ctx.stroke()
+      }
     }
 
     // Lane labels at bottom — drum-type or colour name + colour swatch underneath
@@ -2086,6 +2104,7 @@ export default function BeatmapEditor() {
         const laneName = sel.lane === 7 ? 'OPEN'
           : sel.lane === 5 ? 'HOPO mod'
           : sel.lane === 6 ? 'Tap mod'
+          : sel.lane === 8 ? 'Real-note mod'
           : laneLabels[sel.lane] ?? '?'
         ctx.fillText(
           `selected: ${laneName} · tick ${sel.tick} · sustain ${sel.sustain}`,
@@ -2476,16 +2495,29 @@ export default function BeatmapEditor() {
         return
       }
 
-      // F / T toggle HOPO / Tap modifier on each unique tick covered by the
-      // selection. A modifier (lane 5 / 6) lives at the same tick as the
-      // affected gem note(s) — toggle = remove if present, add otherwise.
-      if (!isCtrl && (e.key === 'f' || e.key === 'F' || e.key === 't' || e.key === 'T')) {
+      // F / T / R toggle HOPO / Tap / Real-note modifier on each unique tick
+      // covered by the selection. A modifier (lane 5 / 6 / 8) lives at the
+      // same tick as the affected gem note(s) — toggle = remove if present,
+      // add otherwise.
+      //   F → lane 5 (force-HOPO)
+      //   T → lane 6 (tap)
+      //   R → lane 8 (real-note — game plays a pitched sample on hit)
+      if (
+        !isCtrl &&
+        (e.key === 'f' || e.key === 'F' || e.key === 't' || e.key === 'T' || e.key === 'r' || e.key === 'R')
+      ) {
         e.preventDefault()
-        const modLane = (e.key === 'f' || e.key === 'F') ? 5 : 6
+        const modLane = (e.key === 'f' || e.key === 'F') ? 5
+          : (e.key === 't' || e.key === 'T') ? 6
+          : 8
         const ticks = new Set<number>()
         selectedIds.forEach((idx) => {
           const n = chart.notes[idx]
-          if (n && n.lane <= 4) ticks.add(n.tick)  // Only fret notes can be flagged
+          // Fret notes (0-4) and open notes (7) can carry real-note flags;
+          // HOPO/Tap only apply to fret notes.
+          if (!n) return
+          if (modLane === 8 && (n.lane <= 4 || n.lane === 7)) ticks.add(n.tick)
+          else if (modLane !== 8 && n.lane <= 4) ticks.add(n.tick)
         })
         if (ticks.size === 0) return
         const next = chart.notes.slice()
@@ -3470,7 +3502,7 @@ export default function BeatmapEditor() {
             <p className="text-[10px] text-gray-600 mt-1.5 leading-snug">
               Shift-click to multi-select. Ctrl/Cmd + C/X/V copy, cut, paste at playhead. Ctrl+A selects all.
               <br />
-              F = toggle force-HOPO · T = toggle tap · O = toggle open · H = toggle 1-beat sustain · = quantize to grid.
+              F = toggle force-HOPO · T = toggle tap · R = toggle real-note · O = toggle open · H = toggle 1-beat sustain · = quantize to grid.
               <br />
               <span className="text-gray-500">Note tool: click a lane to drop a gem · drag up while clicking to set a hold · shift-click for OPEN.</span>
             </p>

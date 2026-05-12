@@ -27,7 +27,9 @@ Renders ~100ms per note on a typical laptop, ~1s per full pack.
 from __future__ import annotations
 
 import io
+import shutil
 import subprocess
+import tempfile
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +40,30 @@ import numpy as np
 SAMPLE_RATE = 44100
 NOTE_DURATION_S = 2.0  # game client fades to ~150ms for single-hit notes
 
+# Pre-rendered pack store — populated by scripts/render_sample_packs.py once
+# per pack/scale combo. Files committed to the repo, served as-is.
+_PRERENDERED_DIR = Path(__file__).resolve().parents[2] / 'sample_packs_data'
+
+# SF2 (high-quality, GM-aware) fallback. fluidsynth + a GM soundfont must be
+# installed on the host. Standard apt install drops FluidR3_GM.sf2 at this
+# path; the constants below are the lookup the renderer tries in order.
+_SF2_CANDIDATES = (
+    '/usr/share/sounds/sf2/FluidR3_GM.sf2',
+    '/usr/share/sounds/sf2/default-GM.sf2',
+    '/usr/share/soundfonts/FluidR3_GM.sf2',
+)
+
+
+def _resolve_sf2() -> Path | None:
+    for p in _SF2_CANDIDATES:
+        if Path(p).exists():
+            return Path(p)
+    return None
+
+
+def _have_fluidsynth() -> bool:
+    return shutil.which('fluidsynth') is not None and _resolve_sf2() is not None
+
 
 @dataclass(frozen=True)
 class Pack:
@@ -45,10 +71,17 @@ class Pack:
     name: str           # display label
     family: str         # 'guitar' | 'bass' | 'keys'
     description: str    # short blurb shown in the UI
-    # Karplus-Strong params — tuned per timbre. damping in (0.4, 0.5);
-    # closer to 0.5 = brighter / longer sustain. brightness pre-rolls the
-    # initial noise burst toward the highs (electric/distortion).
-    damping: float
+    # General MIDI program number (1-indexed, GM standard). 25 = Acoustic
+    # Guitar (Nylon), 26 = Steel, 28 = Electric Clean, 30 = Overdrive,
+    # 31 = Distortion, 34 = Bass Finger, 35 = Bass Pick, etc. When SF2
+    # rendering is available (fluidsynth + FluidR3_GM.sf2) the renderer
+    # uses this; otherwise it falls back to the Karplus-Strong params.
+    gm_program: int = 25
+    # Karplus-Strong params — used only if SF2 rendering isn't available
+    # (e.g. local Windows dev). damping in (0.4, 0.5); closer to 0.5 =
+    # brighter / longer sustain. brightness pre-rolls the initial noise
+    # burst toward the highs (electric/distortion).
+    damping: float = 0.495
     brightness: float = 0.0
     # tanh-saturation drive: 0 = clean, >2 starts to crunch.
     drive: float = 0.0
@@ -84,55 +117,72 @@ PACKS: dict[str, Pack] = {
         name='Acoustic Guitar (Nylon)',
         family='guitar',
         description='Soft nylon-string acoustic. Warm pluck, gentle decay.',
-        damping=0.495,
-        brightness=0.05,
-        drive=0.0,
-        attack_s=0.008,
-        decay_tau_s=1.8,
+        gm_program=25,
+        damping=0.495, brightness=0.05, drive=0.0,
+        attack_s=0.008, decay_tau_s=1.8,
     ),
     'acoustic-steel': Pack(
         pack_id='acoustic-steel',
         name='Acoustic Guitar (Steel)',
         family='guitar',
         description='Bright steel-string acoustic. Snappy attack.',
-        damping=0.498,
-        brightness=0.25,
-        drive=0.0,
-        attack_s=0.004,
-        decay_tau_s=1.6,
+        gm_program=26,
+        damping=0.498, brightness=0.25, drive=0.0,
+        attack_s=0.004, decay_tau_s=1.6,
     ),
     'electric-clean': Pack(
         pack_id='electric-clean',
         name='Electric Guitar (Clean)',
         family='guitar',
         description='Clean electric — high-string emphasis, tight decay.',
-        damping=0.49,
-        brightness=0.45,
-        drive=0.5,
-        attack_s=0.003,
-        decay_tau_s=1.3,
+        gm_program=28,
+        damping=0.49, brightness=0.45, drive=0.5,
+        attack_s=0.003, decay_tau_s=1.3,
     ),
     'electric-overdrive': Pack(
         pack_id='electric-overdrive',
         name='Electric Guitar (Overdrive)',
         family='guitar',
-        description='Overdriven electric — soft tanh saturation, longer tail.',
-        damping=0.495,
-        brightness=0.35,
-        drive=2.5,
-        attack_s=0.002,
-        decay_tau_s=1.5,
+        description='Overdriven electric — Rock/Punk rhythm.',
+        gm_program=30,
+        damping=0.495, brightness=0.35, drive=2.5,
+        attack_s=0.002, decay_tau_s=1.5,
+    ),
+    'electric-distortion': Pack(
+        pack_id='electric-distortion',
+        name='Electric Guitar (Distortion)',
+        family='guitar',
+        description='Heavy distortion lead/rhythm — Metal/Hard rock.',
+        gm_program=31,
+        damping=0.495, brightness=0.55, drive=4.0,
+        attack_s=0.002, decay_tau_s=1.4,
     ),
     'bass-finger': Pack(
         pack_id='bass-finger',
         name='Bass Guitar (Finger)',
         family='bass',
         description='Finger-picked electric bass. Round low end.',
-        damping=0.499,
-        brightness=0.0,
-        drive=0.0,
-        attack_s=0.01,
-        decay_tau_s=1.9,
+        gm_program=34,
+        damping=0.499, brightness=0.0, drive=0.0,
+        attack_s=0.01, decay_tau_s=1.9,
+    ),
+    'bass-pick': Pack(
+        pack_id='bass-pick',
+        name='Bass Guitar (Pick)',
+        family='bass',
+        description='Pick-attack electric bass. Crisper transients than finger.',
+        gm_program=35,
+        damping=0.498, brightness=0.15, drive=0.0,
+        attack_s=0.005, decay_tau_s=1.7,
+    ),
+    'piano-acoustic': Pack(
+        pack_id='piano-acoustic',
+        name='Acoustic Piano',
+        family='keys',
+        description='Grand piano — fallback synth approximates it crudely.',
+        gm_program=1,
+        damping=0.499, brightness=0.1, drive=0.0,
+        attack_s=0.003, decay_tau_s=2.2,
     ),
 }
 
@@ -284,36 +334,162 @@ def _samples_to_ogg(samples: np.ndarray, out_path: Path) -> None:
         )
 
 
-def render_pack(pack: Pack, scale: Scale, out_dir: Path) -> dict[str, str]:
-    """Render every slot for `pack`+`scale` into `out_dir/<slot>.ogg`.
+def _sf2_render_note(midi_note: int, gm_program: int, out_wav: Path,
+                     note_dur_s: float = 1.6, tail_s: float = 0.4) -> None:
+    """Render a single MIDI note via fluidsynth + FluidR3_GM.
 
-    Returns a mapping of slot → relative filename suitable for writing to
-    song.ini as `sample_<slot> = tutorial_samples/<filename>`.
+    Builds an in-memory MIDI file with program-change + note-on + note-off +
+    trailing silence, invokes fluidsynth in batch mode (`-ni`), and writes a
+    WAV. Caller transcodes to OGG via _wav_to_ogg.
     """
-    if len(SLOT_ORDER) != 10:
-        raise AssertionError('SLOT_ORDER must be exactly 10 entries')
-    out_dir.mkdir(parents=True, exist_ok=True)
-    # Synthesize the 5 base scale notes once; reuse for chord mixes.
-    base = [_karplus_strong(pack, midi) for midi in scale.midi[:5]]
+    import mido
+    sf2 = _resolve_sf2()
+    if sf2 is None:
+        raise RuntimeError('No GM SoundFont found; install fluid-soundfont-gm')
 
+    mf = mido.MidiFile()
+    track = mido.MidiTrack()
+    mf.tracks.append(track)
+    tick_per_s = 2 * mf.ticks_per_beat  # 120 BPM → 2 quarters/s
+    track.append(mido.MetaMessage('set_tempo', tempo=mido.bpm2tempo(120), time=0))
+    track.append(mido.Message('program_change', program=gm_program - 1, time=0))
+    track.append(mido.Message('note_on', note=midi_note, velocity=96, time=0))
+    track.append(mido.Message('note_off', note=midi_note, velocity=0,
+                              time=int(note_dur_s * tick_per_s)))
+    track.append(mido.MetaMessage('end_of_track', time=int(tail_s * tick_per_s)))
+
+    with tempfile.NamedTemporaryFile(suffix='.mid', delete=False) as tf:
+        mid_path = tf.name
+    try:
+        mf.save(mid_path)
+        out_wav.parent.mkdir(parents=True, exist_ok=True)
+        proc = subprocess.run(
+            ['fluidsynth', '-ni', '-r', str(SAMPLE_RATE), '-g', '0.7',
+             '-F', str(out_wav), str(sf2), mid_path],
+            capture_output=True,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f'fluidsynth failed: {proc.stderr.decode("utf-8", errors="replace")[-300:]}'
+            )
+    finally:
+        Path(mid_path).unlink(missing_ok=True)
+
+
+def _wav_to_ogg(wav_path: Path, ogg_path: Path) -> None:
+    proc = subprocess.run(
+        ['ffmpeg', '-y', '-loglevel', 'error', '-i', str(wav_path),
+         '-c:a', 'libvorbis', '-q:a', '4', str(ogg_path)],
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f'ffmpeg failed: {proc.stderr.decode("utf-8", errors="replace")[-300:]}'
+        )
+
+
+def _mix_oggs(a_path: Path, b_path: Path, out_path: Path) -> None:
+    """Mix two OGGs into a chord via ffmpeg amix. Used so SF2-rendered chords
+    sound like real two-note guitar voicings (not synthesized stacks)."""
+    proc = subprocess.run(
+        ['ffmpeg', '-y', '-loglevel', 'error',
+         '-i', str(a_path), '-i', str(b_path),
+         '-filter_complex', 'amix=inputs=2:duration=longest:normalize=0,volume=0.89',
+         '-c:a', 'libvorbis', '-q:a', '4', str(out_path)],
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f'ffmpeg amix failed: {proc.stderr.decode("utf-8", errors="replace")[-300:]}'
+        )
+
+
+def _render_pack_sf2(pack: Pack, scale: Scale, out_dir: Path) -> dict[str, str]:
+    """Render a pack using fluidsynth + GM SoundFont. Higher quality than the
+    Karplus-Strong fallback. Chord slots = stacked pairs of adjacent lanes,
+    mixed via ffmpeg so the result sounds like a played chord."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='sf2pack-') as tmp:
+        tmp_dir = Path(tmp)
+        # 1. Render 6 single notes (5 lanes + 1 open).
+        single_paths: dict[str, Path] = {}
+        for i in range(5):
+            wav = tmp_dir / f'lane_{i+1}.wav'
+            _sf2_render_note(scale.midi[i], pack.gm_program, wav)
+            ogg = out_dir / f'lane_{i+1}.ogg'
+            _wav_to_ogg(wav, ogg)
+            single_paths[f'lane_{i+1}'] = ogg
+        # Open uses scale[5] (one step above the highest lane).
+        wav = tmp_dir / 'open.wav'
+        _sf2_render_note(scale.midi[5], pack.gm_program, wav)
+        ogg = out_dir / 'open.ogg'
+        _wav_to_ogg(wav, ogg)
+        single_paths['open'] = ogg
+        # 2. Build chord slots by mixing already-rendered lane OGGs.
+        for a, b in ((1, 2), (2, 3), (3, 4), (4, 5)):
+            chord_path = out_dir / f'chord_{a}{b}.ogg'
+            _mix_oggs(single_paths[f'lane_{a}'], single_paths[f'lane_{b}'], chord_path)
+    return {slot: f'{slot}.ogg' for slot in SLOT_ORDER}
+
+
+def _render_pack_synth(pack: Pack, scale: Scale, out_dir: Path) -> dict[str, str]:
+    """Pure-Python Karplus-Strong fallback (no fluidsynth dependency)."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    base = [_karplus_strong(pack, midi) for midi in scale.midi[:5]]
     slot_to_audio: dict[str, np.ndarray] = {}
-    # lane_1..lane_5 -> base notes 0..4
     for i in range(5):
         slot_to_audio[SLOT_ORDER[i]] = base[i]
-    # chord_12, chord_23, chord_34, chord_45 -> stacked pairs of adjacent lanes
     slot_to_audio['chord_12'] = _mix_chord(base[0], base[1])
     slot_to_audio['chord_23'] = _mix_chord(base[1], base[2])
     slot_to_audio['chord_34'] = _mix_chord(base[2], base[3])
     slot_to_audio['chord_45'] = _mix_chord(base[3], base[4])
-    # open = scale note index 5 (one step above the highest lane)
     slot_to_audio['open'] = _karplus_strong(pack, scale.midi[5])
-
-    rel_paths: dict[str, str] = {}
     for slot in SLOT_ORDER:
-        filename = f'{slot}.ogg'
-        _samples_to_ogg(slot_to_audio[slot], out_dir / filename)
-        rel_paths[slot] = filename
-    return rel_paths
+        _samples_to_ogg(slot_to_audio[slot], out_dir / f'{slot}.ogg')
+    return {slot: f'{slot}.ogg' for slot in SLOT_ORDER}
+
+
+def prerendered_path(pack_id: str, scale_id: str) -> Path | None:
+    """Return the directory holding the 10 OGGs for this combo if pre-rendered.
+    Pre-rendered packs ship in the repo under
+    `web/backend/sample_packs_data/<pack>/<scale>/`."""
+    d = _PRERENDERED_DIR / pack_id / scale_id
+    if d.is_dir() and all((d / f'{slot}.ogg').exists() for slot in SLOT_ORDER):
+        return d
+    return None
+
+
+def render_pack(pack: Pack, scale: Scale, out_dir: Path) -> dict[str, str]:
+    """Materialize all 10 slot OGGs for `pack`+`scale` into `out_dir`.
+
+    Strategy:
+      1. If a pre-rendered bundle exists for this combo, copy it (fastest,
+         best quality — the SF2-rendered bundles shipped in the repo).
+      2. Else if fluidsynth + a GM SoundFont are available, render fresh via
+         _render_pack_sf2 (acceptable when the user adds a new combo at
+         runtime that wasn't pre-rendered).
+      3. Else fall back to the Karplus-Strong synth (works on every host,
+         lower quality — primarily for local Windows dev).
+
+    Returns a mapping of slot → relative filename for writing into
+    song.ini as `sample_<slot> = tutorial_samples/<filename>`.
+    """
+    if len(SLOT_ORDER) != 10:
+        raise AssertionError('SLOT_ORDER must be exactly 10 entries')
+
+    prerendered = prerendered_path(pack.pack_id, scale.scale_id)
+    if prerendered is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for slot in SLOT_ORDER:
+            src = prerendered / f'{slot}.ogg'
+            dst = out_dir / f'{slot}.ogg'
+            shutil.copyfile(src, dst)
+        return {slot: f'{slot}.ogg' for slot in SLOT_ORDER}
+
+    if _have_fluidsynth():
+        return _render_pack_sf2(pack, scale, out_dir)
+
+    return _render_pack_synth(pack, scale, out_dir)
 
 
 # ── Catalog helpers (for the router) ──────────────────────────────────────

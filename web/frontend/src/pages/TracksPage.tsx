@@ -384,6 +384,34 @@ function SoundPackPanel({ track }: { track: Track }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [status, setStatus] = useState('')
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null)
+  const [previewing, setPreviewing] = useState(false)
+
+  // Cancel any in-flight preview when the user switches pack or scale.
+  useEffect(() => {
+    if (previewAudioRef.current) {
+      previewAudioRef.current.pause()
+      previewAudioRef.current = null
+      setPreviewing(false)
+    }
+  }, [packId, scaleId])
+
+  const playPreview = () => {
+    if (!packId || !scaleId) return
+    if (previewAudioRef.current) {
+      previewAudioRef.current.pause()
+      previewAudioRef.current = null
+      setPreviewing(false)
+      return
+    }
+    const url = `/api/sample-packs/${encodeURIComponent(packId)}/${encodeURIComponent(scaleId)}/preview`
+    const a = new Audio(url)
+    a.onended = () => { setPreviewing(false); previewAudioRef.current = null }
+    a.onerror = () => { setPreviewing(false); previewAudioRef.current = null }
+    previewAudioRef.current = a
+    setPreviewing(true)
+    a.play().catch(() => { setPreviewing(false); previewAudioRef.current = null })
+  }
 
   useEffect(() => {
     if (!expanded) return
@@ -504,13 +532,23 @@ function SoundPackPanel({ track }: { track: Track }) {
       {error && <p className="text-xs text-red-400 break-words">{error}</p>}
       {status && <p className="text-xs text-emerald-400">{status}</p>}
 
-      <button
-        onClick={apply}
-        disabled={busy || !packId || !scaleId}
-        className="w-full px-3 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 text-white rounded text-xs font-medium"
-      >
-        {busy ? 'Rendering…' : hasRealNotes ? 'Re-render with this pack' : 'Apply pack to track'}
-      </button>
+      <div className="flex gap-2">
+        <button
+          onClick={playPreview}
+          disabled={!packId || !scaleId}
+          className="shrink-0 px-3 py-2 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-gray-200 rounded text-xs font-medium"
+          title="Play the scale root (lane_1) to audition the pack"
+        >
+          {previewing ? '❚❚ Stop' : '▶ Preview'}
+        </button>
+        <button
+          onClick={apply}
+          disabled={busy || !packId || !scaleId}
+          className="flex-1 px-3 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 text-white rounded text-xs font-medium"
+        >
+          {busy ? 'Rendering…' : hasRealNotes ? 'Re-render with this pack' : 'Apply pack to track'}
+        </button>
+      </div>
       <p className="text-[10px] text-gray-600">
         Overwrites this track's tutorial_samples/ folder. Manual sample uploads
         in the panel below will be replaced.
