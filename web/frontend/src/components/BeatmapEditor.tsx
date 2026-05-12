@@ -2002,31 +2002,49 @@ export default function BeatmapEditor() {
     const H = canvas.height
     const HIT = H - 110
     const NUM_LANES = 5
+    // Left gutter holds the beat / bar / time ruler labels so they don't
+    // collide with gems in lane 0 (Green).
+    const GUTTER_W = 64
     // Sidecar carries VO1, VO2, EV1, EV2 to the right of the gem lanes. We
-    // give the gem lanes ~64% of the canvas width so a 5-lane chord still
-    // sits comfortably; the four sidecar lanes share the remaining ~36%.
+    // give the gem lanes ~64% of the canvas width minus the gutter so a
+    // 5-lane chord still sits comfortably; the four sidecar lanes share
+    // the remaining ~36%.
     const NUM_SIDECARS = 4
     const SIDECAR_FRAC = 0.36
     const SIDECAR_W_TOTAL = W * SIDECAR_FRAC
     const SIDECAR_W = SIDECAR_W_TOTAL / NUM_SIDECARS
-    const GEM_W = W - SIDECAR_W_TOTAL
+    const GEM_X0 = GUTTER_W
+    const GEM_W = W - SIDECAR_W_TOTAL - GUTTER_W
+    const GEM_X1 = GEM_X0 + GEM_W
     const LANE_W = GEM_W / NUM_LANES
     const NOTE_R = Math.min(LANE_W * 0.32, 60)
-    const SIDECAR_X0 = GEM_W
+    const SIDECAR_X0 = GEM_X1
     const SIDECAR_LABELS = ['VO1', 'VO2', 'EV1', 'EV2']
 
     ctx.fillStyle = '#0a0a0c'
     ctx.fillRect(0, 0, W, H)
 
+    // Gutter background — very slightly different so the ruler reads as
+    // its own strip without competing with the gem area.
+    ctx.fillStyle = '#08090c'
+    ctx.fillRect(0, 0, GUTTER_W, H)
+    // Right divider for the gutter
+    ctx.strokeStyle = '#1f2937'
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    ctx.moveTo(GEM_X0, 0)
+    ctx.lineTo(GEM_X0, H)
+    ctx.stroke()
+
     // Sidecar background (slightly darker so it reads as a separate column)
     ctx.fillStyle = '#06070a'
     ctx.fillRect(SIDECAR_X0, 0, SIDECAR_W_TOTAL, H)
 
-    // Lane separators (gem lanes)
+    // Lane separators (gem lanes — start at the gutter)
     ctx.strokeStyle = '#1f2937'
     ctx.lineWidth = 1
     for (let i = 1; i < NUM_LANES; i++) {
-      const x = i * LANE_W
+      const x = GEM_X0 + i * LANE_W
       ctx.beginPath()
       ctx.moveTo(x, 0)
       ctx.lineTo(x, H)
@@ -2070,7 +2088,8 @@ export default function BeatmapEditor() {
     const endTick = s2t(Math.max(0, topSec))
     const startBeat = Math.floor(startTick / beatStep) * beatStep
 
-    // Snap subdivision lines (faint)
+    // Snap subdivision lines (faint) — span gem area + sidecar; gutter is
+    // reserved for labels.
     if (snapDivisor > 1) {
       ctx.strokeStyle = '#0f172a'
       ctx.lineWidth = 1
@@ -2079,7 +2098,7 @@ export default function BeatmapEditor() {
         const y = HIT - (t2s(t) - currentTime) * scrollSpeed
         if (y < -10 || y > H + 10) continue
         ctx.beginPath()
-        ctx.moveTo(0, y)
+        ctx.moveTo(GEM_X0, y)
         ctx.lineTo(W, y)
         ctx.stroke()
       }
@@ -2099,55 +2118,54 @@ export default function BeatmapEditor() {
     const labelEveryBeat = beatYStride >= 14
     const labelEveryBar = beatYStride * BEATS_PER_BAR >= 18
 
-    ctx.font = '10px monospace'
     ctx.textAlign = 'left'
     for (let t = startBeat; t <= endTick; t += beatStep) {
       const y = HIT - (t2s(t) - currentTime) * scrollSpeed
       if (y < -16 || y > H + 16) continue
       const beatIdx = Math.round(t / beatStep)
       const isBar = beatIdx % BEATS_PER_BAR === 0
-      // Bar lines slightly brighter so the eye can latch onto downbeats.
+      // Beat lines span the playable area only (gem + sidecar).
       ctx.strokeStyle = isBar ? '#374151' : '#1f2937'
       ctx.lineWidth = isBar ? 1.5 : 1
       ctx.beginPath()
-      ctx.moveTo(0, y)
+      ctx.moveTo(GEM_X0, y)
       ctx.lineTo(W, y)
       ctx.stroke()
-      // Labels — drawn on the LEFT edge so they don't intrude on the
-      // playable lanes. y - 2 puts the baseline just above the line.
+      // Ruler labels live in the gutter, well clear of any lane gem.
       if (isBar) {
         const bar = Math.floor(beatIdx / BEATS_PER_BAR) + 1
+        ctx.font = 'bold 10px monospace'
         ctx.fillStyle = '#9ca3af'
-        ctx.fillText(`${bar}.1`, 4, y - 2)
+        ctx.fillText(`${bar}`, 4, y - 2)
         if (labelEveryBar) {
           const sec = t2s(t)
           const m = Math.floor(sec / 60)
           const ss = Math.floor(sec % 60)
           const cs = Math.floor((sec % 1) * 100)
           const timeStr = `${m}:${ss.toString().padStart(2, '0')}.${cs.toString().padStart(2, '0')}`
+          ctx.font = '9px monospace'
           ctx.fillStyle = '#6b7280'
-          ctx.fillText(timeStr, 28, y - 2)
-          // Tick number (useful for cross-referencing with rules/quantize).
-          ctx.fillStyle = '#4b5563'
-          ctx.fillText(`t${t}`, 78, y - 2)
+          ctx.fillText(timeStr, 18, y - 2)
         }
       } else if (labelEveryBeat) {
         const bar = Math.floor(beatIdx / BEATS_PER_BAR) + 1
         const beatInBar = (beatIdx % BEATS_PER_BAR) + 1
+        ctx.font = '9px monospace'
         ctx.fillStyle = '#4b5563'
         ctx.fillText(`${bar}.${beatInBar}`, 4, y - 2)
       }
     }
 
-    // Hit line + lane circles
+    // Hit line + lane circles. Hit line spans gem area + sidecar (skips
+    // the gutter so the ruler stays clean).
     ctx.strokeStyle = '#374151'
     ctx.lineWidth = 2
     ctx.beginPath()
-    ctx.moveTo(0, HIT)
+    ctx.moveTo(GEM_X0, HIT)
     ctx.lineTo(W, HIT)
     ctx.stroke()
     for (let lane = 0; lane < NUM_LANES; lane++) {
-      const x = (lane + 0.5) * LANE_W
+      const x = GEM_X0 + (lane + 0.5) * LANE_W
       ctx.beginPath()
       ctx.arc(x, HIT, NOTE_R, 0, Math.PI * 2)
       ctx.fillStyle = '#1f2937'
@@ -2302,16 +2320,16 @@ export default function BeatmapEditor() {
         ctx.lineWidth = 1
         ctx.setLineDash([4, 3])
         ctx.beginPath()
-        ctx.moveTo(0, y)
-        ctx.lineTo(GEM_W, y)
+        ctx.moveTo(GEM_X0, y)
+        ctx.lineTo(GEM_X1, y)
         ctx.stroke()
         ctx.setLineDash([])
-        // Label background
+        // Label background — sits at the top of the gem area.
         const labelW = ctx.measureText(sec.name).width + 8
         ctx.fillStyle = 'rgba(190, 24, 93, 0.85)'  // pink-700
-        ctx.fillRect(2, y - 14, labelW, 13)
+        ctx.fillRect(GEM_X0 + 2, y - 14, labelW, 13)
         ctx.fillStyle = '#ffffff'
-        ctx.fillText(sec.name, 6, y - 4)
+        ctx.fillText(sec.name, GEM_X0 + 6, y - 4)
       }
     }
 
@@ -2343,7 +2361,7 @@ export default function BeatmapEditor() {
         // Mirrored bar centred at the gem-area midline. Each bucket emits a
         // single 2px-tall horizontal line whose half-width tracks amplitude,
         // tinted cyan with low alpha so gems remain dominant.
-        const centerX = GEM_W / 2
+        const centerX = GEM_X0 + GEM_W / 2
         const halfMax = GEM_W * 0.46  // leaves a little margin so loud peaks don't kiss the sidecar
         ctx.fillStyle = 'rgba(34, 211, 238, 0.28)'
         for (let b = startBucket; b <= endBucket; b++) {
@@ -2358,7 +2376,7 @@ export default function BeatmapEditor() {
         ctx.fillStyle = 'rgba(34, 211, 238, 0.08)'
         ctx.fillRect(centerX - 0.5, 0, 1, H)
       } else {
-        // Default: thin amplitude ribbon down the left edge.
+        // Default: thin amplitude ribbon down the left edge of the gems.
         const COLUMN_W = 14
         ctx.fillStyle = 'rgba(34, 211, 238, 0.55)'
         for (let b = startBucket; b <= endBucket; b++) {
@@ -2367,10 +2385,10 @@ export default function BeatmapEditor() {
           const t = b * bucketSec
           const y = HIT - (t - currentTime) * scrollSpeed
           const w = a * COLUMN_W
-          ctx.fillRect(0, y - 1, w, 2)
+          ctx.fillRect(GEM_X0, y - 1, w, 2)
         }
         ctx.fillStyle = 'rgba(34, 211, 238, 0.12)'
-        ctx.fillRect(0, 0, 1, H)
+        ctx.fillRect(GEM_X0, 0, 1, H)
       }
     }
 
@@ -2409,24 +2427,24 @@ export default function BeatmapEditor() {
         const sustainSec = t2s(note.sustain)
         const tailLen = sustainSec * scrollSpeed
         ctx.fillStyle = '#a855f7' + '55'  // purple/violet for opens
-        ctx.fillRect(0, y - tailLen, GEM_W, tailLen)
+        ctx.fillRect(GEM_X0, y - tailLen, GEM_W, tailLen)
       }
       ctx.fillStyle = '#a855f7'
-      ctx.fillRect(0, y - barH / 2, GEM_W, barH)
+      ctx.fillRect(GEM_X0, y - barH / 2, GEM_W, barH)
       ctx.lineWidth = isSelected ? 3 : 1.5
       ctx.strokeStyle = isSelected ? '#ffffff' : '#3b0764'
-      ctx.strokeRect(0.5, y - barH / 2 + 0.5, GEM_W - 1, barH - 1)
+      ctx.strokeRect(GEM_X0 + 0.5, y - barH / 2 + 0.5, GEM_W - 1, barH - 1)
       // Real-note indicator on opens: a cyan stripe near the right edge.
       const openMods = modByTick.get(tick)
       if (openMods?.real) {
         ctx.fillStyle = '#22d3ee'
-        ctx.fillRect(GEM_W - 8, y - barH / 2 + 2, 4, barH - 4)
+        ctx.fillRect(GEM_X1 - 8, y - barH / 2 + 2, 4, barH - 4)
       }
       // Label
       ctx.fillStyle = '#ffffff'
       ctx.font = 'bold 10px sans-serif'
       ctx.textAlign = 'center'
-      ctx.fillText('OPEN', GEM_W / 2, y + 3)
+      ctx.fillText('OPEN', GEM_X0 + GEM_W / 2, y + 3)
     })
 
     // Single-lane notes
@@ -2437,7 +2455,7 @@ export default function BeatmapEditor() {
       const dy = (noteSec - currentTime) * scrollSpeed
       const y = HIT - dy
       if (y < -200 || y > H + 200) continue
-      const x = (n.lane + 0.5) * LANE_W
+      const x = GEM_X0 + (n.lane + 0.5) * LANE_W
 
       if (n.sustain > 0) {
         const sustainSec = t2s(n.sustain)
@@ -2487,7 +2505,7 @@ export default function BeatmapEditor() {
     // Lane labels at bottom — drum-type or colour name + colour swatch underneath
     ctx.textAlign = 'center'
     for (let lane = 0; lane < NUM_LANES; lane++) {
-      const x = (lane + 0.5) * LANE_W
+      const x = GEM_X0 + (lane + 0.5) * LANE_W
       ctx.fillStyle = LANE_FILL[lane]
       ctx.font = 'bold 13px sans-serif'
       ctx.fillText(laneLabels[lane], x, H - 50)
@@ -2566,11 +2584,15 @@ export default function BeatmapEditor() {
     const canvas = canvasRef.current
     if (!canvas) return null
     const HIT = canvas.height - 110
-    // Same split as draw(): 64% of width for gems, 36% for the sidecar.
-    const GEM_W = canvas.width * 0.64
-    if (cx >= GEM_W) return null  // Click landed in the sidecar
+    // Same geometry as draw(): 64-px label gutter, 64% of W for the gem
+    // area (minus that gutter), 36% of W for the sidecar.
+    const GUTTER_W = 64
+    const GEM_X0 = GUTTER_W
+    const GEM_W = canvas.width - canvas.width * 0.36 - GUTTER_W
+    const GEM_X1 = GEM_X0 + GEM_W
+    if (cx < GEM_X0 || cx >= GEM_X1) return null  // Gutter or sidecar — no hit
     const LANE_W = GEM_W / 5
-    const lane = Math.floor(cx / LANE_W)
+    const lane = Math.floor((cx - GEM_X0) / LANE_W)
     let bestId: number | null = null
     let bestDist = 36
     for (let i = 0; i < chart.notes.length; i++) {
@@ -2644,10 +2666,13 @@ export default function BeatmapEditor() {
     if (tool === 'note' || tool === 'real') {
       const canvas = canvasRef.current!
       const HIT = canvas.height - 110
-      const GEM_W = canvas.width * 0.64
-      if (cx >= GEM_W) return  // sidecar click — ignore
+      const GUTTER_W = 64
+      const GEM_X0 = GUTTER_W
+      const GEM_W = canvas.width - canvas.width * 0.36 - GUTTER_W
+      const GEM_X1 = GEM_X0 + GEM_W
+      if (cx < GEM_X0 || cx >= GEM_X1) return  // gutter or sidecar — ignore
       const LANE_W = GEM_W / 5
-      const lane = e.shiftKey ? 7 : Math.max(0, Math.min(4, Math.floor(cx / LANE_W)))
+      const lane = e.shiftKey ? 7 : Math.max(0, Math.min(4, Math.floor((cx - GEM_X0) / LANE_W)))
       const targetSec = currentTime + (HIT - cy) / scrollSpeed
       const targetTickRaw = secToTick(tempoSegments, chart.resolution, Math.max(0, targetSec))
       const snapTicks = Math.max(1, Math.round(chart.resolution / snapDivisor))
@@ -2749,12 +2774,14 @@ export default function BeatmapEditor() {
     dragRef.current.moved = true
 
     const HIT = canvas.height - 110
-    const GEM_W = canvas.width * 0.64
+    const GUTTER_W = 64
+    const GEM_X0 = GUTTER_W
+    const GEM_W = canvas.width - canvas.width * 0.36 - GUTTER_W
     const LANE_W = GEM_W / 5
     const anchor = dragRef.current.snapshot.get(dragRef.current.anchorId)
     if (!anchor) return
 
-    const newAnchorLane = Math.max(0, Math.min(4, Math.floor(cx / LANE_W)))
+    const newAnchorLane = Math.max(0, Math.min(4, Math.floor((cx - GEM_X0) / LANE_W)))
     const targetSec = currentTime + (HIT - cy) / scrollSpeed
     const targetTickRaw = secToTick(tempoSegments, chart.resolution, Math.max(0, targetSec))
     const snapTicks = Math.max(1, Math.round(chart.resolution / snapDivisor))
