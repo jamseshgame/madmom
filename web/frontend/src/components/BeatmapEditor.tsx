@@ -452,6 +452,76 @@ function parseSectionNotes(text: string, name: string): ChartNote[] {
   return notes
 }
 
+// Slice a source beatmap's notes into a [MusicSeg_<id>] section body.
+// Hard clip (notes whose start tick is in [inTick, outTick) get
+// included), sustains trimmed at outTick, active (pack, scale) state
+// from the source section prepended at tick 0. Variable-tempo within
+// a clip not supported (notes renormalised linearly using the local
+// tempo at startSec).
+function sliceSourceChartForClip(
+  sourceNotes: ChartNote[],
+  sourceTempoSegments: TempoSegment[],
+  sourceResolution: number,
+  startSec: number,
+  endSec: number,
+): { sectionBody: string; notesCount: number; bpm: number } {
+  const inTick = secToTick(sourceTempoSegments, sourceResolution, startSec)
+  const outTick = secToTick(sourceTempoSegments, sourceResolution, endSec)
+  const sorted = [...sourceNotes].sort((a, b) => a.tick - b.tick || a.lane - b.lane)
+
+  let preludePack: string | undefined
+  let preludeScale: string | undefined
+  for (const n of sorted) {
+    if (n.tick > inTick) break
+    if (n.type === 'real') {
+      if (n.pack) preludePack = n.pack
+      if (n.scale) preludeScale = n.scale
+    }
+  }
+
+  const sliced: ChartNote[] = []
+  for (const n of sorted) {
+    if (n.tick < inTick) continue
+    if (n.tick >= outTick) break
+    const newTick = n.tick - inTick
+    const newSustain = n.tick + n.sustain > outTick ? outTick - n.tick : n.sustain
+    sliced.push({ ...n, tick: newTick, sustain: newSustain })
+  }
+
+  const lines: string[] = []
+  if (preludePack) lines.push(`  0 = E realnotes_pack ${preludePack}`)
+  if (preludeScale) lines.push(`  0 = E realnotes_scale ${preludeScale}`)
+  let curPack = preludePack
+  let curScale = preludeScale
+  for (const n of sliced) {
+    if (n.type === 'real') {
+      if (n.pack && n.pack !== curPack) {
+        lines.push(`  ${n.tick} = E realnotes_pack ${n.pack}`)
+        curPack = n.pack
+      }
+      if (n.scale && n.scale !== curScale) {
+        lines.push(`  ${n.tick} = E realnotes_scale ${n.scale}`)
+        curScale = n.scale
+      }
+      lines.push(`  ${n.tick} = R ${n.lane} ${n.sustain}`)
+    } else {
+      lines.push(`  ${n.tick} = N ${n.lane} ${n.sustain}`)
+    }
+  }
+
+  let microBpm = sourceTempoSegments[0]?.microBpm ?? 120000
+  for (const seg of sourceTempoSegments) {
+    if (seg.seconds > startSec) break
+    microBpm = seg.microBpm
+  }
+
+  return {
+    sectionBody: '\n' + lines.join('\n') + '\n',
+    notesCount: sliced.filter((n) => n.lane <= 4 || n.lane === 7).length,
+    bpm: microBpm / 1000,
+  }
+}
+
 function emitNoteSectionLines(notes: ChartNote[]): string[] {
   // Sort by tick then lane, walking the active (pack, scale) state. Emit E
   // events when state changes — they always precede the R note that triggered
@@ -2465,6 +2535,14 @@ function CollapsibleSection({
 
 // Component -----------------------------------------------------------------
 
+interface SourceChartCache {
+  notes: ChartNote[]
+  tempoSegments: TempoSegment[]
+  resolution: number
+  duration: number
+  peaks: Float32Array | null
+}
+
 export default function BeatmapEditor() {
   const params = useParams<{ trackId: string; beatmapId: string }>()
   const trackId = params.trackId!
@@ -2626,6 +2704,42 @@ export default function BeatmapEditor() {
   // keyed on (pack, scale); the per-tick resolution is in _resolveRealNote
   // below.
   const [realNotesEnabled, setRealNotesEnabled] = useState(true)
+
+  // Per-source chart cache: notes + tempo + resolution + duration + peaks.
+  // Populated on import / on first selection of an imported source. Keyed
+  // by ImportedSource.id (the chart-local id, not Studio track/beatmap ids).
+  const sourceCacheRef = useRef<Record<string, SourceChartCache>>({})
+  const [sourceCache, setSourceCache] = useState<Record<string, SourceChartCache>>({})
+  const [activeSourceId, setActiveSourceId] = useState<string | null>(null)
+  sourceCacheRef.current = sourceCache
+
+  const fetchSourceData = useCallback(async (src: ImportedSource): Promise<SourceChartCache | null> => {
+    if (sourceCacheRef.current[src.id]) return sourceCacheRef.current[src.id]
+    try {
+      const [chartRes, peaksRes] = await Promise.all([
+        fetch(`/api/tracks/${src.trackId}/beatmaps/${src.beatmapId}/chart`),
+        fetch(`/api/tracks/${src.trackId}/beatmaps/${src.beatmapId}/song-peaks`),
+      ])
+      if (!chartRes.ok) return null
+      const { chart: chartText } = await chartRes.json() as { chart: string }
+      const parsed = parseChart(chartText)
+      const peaks = peaksRes.ok ? new Float32Array(await peaksRes.arrayBuffer()) : null
+      const tempoSegments = buildTempoSegments(parsed.tempoMarkers, parsed.resolution)
+      const lastTick = parsed.notes.reduce((m, n) => Math.max(m, n.tick + (n.sustain || 0)), 0)
+      const duration = tickToSec(tempoSegments, parsed.resolution, lastTick)
+      const cache: SourceChartCache = {
+        notes: parsed.notes,
+        tempoSegments,
+        resolution: parsed.resolution,
+        duration,
+        peaks,
+      }
+      setSourceCache((prev) => ({ ...prev, [src.id]: cache }))
+      return cache
+    } catch {
+      return null
+    }
+  }, [])
 
   // ── Background panel — video behind the highway ───────────────────────────
   // Three modes:
@@ -6261,6 +6375,9 @@ export default function BeatmapEditor() {
   )
 
   void elVoicesLoaded
+  // Silence noUnusedLocals for forward-declared symbols (consumed by Tasks 4+)
+  void sliceSourceChartForClip
+  void activeSourceId; void setActiveSourceId; void fetchSourceData
 
   return (
     <div className="fixed inset-0 bg-black flex flex-col z-[60]">
