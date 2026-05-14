@@ -263,7 +263,7 @@ async def upgrade_package(package: str):
             return
         except Exception as e:  # noqa: BLE001
             if not job.cancelled:
-                await job.send_error(str(e) or 'pip upgrade failed')
+                await job.send_error(f'{type(e).__name__}: {e}' if str(e) else type(e).__name__)
 
     job.task = asyncio.create_task(_run())
     return {'job_id': job.id}
