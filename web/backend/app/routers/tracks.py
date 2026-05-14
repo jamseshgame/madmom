@@ -1097,6 +1097,46 @@ def _extract_tutorial_section(chart_text: str) -> str | None:
     return body if body else None
 
 
+_IMPORTED_SOURCES_RE = re.compile(r'\[ImportedSources\]\s*\{([^}]*)\}', re.DOTALL)
+_IMPORTED_ROW_RE = re.compile(
+    r'^\s*([a-z][a-z0-9_]*)\s*=\s*track="([^"]*)"\s+beatmap="([^"]*)"\s+name="([^"]*)"',
+    re.MULTILINE,
+)
+
+
+def _parse_imported_sources_section(chart_text: str) -> dict[str, dict[str, str]]:
+    """Return {local_id: {track, beatmap, name}} for every entry in the
+    [ImportedSources] section. Empty dict if the section is missing."""
+    m = _IMPORTED_SOURCES_RE.search(chart_text)
+    if not m:
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for row in _IMPORTED_ROW_RE.finditer(m.group(1)):
+        out[row.group(1)] = {'track': row.group(2), 'beatmap': row.group(3), 'name': row.group(4)}
+    return out
+
+
+def _strip_imported_sources_section(chart_text: str) -> str:
+    """Drop the [ImportedSources] section. Used at publish time — Unity
+    resolves `MUSIC source=` directly to `sources/<source>/song.ogg`,
+    no studio-side ids needed."""
+    return _IMPORTED_SOURCES_RE.sub('', chart_text).strip() + '\n'
+
+
+def _strip_orphan_musicsegs(chart_text: str) -> str:
+    """Remove [MusicSeg_<id>] sections that no MUSIC event references."""
+    tut_match = re.search(r'\[TutorialScript\]\s*\{([^}]*)\}', chart_text, flags=re.DOTALL)
+    referenced: set[str] = set()
+    if tut_match:
+        for m in re.finditer(r'\d+\s*=\s*MUSIC\s+[^\n]*?section="([^"]+)"', tut_match.group(1)):
+            referenced.add(m.group(1))
+
+    def repl(m: re.Match) -> str:
+        return '' if m.group(1) not in referenced else m.group(0)
+
+    return re.sub(r'\[(MusicSeg_[A-Za-z0-9]+)\]\s*\{[^}]*\}\s*', repl, chart_text, flags=re.DOTALL)
+
+
 def _bundle_tutorial_assets(
     track,
     charts_to_merge: list,
@@ -1161,6 +1201,24 @@ def _bundle_tutorial_assets(
             chart_path.read_text(encoding='utf-8', errors='replace') + section,
             encoding='utf-8',
         )
+
+    if chart_path.exists():
+        text = chart_path.read_text(encoding='utf-8', errors='replace')
+        sources = _parse_imported_sources_section(text)
+        # Copy each source's song.ogg into sources/<id>/song.ogg
+        for local_id, meta in sources.items():
+            src_track_dir = Path(settings.upload_dir) / '_tracks' / meta['track']
+            src_audio = src_track_dir / 'beatmaps' / meta['beatmap'] / 'song.ogg'
+            if not src_audio.exists():
+                src_audio = src_track_dir / 'stems' / 'song.ogg'
+            if src_audio.exists():
+                dst = tmp_dir / 'sources' / local_id / 'song.ogg'
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(src_audio), str(dst))
+        # Strip ImportedSources + orphan MusicSegs
+        text = _strip_imported_sources_section(text)
+        text = _strip_orphan_musicsegs(text)
+        chart_path.write_text(text, encoding='utf-8')
 
     return {
         'enabled': True,
