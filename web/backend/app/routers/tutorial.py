@@ -17,17 +17,62 @@ from __future__ import annotations
 
 import re
 import shutil
+import subprocess
 import uuid
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
+from ..config import settings
 from ..services.tracks import Track, get_beatmap_dir, get_track
 from ..services.tts import synth_async
 
 router = APIRouter(prefix='/api/tutorial', tags=['tutorial'])
+
+_AUDIO_EXTS = {'.ogg', '.wav', '.mp3', '.flac', '.m4a'}
+
+
+def _slugify(s: str) -> str:
+    s = s.strip().lower()
+    s = re.sub(r'[^a-z0-9]+', '-', s)
+    return s.strip('-') or 'untagged'
+
+
+def _safe_filename(name: str) -> str:
+    """Keep the original filename readable while stripping anything that would
+    let it escape its directory. We preserve spaces, commas, apostrophes etc.
+    since VO filenames are the narration script itself."""
+    name = name.replace('\\', '/').split('/')[-1]
+    name = name.lstrip('.')
+    name = re.sub(r'[\x00-\x1f<>:"|?*]', '', name)
+    return name.strip() or 'unnamed'
+
+
+def _derive_text(stem: str) -> str:
+    """Turn '01 - So I hear you play guitar...' into 'So I hear you play guitar...'."""
+    return re.sub(r'^\s*\d+\s*[-_.\s]+\s*', '', stem).strip()
+
+
+def _vo_library_root() -> Path:
+    root = Path(settings.upload_dir) / 'vo_library'
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _transcode_to_ogg(src: Path, dst: Path) -> None:
+    if src.suffix.lower() == '.ogg':
+        src.replace(dst)
+        return
+    proc = subprocess.run(
+        ['ffmpeg', '-y', '-i', str(src), '-vn', '-c:a', 'libvorbis', '-q:a', '5', str(dst)],
+        capture_output=True,
+    )
+    src.unlink(missing_ok=True)
+    if proc.returncode != 0:
+        raise HTTPException(500, f'ffmpeg failed: {proc.stderr.decode("utf-8", errors="replace")[-400:]}')
 
 # Allowed sample slot ids — keep in sync with the frontend Tutorial panel
 SAMPLE_SLOTS: tuple[str, ...] = (
@@ -457,7 +502,7 @@ async def upload_vo(track_id: str, beatmap_id: str, file: UploadFile = File(...)
     if bm_dir is None:
         raise HTTPException(404, 'Beatmap not found')
     ext = Path(file.filename or '').suffix.lower()
-    if ext not in {'.ogg', '.wav', '.mp3', '.flac', '.m4a'}:
+    if ext not in _AUDIO_EXTS:
         raise HTTPException(400, f'Unsupported audio format: {ext}')
     d = bm_dir / 'vo'
     d.mkdir(parents=True, exist_ok=True)
@@ -467,15 +512,157 @@ async def upload_vo(track_id: str, beatmap_id: str, file: UploadFile = File(...)
     data = await file.read()
     raw = d / f'_raw_{fname}{ext}'
     raw.write_bytes(data)
-    if ext == '.ogg':
-        raw.replace(out)
-    else:
-        import subprocess
-        proc = subprocess.run(
-            ['ffmpeg', '-y', '-i', str(raw), '-vn', '-c:a', 'libvorbis', '-q:a', '5', str(out)],
-            capture_output=True,
-        )
-        raw.unlink(missing_ok=True)
-        if proc.returncode != 0:
-            raise HTTPException(500, f'ffmpeg failed: {proc.stderr.decode("utf-8", errors="replace")[-400:]}')
+    _transcode_to_ogg(raw, out)
     return {'filename': fname, 'rel_path': f'vo/{fname}', 'size_bytes': out.stat().st_size}
+
+
+# -- Shared VO library -------------------------------------------------------
+# A track-agnostic store keyed by a user-supplied batch label (e.g. "Guitar
+# Lesson 1 elevenlabs Ryan"). Files keep their original (sanitized) names so
+# the narration script — encoded by the uploader as the filename — survives.
+# Tutorials import a copy of a library file into their own vo/ dir, so chart
+# playback continues to resolve VOs relative to the beatmap.
+
+
+@router.post('/vo-library/upload')
+async def vo_library_upload(
+    batch_tag: str = Form(...),
+    files: list[UploadFile] = File(...),
+):
+    """Save one or more VO files into the shared library under the given
+    batch tag. Filenames are preserved (sanitized) so the in-editor browser
+    can show the script line as the file label."""
+    label = batch_tag.strip()
+    if not label:
+        raise HTTPException(400, 'batch_tag is required')
+    if not files:
+        raise HTTPException(400, 'At least one file is required')
+
+    slug = _slugify(label)
+    batch_dir = _vo_library_root() / slug
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    # Persist the original label so future listings can show it verbatim
+    (batch_dir / '_label.txt').write_text(label, encoding='utf-8')
+
+    saved = []
+    for upload in files:
+        raw_name = _safe_filename(upload.filename or 'unnamed')
+        ext = Path(raw_name).suffix.lower()
+        if ext not in _AUDIO_EXTS:
+            raise HTTPException(400, f'Unsupported audio format on {raw_name}: {ext}')
+        stem = Path(raw_name).stem
+        out = batch_dir / f'{stem}.ogg'
+        raw = batch_dir / f'_raw_{uuid.uuid4().hex[:8]}{ext}'
+        raw.write_bytes(await upload.read())
+        _transcode_to_ogg(raw, out)
+        saved.append({
+            'name': out.name,
+            'text': _derive_text(stem),
+            'size_bytes': out.stat().st_size,
+        })
+
+    return {'batch': slug, 'label': label, 'files': saved}
+
+
+@router.get('/vo-library/batches')
+async def vo_library_list_batches():
+    root = _vo_library_root()
+    out = []
+    for d in sorted(root.iterdir() if root.exists() else []):
+        if not d.is_dir():
+            continue
+        label_file = d / '_label.txt'
+        label = label_file.read_text(encoding='utf-8').strip() if label_file.exists() else d.name
+        count = sum(1 for p in d.iterdir() if p.is_file() and p.suffix.lower() == '.ogg')
+        out.append({'batch': d.name, 'label': label, 'file_count': count})
+    return out
+
+
+@router.get('/vo-library/batches/{batch}')
+async def vo_library_list_files(batch: str):
+    if '/' in batch or '\\' in batch or batch.startswith('.'):
+        raise HTTPException(400, 'Invalid batch')
+    d = _vo_library_root() / batch
+    if not d.is_dir():
+        raise HTTPException(404, 'Batch not found')
+    label_file = d / '_label.txt'
+    label = label_file.read_text(encoding='utf-8').strip() if label_file.exists() else batch
+    files = []
+    for p in sorted(d.iterdir(), key=lambda x: x.name):
+        if not p.is_file() or p.suffix.lower() != '.ogg':
+            continue
+        files.append({
+            'name': p.name,
+            'text': _derive_text(p.stem),
+            'size_bytes': p.stat().st_size,
+        })
+    return {'batch': batch, 'label': label, 'files': files}
+
+
+@router.get('/vo-library/file/{batch}/{name}')
+async def vo_library_stream(batch: str, name: str):
+    if '/' in batch or '\\' in batch or batch.startswith('.'):
+        raise HTTPException(400, 'Invalid batch')
+    if '/' in name or '\\' in name or name.startswith('.'):
+        raise HTTPException(400, 'Invalid filename')
+    p = _vo_library_root() / batch / name
+    if not p.exists():
+        raise HTTPException(404, 'VO clip not found')
+    return FileResponse(p, media_type='audio/ogg')
+
+
+@router.delete('/vo-library/batches/{batch}')
+async def vo_library_delete_batch(batch: str):
+    if '/' in batch or '\\' in batch or batch.startswith('.'):
+        raise HTTPException(400, 'Invalid batch')
+    d = _vo_library_root() / batch
+    if d.exists():
+        shutil.rmtree(d, ignore_errors=True)
+    return {'ok': True}
+
+
+@router.delete('/vo-library/file/{batch}/{name}')
+async def vo_library_delete_file(batch: str, name: str):
+    if '/' in batch or '\\' in batch or batch.startswith('.'):
+        raise HTTPException(400, 'Invalid batch')
+    if '/' in name or '\\' in name or name.startswith('.'):
+        raise HTTPException(400, 'Invalid filename')
+    p = _vo_library_root() / batch / name
+    if p.exists():
+        p.unlink(missing_ok=True)
+    return {'ok': True}
+
+
+class VoLibraryImportRequest(BaseModel):
+    batch: str
+    name: str
+
+
+@router.post('/{track_id}/beatmaps/{beatmap_id}/vo/from-library')
+async def vo_import_from_library(track_id: str, beatmap_id: str, req: VoLibraryImportRequest):
+    """Copy a library VO into this beatmap's vo/ dir so it's playable via the
+    existing per-beatmap stream endpoint. Returns the rel_path + derived text
+    so the frontend can drop a VO event onto the timeline."""
+    if '/' in req.batch or '\\' in req.batch or req.batch.startswith('.'):
+        raise HTTPException(400, 'Invalid batch')
+    if '/' in req.name or '\\' in req.name or req.name.startswith('.'):
+        raise HTTPException(400, 'Invalid filename')
+    src = _vo_library_root() / req.batch / req.name
+    if not src.exists():
+        raise HTTPException(404, 'Library VO not found')
+    bm_dir = get_beatmap_dir(track_id, beatmap_id)
+    if bm_dir is None:
+        raise HTTPException(404, 'Beatmap not found')
+    d = bm_dir / 'vo'
+    d.mkdir(parents=True, exist_ok=True)
+    # Unique filename per import so re-inserting the same library file twice
+    # gives two independent copies the user can edit / delete separately.
+    stem = Path(req.name).stem
+    dst = d / f'{stem}__{uuid.uuid4().hex[:6]}.ogg'
+    shutil.copyfile(src, dst)
+    return {
+        'rel_path': f'vo/{dst.name}',
+        'filename': dst.name,
+        'text': _derive_text(stem),
+        'size_bytes': dst.stat().st_size,
+    }

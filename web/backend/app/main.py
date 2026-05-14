@@ -19,9 +19,12 @@ from .routers import (
     beatmap,
     elevenlabs,
     game_songs,
+    gem_meshes,
+    highways,
     jobs,
     lyrics,
     sample_packs,
+    scene_events,
     stems,
     tracks,
     tutorial,
@@ -80,6 +83,9 @@ app.include_router(elevenlabs.router, dependencies=_auth_dep)
 app.include_router(lyrics.router, dependencies=_auth_dep)
 app.include_router(vocals.router, dependencies=_auth_dep)
 app.include_router(sample_packs.router, dependencies=_auth_dep)
+app.include_router(scene_events.router, dependencies=_auth_dep)
+app.include_router(gem_meshes.router, dependencies=_auth_dep)
+app.include_router(highways.router, dependencies=_auth_dep)
 # users router has its own require_admin / require_auth Depends per route
 app.include_router(users.router)
 

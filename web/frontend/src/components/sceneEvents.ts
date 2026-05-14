@@ -16,11 +16,17 @@ export const DEFAULT_SCENE_FLAGS: SceneFlags = {
   lasers_right: 0,
 }
 
+// One scene cue on the timeline. Two parameter shapes coexist:
+//   • duration  — encoded in the `duration` field, written as `name <ticks>`.
+//   • everything else (hex/number/enum) — encoded as the raw `value` token,
+//     written as `name <value>`.
+// At most one of `duration` and `value` is non-empty per event.
 export interface SceneEvent {
   id: string         // ephemeral; regenerated per parse
   tick: number
-  name: string       // e.g. "onboard_L_primary"
-  duration: number   // ticks; 0 = instantaneous
+  name: string       // e.g. "onboard_L_primary" or a custom "leftlasercolour"
+  duration: number   // ticks; 0 = no duration token
+  value: string      // raw parameter token for non-duration param types; '' if none
 }
 
 export type SceneEventGroup =
@@ -29,54 +35,80 @@ export type SceneEventGroup =
   | 'hand'
   | 'highway'
   | 'beatline'
+  | 'scene'
   | 'misc'
+  | 'custom'
+
+// What the editor renders for the value input + how the chart payload after
+// the event name should be parsed. `none` means no parameter; the cue fires
+// as a bare `<tick> = E "name"` line.
+export type SceneEventParam =
+  | { type: 'none' }
+  | { type: 'duration' }
+  | { type: 'hex_color' }
+  | { type: 'number'; min?: number; max?: number; step?: number }
+  | { type: 'enum'; options: string[] }
 
 export interface SceneEventCatalogEntry {
   name: string
   group: SceneEventGroup
   groupLabel: string
   itemLabel: string       // human-readable label for the picker
-  acceptsDuration: boolean
+  description: string     // hover-tip / handover-doc copy; freeform
+  param: SceneEventParam
+  builtin?: boolean       // true for entries shipped with the editor
 }
 
-// All known scene-event names. Editor uses this to populate the picker and
-// to decide whether to show the right-edge resize handle.
+// Convenience accessor — tells the canvas whether to draw a resize handle.
+export function entryAcceptsDuration(e: SceneEventCatalogEntry): boolean {
+  return e.param.type === 'duration'
+}
+
+// Builtin catalog. Custom user-registered types are merged on top at runtime
+// (see useCustomSceneEventTypes in BeatmapEditor.tsx).
 export const SCENE_EVENT_CATALOG: SceneEventCatalogEntry[] = [
   // Controllers L
-  { name: 'onboard_L',             group: 'controllers_l', groupLabel: 'Controller L', itemLabel: 'Show controller',     acceptsDuration: true },
-  { name: 'onboard_L_rotate',      group: 'controllers_l', groupLabel: 'Controller L', itemLabel: 'Rotate',               acceptsDuration: true },
-  { name: 'onboard_L_primary',     group: 'controllers_l', groupLabel: 'Controller L', itemLabel: 'Primary glow',         acceptsDuration: true },
-  { name: 'onboard_L_secondary',   group: 'controllers_l', groupLabel: 'Controller L', itemLabel: 'Secondary glow',       acceptsDuration: true },
-  { name: 'onboard_L_menu',        group: 'controllers_l', groupLabel: 'Controller L', itemLabel: 'Menu glow',            acceptsDuration: true },
-  { name: 'onboard_L_trigger',     group: 'controllers_l', groupLabel: 'Controller L', itemLabel: 'Trigger glow',         acceptsDuration: true },
-  { name: 'onboard_L_grip',        group: 'controllers_l', groupLabel: 'Controller L', itemLabel: 'Grip glow',            acceptsDuration: true },
-  { name: 'onboard_L_thumbstick',  group: 'controllers_l', groupLabel: 'Controller L', itemLabel: 'Thumbstick glow',      acceptsDuration: true },
-  { name: 'onboard_L_stickclick',  group: 'controllers_l', groupLabel: 'Controller L', itemLabel: 'Stick-click glow',     acceptsDuration: true },
+  { name: 'onboard_L',             group: 'controllers_l', groupLabel: 'Controller L', itemLabel: 'Show controller',     description: 'Reveal the left controller model — pairs with `onboard_R` for full handset onboarding.',    param: { type: 'duration' }, builtin: true },
+  { name: 'onboard_L_rotate',      group: 'controllers_l', groupLabel: 'Controller L', itemLabel: 'Rotate',              description: 'Animate the left controller through a rotation cycle to demonstrate orientation.',          param: { type: 'duration' }, builtin: true },
+  { name: 'onboard_L_primary',     group: 'controllers_l', groupLabel: 'Controller L', itemLabel: 'Primary glow',        description: 'Pulse the primary face button on the left controller.',                                       param: { type: 'duration' }, builtin: true },
+  { name: 'onboard_L_secondary',   group: 'controllers_l', groupLabel: 'Controller L', itemLabel: 'Secondary glow',      description: 'Pulse the secondary face button on the left controller.',                                     param: { type: 'duration' }, builtin: true },
+  { name: 'onboard_L_menu',        group: 'controllers_l', groupLabel: 'Controller L', itemLabel: 'Menu glow',           description: 'Pulse the menu button on the left controller.',                                               param: { type: 'duration' }, builtin: true },
+  { name: 'onboard_L_trigger',     group: 'controllers_l', groupLabel: 'Controller L', itemLabel: 'Trigger glow',        description: 'Pulse the trigger highlight on the left controller — used for strum-trigger tutorials.',     param: { type: 'duration' }, builtin: true },
+  { name: 'onboard_L_grip',        group: 'controllers_l', groupLabel: 'Controller L', itemLabel: 'Grip glow',           description: 'Pulse the grip highlight on the left controller.',                                            param: { type: 'duration' }, builtin: true },
+  { name: 'onboard_L_thumbstick',  group: 'controllers_l', groupLabel: 'Controller L', itemLabel: 'Thumbstick glow',     description: 'Pulse the thumbstick highlight on the left controller.',                                      param: { type: 'duration' }, builtin: true },
+  { name: 'onboard_L_stickclick',  group: 'controllers_l', groupLabel: 'Controller L', itemLabel: 'Stick-click glow',    description: 'Pulse the thumbstick-click highlight on the left controller.',                                param: { type: 'duration' }, builtin: true },
   // Controllers R
-  { name: 'onboard_R',             group: 'controllers_r', groupLabel: 'Controller R', itemLabel: 'Show controller',     acceptsDuration: true },
-  { name: 'onboard_R_rotate',      group: 'controllers_r', groupLabel: 'Controller R', itemLabel: 'Rotate',               acceptsDuration: true },
-  { name: 'onboard_R_primary',     group: 'controllers_r', groupLabel: 'Controller R', itemLabel: 'Primary glow',         acceptsDuration: true },
-  { name: 'onboard_R_secondary',   group: 'controllers_r', groupLabel: 'Controller R', itemLabel: 'Secondary glow',       acceptsDuration: true },
-  { name: 'onboard_R_menu',        group: 'controllers_r', groupLabel: 'Controller R', itemLabel: 'Menu glow',            acceptsDuration: true },
-  { name: 'onboard_R_trigger',     group: 'controllers_r', groupLabel: 'Controller R', itemLabel: 'Trigger glow',         acceptsDuration: true },
-  { name: 'onboard_R_grip',        group: 'controllers_r', groupLabel: 'Controller R', itemLabel: 'Grip glow',            acceptsDuration: true },
-  { name: 'onboard_R_thumbstick',  group: 'controllers_r', groupLabel: 'Controller R', itemLabel: 'Thumbstick glow',      acceptsDuration: true },
-  { name: 'onboard_R_stickclick',  group: 'controllers_r', groupLabel: 'Controller R', itemLabel: 'Stick-click glow',     acceptsDuration: true },
+  { name: 'onboard_R',             group: 'controllers_r', groupLabel: 'Controller R', itemLabel: 'Show controller',     description: 'Reveal the right controller model — pairs with `onboard_L` for full handset onboarding.',    param: { type: 'duration' }, builtin: true },
+  { name: 'onboard_R_rotate',      group: 'controllers_r', groupLabel: 'Controller R', itemLabel: 'Rotate',              description: 'Animate the right controller through a rotation cycle.',                                      param: { type: 'duration' }, builtin: true },
+  { name: 'onboard_R_primary',     group: 'controllers_r', groupLabel: 'Controller R', itemLabel: 'Primary glow',        description: 'Pulse the primary face button on the right controller.',                                      param: { type: 'duration' }, builtin: true },
+  { name: 'onboard_R_secondary',   group: 'controllers_r', groupLabel: 'Controller R', itemLabel: 'Secondary glow',      description: 'Pulse the secondary face button on the right controller.',                                    param: { type: 'duration' }, builtin: true },
+  { name: 'onboard_R_menu',        group: 'controllers_r', groupLabel: 'Controller R', itemLabel: 'Menu glow',           description: 'Pulse the menu button on the right controller.',                                              param: { type: 'duration' }, builtin: true },
+  { name: 'onboard_R_trigger',     group: 'controllers_r', groupLabel: 'Controller R', itemLabel: 'Trigger glow',        description: 'Pulse the trigger highlight on the right controller.',                                        param: { type: 'duration' }, builtin: true },
+  { name: 'onboard_R_grip',        group: 'controllers_r', groupLabel: 'Controller R', itemLabel: 'Grip glow',           description: 'Pulse the grip highlight on the right controller.',                                           param: { type: 'duration' }, builtin: true },
+  { name: 'onboard_R_thumbstick',  group: 'controllers_r', groupLabel: 'Controller R', itemLabel: 'Thumbstick glow',     description: 'Pulse the thumbstick highlight on the right controller.',                                     param: { type: 'duration' }, builtin: true },
+  { name: 'onboard_R_stickclick',  group: 'controllers_r', groupLabel: 'Controller R', itemLabel: 'Stick-click glow',    description: 'Pulse the thumbstick-click highlight on the right controller.',                               param: { type: 'duration' }, builtin: true },
   // Hand indicator
-  { name: 'onboard_handindicator_show',  group: 'hand', groupLabel: 'Hand indicator', itemLabel: 'Show',  acceptsDuration: true  },
-  { name: 'onboard_handindicator_hide',  group: 'hand', groupLabel: 'Hand indicator', itemLabel: 'Hide',  acceptsDuration: false },
-  { name: 'onboard_handindicator_flash', group: 'hand', groupLabel: 'Hand indicator', itemLabel: 'Flash', acceptsDuration: false },
+  { name: 'onboard_handindicator_show',  group: 'hand', groupLabel: 'Hand indicator', itemLabel: 'Show',  description: 'Reveal the floating hand-position indicator. Pair with `_hide` to dismiss.',           param: { type: 'duration' }, builtin: true },
+  { name: 'onboard_handindicator_hide',  group: 'hand', groupLabel: 'Hand indicator', itemLabel: 'Hide',  description: 'Dismiss the hand-position indicator.',                                                  param: { type: 'none' },     builtin: true },
+  { name: 'onboard_handindicator_flash', group: 'hand', groupLabel: 'Hand indicator', itemLabel: 'Flash', description: 'One-shot flash to draw the player\'s eye to the hand indicator without leaving it on.', param: { type: 'none' },     builtin: true },
   // Highway
-  { name: 'onboard_highway_show', group: 'highway', groupLabel: 'Highway', itemLabel: 'Show', acceptsDuration: true  },
-  { name: 'onboard_highway_hide', group: 'highway', groupLabel: 'Highway', itemLabel: 'Hide', acceptsDuration: false },
+  { name: 'onboard_highway_show', group: 'highway', groupLabel: 'Highway', itemLabel: 'Show', description: 'Bring the note highway into view — used after intros / interludes when notes resume.', param: { type: 'duration' }, builtin: true },
+  { name: 'onboard_highway_hide', group: 'highway', groupLabel: 'Highway', itemLabel: 'Hide', description: 'Dismiss the highway. Useful for cinematic moments when notes shouldn\'t be visible.', param: { type: 'none' },     builtin: true },
   // Beatline
-  { name: 'onboard_beatline_show',         group: 'beatline', groupLabel: 'Beatline', itemLabel: 'Show',          acceptsDuration: true  },
-  { name: 'onboard_beatline_hide',         group: 'beatline', groupLabel: 'Beatline', itemLabel: 'Hide',          acceptsDuration: false },
-  { name: 'onboard_beatline_flash',        group: 'beatline', groupLabel: 'Beatline', itemLabel: 'Flash',         acceptsDuration: false },
-  { name: 'onboard_beatline_showsequence', group: 'beatline', groupLabel: 'Beatline', itemLabel: 'Show sequence', acceptsDuration: true  },
-  { name: 'onboard_beatline_hidesequence', group: 'beatline', groupLabel: 'Beatline', itemLabel: 'Hide sequence', acceptsDuration: false },
+  { name: 'onboard_beatline_show',         group: 'beatline', groupLabel: 'Beatline', itemLabel: 'Show',          description: 'Show the strike line at the bottom of the highway.',                              param: { type: 'duration' }, builtin: true },
+  { name: 'onboard_beatline_hide',         group: 'beatline', groupLabel: 'Beatline', itemLabel: 'Hide',          description: 'Hide the strike line.',                                                            param: { type: 'none' },     builtin: true },
+  { name: 'onboard_beatline_flash',        group: 'beatline', groupLabel: 'Beatline', itemLabel: 'Flash',         description: 'One-shot flash of the strike line — typically aligned to a downbeat accent.',     param: { type: 'none' },     builtin: true },
+  { name: 'onboard_beatline_showsequence', group: 'beatline', groupLabel: 'Beatline', itemLabel: 'Show sequence', description: 'Begin a sequence of strike-line pulses synced to the underlying beat.',           param: { type: 'duration' }, builtin: true },
+  { name: 'onboard_beatline_hidesequence', group: 'beatline', groupLabel: 'Beatline', itemLabel: 'Hide sequence', description: 'End an in-progress strike-line pulse sequence.',                                   param: { type: 'none' },     builtin: true },
+  // Scene FX — formerly song-wide [Scene] flags. Now tick-based bursts so the
+  // crowd / lasers can pulse with the song instead of holding one intensity
+  // for the whole track.
+  { name: 'onboard_floorcrowd',    group: 'scene', groupLabel: 'Scene FX', itemLabel: 'Floor crowd',     description: 'Trigger the audience floor-crowd reaction (cheers + body motion) for the duration.', param: { type: 'duration' }, builtin: true },
+  { name: 'onboard_lasers_center', group: 'scene', groupLabel: 'Scene FX', itemLabel: 'Lasers · center', description: 'Activate the centre laser bank in the stage rig.',                                       param: { type: 'duration' }, builtin: true },
+  { name: 'onboard_lasers_left',   group: 'scene', groupLabel: 'Scene FX', itemLabel: 'Lasers · left',   description: 'Activate the left laser bank in the stage rig.',                                         param: { type: 'duration' }, builtin: true },
+  { name: 'onboard_lasers_right',  group: 'scene', groupLabel: 'Scene FX', itemLabel: 'Lasers · right',  description: 'Activate the right laser bank in the stage rig.',                                        param: { type: 'duration' }, builtin: true },
   // Misc
-  { name: 'onboard_controllerfretslide', group: 'misc', groupLabel: 'Misc', itemLabel: 'Controller fret slide', acceptsDuration: true },
+  { name: 'onboard_controllerfretslide', group: 'misc', groupLabel: 'Misc', itemLabel: 'Controller fret slide', description: 'Animate a slide between fret positions on the controller — visual hint for slide notes.', param: { type: 'duration' }, builtin: true },
 ]
 
 const KNOWN_SCENE_EVENT_NAMES = new Set(SCENE_EVENT_CATALOG.map((e) => e.name))
@@ -85,8 +117,8 @@ export function isKnownSceneEventName(name: string): boolean {
   return KNOWN_SCENE_EVENT_NAMES.has(name)
 }
 
-export function findCatalogEntry(name: string): SceneEventCatalogEntry | undefined {
-  return SCENE_EVENT_CATALOG.find((e) => e.name === name)
+export function findCatalogEntry(name: string, extra: SceneEventCatalogEntry[] = []): SceneEventCatalogEntry | undefined {
+  return extra.find((e) => e.name === name) ?? SCENE_EVENT_CATALOG.find((e) => e.name === name)
 }
 
 // ── [Scene] section parsing ────────────────────────────────────────────────
@@ -155,21 +187,63 @@ function formatSceneNumber(n: number): string {
   return Number(n.toFixed(4)).toString()
 }
 
+// ── Legacy flag → event migration ─────────────────────────────────────────
+//
+// Pre-Scene-FX-events charts encoded floor crowd / lasers as song-wide
+// constants under [Scene]. The editor now treats them as tick-based scene
+// events; this helper converts any non-zero legacy flag into a single event
+// spanning tick 0 through `endTick`, and returns the flags with those keys
+// zeroed so the SCENE section no longer round-trips them. Intensity is not
+// preserved — the engine reads any active event as "on".
+
+const FLAG_TO_EVENT_NAME: Record<keyof SceneFlags, string> = {
+  floorcrowd: 'onboard_floorcrowd',
+  lasers_center: 'onboard_lasers_center',
+  lasers_left: 'onboard_lasers_left',
+  lasers_right: 'onboard_lasers_right',
+}
+
+export function migrateLegacySceneFlags(
+  flags: SceneFlags,
+  endTick: number,
+): { events: SceneEvent[]; clearedFlags: SceneFlags } {
+  const events: SceneEvent[] = []
+  const clearedFlags: SceneFlags = { ...flags }
+  let n = 0
+  for (const key of SCENE_FLAG_KEYS) {
+    if (!flags[key] || flags[key] <= 0) continue
+    events.push({
+      id: `scene-migrated-${key}-${n++}`,
+      tick: 0,
+      name: FLAG_TO_EVENT_NAME[key],
+      duration: Math.max(0, endTick),
+      value: '',
+    })
+    clearedFlags[key] = 0
+  }
+  return { events, clearedFlags }
+}
+
 // ── [Events] payload parsing ───────────────────────────────────────────────
 //
 // Standard chart `[Events]` lines look like `<tick> = E "<payload>"`. The
 // payload is whatever the engine wants. We claim payloads that begin with
-// `onboard_` (a single token) optionally followed by a numeric duration:
+// `onboard_` — and any registered custom event name — optionally followed
+// by a single value token. The token is parsed as a numeric duration when
+// it's all digits; otherwise it's stored verbatim as `value` (e.g. a hex
+// colour `#FF8800` or an enum option `slow`).
 //
-//   36864 = E "onboard_L_primary 232"
-//   192000 = E "onboard_highway_show"
+//   36864 = E "onboard_L_primary 232"          → duration=232
+//   192000 = E "onboard_highway_show"          → no parameter
+//   3840 = E "leftlasercolour #FF8800"         → value="#FF8800"
 //
 // All other E-lines (section/lyric markers, etc.) are NOT touched: we keep
 // them verbatim in the passthrough text returned by parseSceneEvents.
 
 const SCENE_EVENT_LINE = /^\s*(\d+)\s*=\s*E\s+"([^"]*)"\s*$/
-// Matches: name=group1, optional space + duration=group2
-const SCENE_PAYLOAD = /^([A-Za-z][A-Za-z0-9_]*)(?:\s+(\d+))?$/
+// name is greedy on identifier chars; value is "the rest" minus surrounding
+// whitespace, so hex colours and enum strings round-trip cleanly.
+const SCENE_PAYLOAD = /^([A-Za-z][A-Za-z0-9_]*)(?:\s+(\S.*))?$/
 
 export interface ParsedSceneEvents {
   events: SceneEvent[]
@@ -181,7 +255,10 @@ export interface ParsedSceneEvents {
   hadSection: boolean
 }
 
-export function parseSceneEvents(text: string): ParsedSceneEvents {
+export function parseSceneEvents(
+  text: string,
+  customNames: Set<string> = new Set(),
+): ParsedSceneEvents {
   const m = text.match(/\[Events\]\s*\{([^}]*)\}/)
   if (!m) {
     return { events: [], passthroughLines: [], hadSection: false }
@@ -200,15 +277,20 @@ export function parseSceneEvents(text: string): ParsedSceneEvents {
     const tick = Number(lm[1])
     const payload = lm[2].trim()
     const pm = payload.match(SCENE_PAYLOAD)
-    if (!pm || !pm[1].startsWith('onboard_')) {
+    const name = pm?.[1] ?? ''
+    const isOurs = name.startsWith('onboard_') || customNames.has(name)
+    if (!pm || !isOurs) {
       passthroughLines.push(stripped.trimEnd())
       continue
     }
+    const valueTok = (pm[2] || '').trim()
+    const numericOnly = /^\d+$/.test(valueTok)
     events.push({
       id: `scene-${tick}-${counter++}`,
       tick,
-      name: pm[1],
-      duration: pm[2] ? Number(pm[2]) : 0,
+      name,
+      duration: numericOnly ? Number(valueTok) : 0,
+      value: numericOnly ? '' : valueTok,
     })
   }
   return { events, passthroughLines, hadSection: true }
@@ -222,8 +304,12 @@ export function serializeSceneEvents(
   const sceneLines = [...events]
     .sort((a, b) => a.tick - b.tick)
     .map((e) => {
-      const dur = e.duration > 0 ? ` ${e.duration}` : ''
-      return `  ${e.tick} = E "${e.name}${dur}"`
+      // duration takes precedence; otherwise the raw value token; otherwise
+      // bare. Both fields can never be set at once via the editor UI.
+      let suffix = ''
+      if (e.duration > 0) suffix = ` ${e.duration}`
+      else if (e.value) suffix = ` ${e.value}`
+      return `  ${e.tick} = E "${e.name}${suffix}"`
     })
   // Merge passthrough + scene lines, then sort by leading tick to keep
   // section/lyric markers in the right place. Lines without a leading tick

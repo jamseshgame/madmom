@@ -157,6 +157,74 @@ async def update_track_song_ini(
     return ini_fields
 
 
+# ── Background video (editor's Background panel) ────────────────────────────
+# Stored alongside the stems under `<track_dir>/background.<ext>` so it's
+# scoped per-track. Filename is also written to song.ini's [background]
+# section so the editor can re-discover it after a reload.
+
+_BG_VIDEO_EXTS = {'.mp4', '.webm', '.mov', '.m4v', '.ogv'}
+
+
+def _existing_bg_video(track) -> Optional[Path]:
+    """Find any background.<ext> file already present on disk."""
+    for ext in _BG_VIDEO_EXTS:
+        p = track.stems_dir / f'background{ext}'
+        if p.exists():
+            return p
+    return None
+
+
+@router.post('/{track_id}/background-video')
+async def upload_background_video(track_id: str, file: UploadFile = File(...)):
+    """Upload a video file the editor can play behind the highway. Overwrites
+    any previously-uploaded background video for this track."""
+    track = get_track(track_id)
+    if not track:
+        raise HTTPException(404, 'Track not found')
+    ext = Path(file.filename or '').suffix.lower()
+    if ext not in _BG_VIDEO_EXTS:
+        raise HTTPException(400, f'Unsupported video format: {ext}')
+    track.stems_dir.mkdir(parents=True, exist_ok=True)
+    # Wipe any prior file regardless of extension before writing the new one.
+    for old_ext in _BG_VIDEO_EXTS:
+        old = track.stems_dir / f'background{old_ext}'
+        if old.exists() and old.suffix != ext:
+            old.unlink(missing_ok=True)
+    out = track.stems_dir / f'background{ext}'
+    raw = await file.read()
+    out.write_bytes(raw)
+    return {'filename': out.name, 'size_bytes': len(raw)}
+
+
+@router.get('/{track_id}/background-video')
+async def download_background_video(track_id: str):
+    track = get_track(track_id)
+    if not track:
+        raise HTTPException(404, 'Track not found')
+    p = _existing_bg_video(track)
+    if not p:
+        raise HTTPException(404, 'No background video uploaded')
+    media = {
+        '.mp4': 'video/mp4',
+        '.webm': 'video/webm',
+        '.mov': 'video/quicktime',
+        '.m4v': 'video/x-m4v',
+        '.ogv': 'video/ogg',
+    }.get(p.suffix.lower(), 'application/octet-stream')
+    return FileResponse(p, media_type=media, filename=p.name)
+
+
+@router.delete('/{track_id}/background-video')
+async def delete_background_video(track_id: str):
+    track = get_track(track_id)
+    if not track:
+        raise HTTPException(404, 'Track not found')
+    p = _existing_bg_video(track)
+    if p:
+        p.unlink(missing_ok=True)
+    return {'ok': True}
+
+
 @router.get('/{track_id}/stems/{stem}')
 async def download_track_stem(track_id: str, stem: str):
     """Download a stem file from a saved track."""

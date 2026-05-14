@@ -125,6 +125,20 @@ def write_song_ini(output_dir: Path, fields: dict) -> Path:
             if v != '' and v is not None:
                 lines.append(f'{k} = {v}')
 
+    # [background] — drives the editor's optional Background panel. `kind` is
+    # one of "none" | "youtube" | "video", `value` is either a YouTube URL or
+    # a filename under the track's directory. `source_url` is the YouTube URL
+    # the track was originally ingested from, kept around so the panel can
+    # offer "use source video" without the user re-pasting.
+    bg_keys = sorted(k for k in fields if k.startswith('background_') or k == 'youtube_source_url')
+    if bg_keys and any(str(fields.get(k, '')).strip() for k in bg_keys):
+        lines.append('')
+        lines.append('[background]')
+        for k in bg_keys:
+            v = fields.get(k, '')
+            if v != '' and v is not None:
+                lines.append(f'{k} = {v}')
+
     ini_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
     return ini_path
 

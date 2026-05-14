@@ -26,6 +26,16 @@ class Settings(BaseSettings):
 
     madmom_root: str = str(Path(__file__).resolve().parents[4])
 
+    # Path to the Unity project the editor pulls 3D gem meshes from. Points
+    # at the local checkout by default; overrideable per environment.
+    jamseshquest_gems_dir: str = str(
+        Path('C:/Users/Admin/Documents/GitHub/jamseshquest/Assets/Art/Models/Gems'),
+    )
+    # Highway floor textures (looped onto the 3D runway plane).
+    jamseshquest_highways_dir: str = str(
+        Path('C:/Users/Admin/Documents/GitHub/jamseshquest/Assets/Art/Textures/Highways'),
+    )
+
     model_config = {
         'env_file': os.getenv('BEATMAP_ENV', str(Path(__file__).resolve().parents[2] / '.env')),
         'extra': 'ignore',

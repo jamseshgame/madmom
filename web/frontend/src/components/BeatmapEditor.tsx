@@ -1,9 +1,12 @@
 import {
-  SCENE_EVENT_CATALOG, SceneEvent, SceneFlags,
-  applySceneToFullText, parseSceneEvents, parseSceneFlags,
+  SCENE_EVENT_CATALOG, SceneEvent, SceneEventCatalogEntry, SceneEventParam, SceneFlags,
+  applySceneToFullText, entryAcceptsDuration, findCatalogEntry,
+  migrateLegacySceneFlags, parseSceneEvents, parseSceneFlags,
 } from './sceneEvents'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
+import * as THREE from 'three'
+import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js'
 
 // .chart parsing ------------------------------------------------------------
 
@@ -373,7 +376,16 @@ function parseSectionNotes(text: string, name: string): ChartNote[] {
 
 function replaceSectionNotes(text: string, name: string, notes: ChartNote[]): string {
   const start = text.indexOf(`[${name}]`)
-  if (start === -1) return text
+  // Section doesn't exist yet — empty difficulties fall through here. Append
+  // the new block (with whatever notes have been authored) to the end so a
+  // fresh-difficulty edit survives the round-trip.
+  if (start === -1) {
+    if (notes.length === 0) return text
+    const sorted = [...notes].sort((a, b) => a.tick - b.tick || a.lane - b.lane)
+    const noteLines = sorted.map((n) => `  ${n.tick} = N ${n.lane} ${n.sustain}`)
+    const block = `[${name}]\n{\n${noteLines.join('\n')}\n}\n`
+    return text.trimEnd() + '\n' + block
+  }
   const open = text.indexOf('{', start)
   const close = text.indexOf('}', open)
   if (open === -1 || close === -1) return text
@@ -598,7 +610,122 @@ function applyTutorialToFullText(
   return stripped.trimEnd() + '\n' + newSection + (musicBlocks ? musicBlocks : '')
 }
 
-function parseChart(text: string, prefer?: string): ChartState {
+// Camera state for the 3D-perspective preview. Stored in localStorage so the
+// user's preferred framing carries across sessions and beatmaps.
+interface View3DState {
+  enabled: boolean
+  angleDeg: number       // tilt of the runway away from the viewer (0 = flat 2D)
+  perspectivePx: number  // CSS perspective distance — smaller = stronger foreshortening
+  depthPx: number        // translateZ — pulls the runway toward (+) or away (-) from camera
+  liftPx: number         // translateY — nudges the strike line up/down on screen
+  horizonFade: number    // 0..1, opacity of the top-edge fade-to-black overlay
+  meshName: string       // filename of selected gem mesh from /api/gem-meshes; '' = flat 2D circles
+  meshScale: number      // size multiplier for the rendered gem (1.0 = baseline ~32 px diameter)
+  meshSpinDegPerSec: number  // optional auto-rotation around the up axis (0 = static)
+  explosionScale: number     // size multiplier for the GemExplosion shard cluster (1.0 = matches gem size)
+  ghostRestY: number     // ghost gem resting height (× baseGemSize) — sits above the strike
+  ghostDropRange: number // how far the ghost falls when pressed (× baseGemSize). Pressed Y = rest - range
+  highwayTexture: string         // filename of selected texture from /api/highway-textures; '' = plain dark plane
+  highwayScroll: boolean         // animate the texture toward the camera at the same rate as gems
+  highwayTint: string            // CSS hex (#RRGGBB) applied as a coloured overlay on the texture
+  highwayTintOpacity: number     // 0..1, overlay opacity
+  laneSeparators: boolean        // draw lines between lanes on the floor plane
+  laneSeparatorColor: string     // CSS hex for the separator lines
+  laneSeparatorWidth: number     // line thickness in world units (0.02 = thin, 0.1 = chunky)
+  laneSeparatorGlow: number      // 0..1, outer-glow halo intensity around each separator
+  // ── Battle mode debuffs — gimmick visual states layered on top of the
+  // normal 3D scene so a single chart can throw them at the player during
+  // gameplay. All default off.
+  battleReverseScroll: boolean   // texture scrolls AWAY from the camera instead of toward it
+  battleInkSplatter: boolean     // jet-black highway, no separators, glossy black gems
+}
+
+const VIEW3D_DEFAULT: View3DState = {
+  enabled: false,
+  angleDeg: 55,
+  perspectivePx: 900,
+  depthPx: 0,
+  liftPx: 0,
+  horizonFade: 0.55,
+  meshName: '',
+  meshScale: 1.0,
+  meshSpinDegPerSec: 60,
+  explosionScale: 1.0,
+  ghostRestY: 1.5,
+  ghostDropRange: 1.0,
+  highwayTexture: '',
+  highwayScroll: true,
+  highwayTint: '#000000',
+  highwayTintOpacity: 0.0,
+  laneSeparators: true,
+  laneSeparatorColor: '#FFFFFF',
+  laneSeparatorWidth: 0.025,
+  laneSeparatorGlow: 0.3,
+  battleReverseScroll: false,
+  battleInkSplatter: false,
+}
+
+interface GemMeshInfo {
+  name: string
+  stem: string
+  ext: string
+  size_bytes: number
+}
+
+// Same shape as GemMeshInfo, but kept as a separate type for clarity. The
+// frontend lists them in a dropdown and the 3D layer loads the selected one
+// as a tiled texture on the runway floor.
+interface HighwayTextureInfo {
+  name: string
+  stem: string
+  ext: string
+  size_bytes: number
+}
+
+function loadView3d(): View3DState {
+  try {
+    const raw = localStorage.getItem('editor.view3d')
+    if (!raw) return VIEW3D_DEFAULT
+    const parsed = JSON.parse(raw) as Partial<View3DState>
+    return { ...VIEW3D_DEFAULT, ...parsed }
+  } catch {
+    return VIEW3D_DEFAULT
+  }
+}
+
+// Shape returned by /api/scene-events/types (Pydantic snake_case dump).
+interface RawCustomType {
+  name: string
+  item_label: string
+  group_label: string
+  description: string
+  param: SceneEventParam
+}
+
+function adaptCustomType(raw: RawCustomType): SceneEventCatalogEntry {
+  return {
+    name: raw.name,
+    group: 'custom',
+    groupLabel: raw.group_label || 'Custom',
+    itemLabel: raw.item_label || raw.name,
+    description: raw.description || '',
+    param: raw.param,
+    builtin: false,
+  }
+}
+
+function defaultValueForParam(p: SceneEventParam | undefined): string {
+  if (!p) return ''
+  if (p.type === 'hex_color') return '#FFFFFF'
+  if (p.type === 'enum') return p.options[0] || ''
+  if (p.type === 'number') {
+    if (typeof p.min === 'number') return String(p.min)
+    return '0'
+  }
+  return ''
+}
+
+function parseChart(text: string, prefer?: string, customNames: Set<string> = new Set()): ChartState {
   const resMatch = text.match(/Resolution\s*=\s*(\d+)/)
   const resolution = resMatch ? Number(resMatch[1]) : 192
   const nameMatch = text.match(/Name\s*=\s*"([^"]*)"/)
@@ -619,12 +746,20 @@ function parseChart(text: string, prefer?: string): ChartState {
     }
   }
   if (!activeName && availableSections.length > 0) activeName = availableSections[0]
+  // Fresh chart with no difficulty sections yet — start the user on Easy so
+  // there's always a current target. The first save creates the section.
+  if (!activeName) activeName = 'EasySingle'
 
   const notes = activeName ? parseSectionNotes(text, activeName) : []
   const tutorial = parseTutorialSection(text)
   const musicSections = parseMusicSections(text)
   const scene = parseSceneFlags(text)
-  const sceneEventsParsed = parseSceneEvents(text)
+  const sceneEventsParsed = parseSceneEvents(text, customNames)
+  // Legacy [Scene] flags → tick-based events. Span from tick 0 to the active
+  // difficulty's last note + sustain so the migrated cue covers the song.
+  const endTick = notes.reduce((m, n) => Math.max(m, n.tick + (n.sustain || 0)), 0)
+  const migrated = migrateLegacySceneFlags(scene.flags, endTick)
+  const mergedSceneEvents = [...sceneEventsParsed.events, ...migrated.events]
   // Pre-flip tutorial mode on whenever the chart already carries a
   // [TutorialScript] section (even an empty one). The blank-tutorial flow
   // and the empty-beatmap-with-tutorial flow both emit an empty section
@@ -637,9 +772,9 @@ function parseChart(text: string, prefer?: string): ChartState {
     fullText: text, resolution, bpm, bpmRaw, songName,
     availableSections, activeName, notes,
     tutorialEnabled, tutorial, musicSections,
-    sceneFlags: scene.flags,
+    sceneFlags: migrated.clearedFlags,
     sceneFlagsUnknown: scene.unknownKeys,
-    sceneEvents: sceneEventsParsed.events,
+    sceneEvents: mergedSceneEvents,
     sceneEventsPassthrough: passthroughWithoutSections,
     sections: chartSections,
     tempoMarkers, timeSigs, syncOther,
@@ -1088,18 +1223,24 @@ function SceneTimeline({
 }
 
 function ScenePicker({
-  onPick, onClose,
-}: { onPick: (name: string) => void; onClose: () => void }) {
-  // Group catalog by group label, preserving catalog order.
-  const groups: { label: string; entries: typeof SCENE_EVENT_CATALOG }[] = []
-  for (const entry of SCENE_EVENT_CATALOG) {
+  catalog, onPick, onClose, onCreateType,
+}: {
+  catalog: SceneEventCatalogEntry[]
+  onPick: (name: string) => void
+  onClose: () => void
+  onCreateType: () => void
+}) {
+  // Group catalog by group label, preserving catalog order so the builtin
+  // sections (Controller L/R, Highway…) stay in their established positions.
+  const groups: { label: string; entries: SceneEventCatalogEntry[] }[] = []
+  for (const entry of catalog) {
     const last = groups[groups.length - 1]
     if (last && last.label === entry.groupLabel) last.entries.push(entry)
     else groups.push({ label: entry.groupLabel, entries: [entry] })
   }
   return (
     <div
-      className="absolute top-full left-0 mt-1 w-64 max-h-80 overflow-y-auto bg-gray-900 border border-gray-700 rounded-md shadow-2xl z-[80] p-1.5 space-y-1.5"
+      className="absolute top-full left-0 mt-1 w-72 max-h-96 overflow-y-auto bg-gray-900 border border-gray-700 rounded-md shadow-2xl z-[80] p-1.5 space-y-1.5"
       onMouseLeave={onClose}
     >
       {groups.map((g) => (
@@ -1113,7 +1254,7 @@ function ScenePicker({
                 key={e.name}
                 onClick={() => onPick(e.name)}
                 className="text-left px-1.5 py-0.5 text-[10px] text-gray-200 hover:bg-emerald-700/40 rounded font-mono truncate"
-                title={e.name}
+                title={`${e.name}${e.description ? '\n\n' + e.description : ''}`}
               >
                 {e.itemLabel}
               </button>
@@ -1121,7 +1262,975 @@ function ScenePicker({
           </div>
         </div>
       ))}
+      <div className="sticky bottom-0 -mb-1.5 -mx-1.5 px-1.5 pt-2 pb-1.5 border-t border-gray-700 bg-gray-900">
+        <button
+          onClick={onCreateType}
+          className="w-full px-2 py-1 bg-emerald-700/70 hover:bg-emerald-600 text-white rounded text-[11px] font-medium"
+          title="Register a new scene event type — generates a handover doc for the Unity engineer."
+        >
+          + New scene event type…
+        </button>
+      </div>
     </div>
+  )
+}
+
+// ── GemMeshLayer ───────────────────────────────────────────────────────────
+// Three.js overlay that renders the selected gem mesh at every visible note
+// (lanes 0-4) inside the same wrapper as the 2D canvas. Both layers receive
+// the same CSS perspective transform so the meshes appear to sit on the
+// tilted runway. Camera is orthographic and matches canvas pixel space, so
+// note positions are computed using the same y = HIT - (noteSec - currentTime)
+// * scrollSpeed formula used by draw().
+
+const LANE_COLOR_HEX = [0x22c55e, 0xef4444, 0xeab308, 0x3b82f6, 0xf97316] // 0-4
+
+interface GemMeshLayerHandle {
+  // Spawn a one-shot GemExplosion mesh at the strike-line of the given lane.
+  // Called from BeatmapEditor's live-mode strum handler on a successful hit.
+  spawnExplosion: (lane: number) => void
+}
+
+const GemMeshLayer = forwardRef<GemMeshLayerHandle, {
+  meshUrl: string                 // full URL to the FBX/GLB; '' = render nothing
+  explosionUrl: string            // full URL to the GemExplosion FBX (preloaded for hit FX)
+  notes: ChartNote[]
+  tempoSegments: TempoSegment[]
+  resolution: number
+  currentTime: number
+  scrollSpeed: number             // px/sec on the 2D canvas — converted to world Z per second
+  canvasW: number
+  canvasH: number
+  scale: number
+  spinDegPerSec: number
+  explosionScale: number          // multiplier for the GemExplosion shard cluster (1.0 = matches gem size)
+  angleDeg: number                // runway tilt angle — drives the camera pitch
+  perspectivePx: number           // CSS perspective px — used to derive Three.js FOV so 2D and 3D layers feel aligned
+  ghostRestY: number              // ghost gem rest height multiplier (× baseGemSize)
+  ghostDropRange: number          // ghost press drop multiplier (× baseGemSize)
+  depthPx: number                 // camera distance offset (-300..300, 0 = default)
+  liftPx: number                  // strike-line screen position offset; +ve pushes strike toward viewport bottom
+  highwayTextureUrl: string       // '' = plain dark floor; otherwise a tile-able image url
+  highwayScroll: boolean          // animate the texture's V offset to flow with the gems
+  highwayTint: string             // hex colour applied as an overlay on top of the texture
+  highwayTintOpacity: number      // 0..1
+  laneSeparators: boolean
+  laneSeparatorColor: string      // hex colour for the lines between lanes
+  laneSeparatorWidth: number      // world-unit thickness (1 lane = 1 unit, so 0.02 ≈ a hair)
+  laneSeparatorGlow: number       // 0..1, outer-glow halo opacity
+  battleReverseScroll: boolean    // flips the highway scroll direction
+  battleInkSplatter: boolean      // overrides highway → black, hides separators, gems go glossy black
+  heldFretsRef: React.MutableRefObject<Set<number>>  // shared with BeatmapEditor's gamepad poll
+}>(function GemMeshLayer({
+  meshUrl, explosionUrl, notes, tempoSegments, resolution, currentTime, scrollSpeed,
+  canvasW, canvasH, scale, spinDegPerSec, explosionScale, angleDeg, perspectivePx,
+  ghostRestY, ghostDropRange, depthPx, liftPx,
+  highwayTextureUrl, highwayScroll, highwayTint, highwayTintOpacity,
+  laneSeparators, laneSeparatorColor, laneSeparatorWidth, laneSeparatorGlow,
+  battleReverseScroll, battleInkSplatter,
+  heldFretsRef,
+}, ref) {
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const rendererRef = useRef<THREE.WebGLRenderer | null>(null)
+  const sceneRef = useRef<THREE.Scene | null>(null)
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null)
+  const meshTemplateRef = useRef<THREE.Object3D | null>(null)
+  const explosionTemplateRef = useRef<THREE.Object3D | null>(null)
+  // Runway elements that need per-prop updates instead of rebuilding the
+  // whole scene. Floor = textured plane; tint = coloured overlay on top;
+  // legacy lane-line objects we replace with thick separator planes.
+  const floorMeshRef = useRef<THREE.Mesh | null>(null)
+  const tintMeshRef = useRef<THREE.Mesh | null>(null)
+  const legacyLineObjsRef = useRef<THREE.Object3D[]>([])
+  // 6 separator pairs (between/around the 5 lanes). Each has a main thin
+  // bar + a wider, fainter glow bar behind it for the outer-glow effect.
+  const sepMainMeshesRef = useRef<THREE.Mesh[]>([])
+  const sepGlowMeshesRef = useRef<THREE.Mesh[]>([])
+  const lanePoolRef = useRef<THREE.Object3D[]>([])  // pooled clones, recycled per-frame
+  // Five ghost gem instances permanently parked at the strike line (one per
+  // lane). They render translucent and animate downward when the matching
+  // fret button is held, mirroring the GH "held fret" tell.
+  const ghostGemsRef = useRef<THREE.Group[]>([])
+  // Active GemExplosion FX. Each entry holds the cloned root + per-shard
+  // physics state — direction, velocity, angular velocity, etc. Ported from
+  // Assets/Art/Scripts/GemExplosion.cs so the shards actually fly apart with
+  // damping + gravity instead of a flat scale-fade.
+  interface ExplosionShard {
+    mesh: THREE.Object3D
+    velocity: THREE.Vector3
+    angularVelocity: THREE.Vector3
+  }
+  interface ActiveExplosion {
+    id: number
+    obj: THREE.Object3D
+    shards: ExplosionShard[]
+    startMs: number
+    lane: number
+  }
+  const explosionsRef = useRef<ActiveExplosion[]>([])
+  const explosionIdRef = useRef(0)
+  // Queue of explosion-spawn requests from parent — processed inside the rAF
+  // loop so we never touch three.js objects from outside it.
+  const explosionQueueRef = useRef<number[]>([])
+  const rafRef = useRef<number | null>(null)
+  const lastTimestampRef = useRef<number>(performance.now())
+  const lastPropsRef = useRef({ notes, tempoSegments, resolution, currentTime, scrollSpeed, scale, spinDegPerSec, explosionScale, angleDeg, perspectivePx, ghostRestY, ghostDropRange, depthPx, liftPx, highwayScroll, battleReverseScroll, battleInkSplatter })
+
+  useImperativeHandle(ref, () => ({
+    spawnExplosion: (lane: number) => {
+      if (lane < 0 || lane > 4) return
+      explosionQueueRef.current.push(lane)
+    },
+  }))
+
+  // Keep mutable props accessible from the rAF loop without re-creating it.
+  useEffect(() => {
+    lastPropsRef.current = { notes, tempoSegments, resolution, currentTime, scrollSpeed, scale, spinDegPerSec, explosionScale, angleDeg, perspectivePx, ghostRestY, ghostDropRange, depthPx, liftPx, highwayScroll, battleReverseScroll, battleInkSplatter }
+  }, [notes, tempoSegments, resolution, currentTime, scrollSpeed, scale, spinDegPerSec, explosionScale, angleDeg, perspectivePx, ghostRestY, ghostDropRange, depthPx, liftPx, highwayScroll, battleReverseScroll, battleInkSplatter])
+
+  // Initialise renderer once on mount; size & camera follow canvasW/H.
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+
+    const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true })
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+    renderer.setClearColor(0x000000, 0)
+    container.appendChild(renderer.domElement)
+    Object.assign(renderer.domElement.style, {
+      position: 'absolute', inset: '0', width: '100%', height: '100%',
+      pointerEvents: 'none',
+    } as Partial<CSSStyleDeclaration>)
+
+    const scene = new THREE.Scene()
+    // Lighting: ambient + directional from above-front so the facets read.
+    scene.add(new THREE.AmbientLight(0xffffff, 0.55))
+    const dir = new THREE.DirectionalLight(0xffffff, 0.95)
+    dir.position.set(0.3, 1.0, 0.5)
+    scene.add(dir)
+    // Runway floor — textured plane. Texture is loaded lazily by the
+    // highwayTextureUrl effect and applied to this material's .map.
+    const floorGeom = new THREE.PlaneGeometry(5.5, 60)
+    floorGeom.rotateX(-Math.PI / 2)
+    floorGeom.translate(0, 0, -29)
+    const floorMat = new THREE.MeshBasicMaterial({
+      color: 0x0e1422, transparent: true, opacity: 0.95, side: THREE.DoubleSide,
+    })
+    const floorMesh = new THREE.Mesh(floorGeom, floorMat)
+    floorMesh.renderOrder = 0
+    scene.add(floorMesh)
+    floorMeshRef.current = floorMesh
+    // Tint overlay — sits a hair above the floor, screens the texture with a
+    // colour the user picks. Hidden when opacity = 0.
+    const tintGeom = new THREE.PlaneGeometry(5.5, 60)
+    tintGeom.rotateX(-Math.PI / 2)
+    tintGeom.translate(0, 0.002, -29)
+    const tintMat = new THREE.MeshBasicMaterial({
+      color: 0x000000, transparent: true, opacity: 0, side: THREE.DoubleSide,
+      depthWrite: false,
+    })
+    const tintMesh = new THREE.Mesh(tintGeom, tintMat)
+    tintMesh.renderOrder = 1
+    scene.add(tintMesh)
+    tintMeshRef.current = tintMesh
+    // Lane separators — six thin planes lying flat on the floor, between
+    // each pair of lanes (plus outer borders). Each has a wider, fainter
+    // glow plane behind it for the outer-glow effect. Geometry is unit-size
+    // (1×1); we scale per-frame via .scale.set(width, 1, length).
+    for (let i = 0; i <= 5; i++) {
+      const x = (i - 2.5) * 1.0
+      const mkPlane = (yLift: number) => {
+        const g = new THREE.PlaneGeometry(1, 1)
+        g.rotateX(-Math.PI / 2)
+        const m = new THREE.Mesh(
+          g,
+          new THREE.MeshBasicMaterial({
+            color: 0xffffff, transparent: true, opacity: 1.0, side: THREE.DoubleSide,
+            depthWrite: false,
+          }),
+        )
+        m.position.set(x, yLift, -29)
+        return m
+      }
+      const glow = mkPlane(0.004)
+      glow.renderOrder = 2
+      glow.scale.set(0.08, 1, 58)
+      scene.add(glow)
+      sepGlowMeshesRef.current.push(glow)
+      const main = mkPlane(0.006)
+      main.renderOrder = 3
+      main.scale.set(0.025, 1, 58)
+      scene.add(main)
+      sepMainMeshesRef.current.push(main)
+    }
+    // Strike line — bright stripe at z=0 marking where notes hit.
+    const strikeGeom = new THREE.PlaneGeometry(5.0, 0.08)
+    strikeGeom.rotateX(-Math.PI / 2)
+    strikeGeom.translate(0, 0.008, 0)
+    const strikeMesh = new THREE.Mesh(strikeGeom, new THREE.MeshBasicMaterial({ color: 0xffffff, depthWrite: false }))
+    strikeMesh.renderOrder = 4
+    scene.add(strikeMesh)
+
+    // Perspective camera — the runway is rendered in true 3D so gems get
+    // proper depth foreshortening (far gems small, near gems large), and
+    // their positions trace the actual highway plane rather than a flat
+    // line tilted via CSS. FOV is derived per-frame from the perspectivePx
+    // slider so the slider keeps acting like "focal distance".
+    const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 5000)
+
+    rendererRef.current = renderer
+    sceneRef.current = scene
+    cameraRef.current = camera
+
+    return () => {
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current)
+      rafRef.current = null
+      renderer.dispose()
+      // Free pooled geometry/materials
+      for (const obj of lanePoolRef.current) {
+        obj.traverse((c) => {
+          const m = c as THREE.Mesh
+          if (m.isMesh) {
+            m.geometry?.dispose?.()
+            const mat = m.material as THREE.Material | THREE.Material[]
+            if (Array.isArray(mat)) mat.forEach((x) => x.dispose())
+            else mat?.dispose?.()
+          }
+        })
+      }
+      lanePoolRef.current = []
+      for (const g of ghostGemsRef.current) scene.remove(g)
+      ghostGemsRef.current = []
+      for (const e of explosionsRef.current) scene.remove(e.obj)
+      explosionsRef.current = []
+      explosionQueueRef.current = []
+      meshTemplateRef.current = null
+      explosionTemplateRef.current = null
+      try { container.removeChild(renderer.domElement) } catch {}
+    }
+  }, [])
+
+  // Resize whenever the host canvas does. Camera FOV / position update on
+  // the rAF loop so view3d slider tweaks are live.
+  useEffect(() => {
+    const renderer = rendererRef.current
+    const camera = cameraRef.current
+    if (!renderer || !camera) return
+    renderer.setSize(canvasW, canvasH, false)
+    camera.aspect = canvasW / Math.max(1, canvasH)
+    camera.updateProjectionMatrix()
+  }, [canvasW, canvasH])
+
+  // ── Highway texture ──────────────────────────────────────────────────────
+  // Load asynchronously and apply to the floor material. Tiles along the
+  // runway depth so long highways look continuous. Cleared (back to plain
+  // dark plane) when the dropdown is set to "no texture".
+  useEffect(() => {
+    const floor = floorMeshRef.current
+    if (!floor) return
+    const mat = floor.material as THREE.MeshBasicMaterial
+    if (!highwayTextureUrl) {
+      if (mat.map) { mat.map.dispose(); mat.map = null }
+      mat.color.setHex(0x0e1422)
+      mat.needsUpdate = true
+      return
+    }
+    const loader = new THREE.TextureLoader()
+    loader.setCrossOrigin('use-credentials')
+    let cancelled = false
+    loader.load(highwayTextureUrl, (tex) => {
+      if (cancelled) { tex.dispose(); return }
+      tex.wrapS = THREE.RepeatWrapping
+      tex.wrapT = THREE.RepeatWrapping
+      // Tile ~8× down the 60-unit runway so each tile is roughly square
+      // (5.5 wide vs ~7.5 long per tile).
+      tex.repeat.set(1, 8)
+      tex.colorSpace = THREE.SRGBColorSpace
+      if (mat.map) mat.map.dispose()
+      mat.map = tex
+      mat.color.setHex(0xffffff)  // tint = white so the texture shows its true colour
+      mat.needsUpdate = true
+    })
+    return () => { cancelled = true }
+  }, [highwayTextureUrl])
+
+  // ── Tint overlay ─────────────────────────────────────────────────────────
+  useEffect(() => {
+    const tint = tintMeshRef.current
+    if (!tint) return
+    const mat = tint.material as THREE.MeshBasicMaterial
+    mat.color.set(highwayTint)
+    mat.opacity = highwayTintOpacity
+    mat.visible = highwayTintOpacity > 0
+    mat.needsUpdate = true
+  }, [highwayTint, highwayTintOpacity])
+
+  // ── Lane separators ──────────────────────────────────────────────────────
+  // Hidden entirely when the inkSplatter debuff is on — the highway turns
+  // featureless black during the effect.
+  useEffect(() => {
+    const visible = laneSeparators && !battleInkSplatter
+    for (const m of sepMainMeshesRef.current) {
+      const mat = m.material as THREE.MeshBasicMaterial
+      mat.color.set(laneSeparatorColor)
+      mat.opacity = 1.0
+      m.visible = visible
+      m.scale.x = laneSeparatorWidth
+      mat.needsUpdate = true
+    }
+    for (const g of sepGlowMeshesRef.current) {
+      const mat = g.material as THREE.MeshBasicMaterial
+      mat.color.set(laneSeparatorColor)
+      mat.opacity = laneSeparatorGlow
+      g.visible = visible && laneSeparatorGlow > 0
+      g.scale.x = laneSeparatorWidth * 4
+      mat.needsUpdate = true
+    }
+  }, [laneSeparators, laneSeparatorColor, laneSeparatorWidth, laneSeparatorGlow, battleInkSplatter])
+
+  // ── Ink splatter floor override ──────────────────────────────────────────
+  // material.color is multiplied with .map's sampled colour, so setting it
+  // to pure black gives a featureless black floor without unloading the
+  // texture. Toggling off restores the original colour the texture-load
+  // effect set (white when a texture is selected, dark blue otherwise).
+  useEffect(() => {
+    const floor = floorMeshRef.current
+    if (!floor) return
+    const mat = floor.material as THREE.MeshBasicMaterial
+    if (battleInkSplatter) {
+      mat.color.setHex(0x000000)
+    } else {
+      mat.color.setHex(highwayTextureUrl ? 0xffffff : 0x0e1422)
+    }
+    mat.needsUpdate = true
+  }, [battleInkSplatter, highwayTextureUrl])
+
+  // Silence the "unused" linter for refs/arrays not read in TSX body
+  void legacyLineObjsRef
+
+  // Load (or unload) the selected mesh. Recycles instance pool when the
+  // template changes.
+  useEffect(() => {
+    const scene = sceneRef.current
+    if (!scene) return
+    // Drop any active instances from the previous mesh, plus ghost gems and
+    // in-flight explosions (their templates also change with the gem mesh).
+    for (const obj of lanePoolRef.current) scene.remove(obj)
+    lanePoolRef.current = []
+    for (const obj of ghostGemsRef.current) scene.remove(obj)
+    ghostGemsRef.current = []
+    for (const e of explosionsRef.current) scene.remove(e.obj)
+    explosionsRef.current = []
+    explosionQueueRef.current = []
+    meshTemplateRef.current = null
+    explosionTemplateRef.current = null
+    if (!meshUrl) return
+
+    let cancelled = false
+    // For solid gem meshes we bake the centre+scale into each child geometry
+    // so per-instance .scale.setScalar(N) maps cleanly to N world units.
+    // For the explosion shard cluster we DON'T touch child geometries — each
+    // shard's original local position is the resting point from which it
+    // launches, and that information would be destroyed by geometry centering.
+    // Instead we just scale the root so the assembly fits in roughly a unit
+    // bounding box.
+    const normaliseGemFbx = (fbx: THREE.Object3D) => {
+      const box = new THREE.Box3().setFromObject(fbx)
+      const size = box.getSize(new THREE.Vector3())
+      const maxDim = Math.max(size.x, size.y, size.z) || 1
+      const center = box.getCenter(new THREE.Vector3())
+      fbx.traverse((c) => {
+        const m = c as THREE.Mesh
+        if (m.isMesh && m.geometry) {
+          m.geometry.translate(-center.x, -center.y, -center.z)
+          m.geometry.scale(1 / maxDim, 1 / maxDim, 1 / maxDim)
+          m.geometry.computeBoundingSphere?.()
+        }
+      })
+      fbx.position.set(0, 0, 0)
+      fbx.scale.set(1, 1, 1)
+      fbx.rotation.set(0, 0, 0)
+    }
+    const normaliseExplosionFbx = (fbx: THREE.Object3D) => {
+      const box = new THREE.Box3().setFromObject(fbx)
+      const size = box.getSize(new THREE.Vector3())
+      const maxDim = Math.max(size.x, size.y, size.z) || 1
+      const center = box.getCenter(new THREE.Vector3())
+      const s = 1 / maxDim
+      // Bake everything into the shards directly so the FBX root stays at
+      // identity. For each shard:
+      //   • geometry scaled to unit size
+      //   • mesh position pulled toward the cluster centre then scaled,
+      //     so children sit in roughly [-0.5, 0.5] local space.
+      fbx.traverse((c) => {
+        const m = c as THREE.Mesh
+        if (m.isMesh && m.geometry) {
+          m.geometry.scale(s, s, s)
+          m.geometry.computeBoundingSphere?.()
+          m.position.sub(center).multiplyScalar(s)
+        }
+      })
+      fbx.position.set(0, 0, 0)
+      fbx.scale.set(1, 1, 1)
+      fbx.rotation.set(0, 0, 0)
+    }
+    const loadFbx = async (url: string, normalise: (o: THREE.Object3D) => void): Promise<THREE.Object3D> => {
+      const res = await fetch(url, { credentials: 'include' })
+      if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`)
+      const buf = await res.arrayBuffer()
+      const fbx = new FBXLoader().parse(buf, '')
+      normalise(fbx)
+      return fbx
+    }
+    ;(async () => {
+      try {
+        const fbx = await loadFbx(meshUrl, normaliseGemFbx)
+        if (cancelled) return
+        meshTemplateRef.current = fbx
+      } catch (e) {
+        if (!cancelled) console.error('[GemMeshLayer] mesh load failed', meshUrl, e)
+      }
+    })()
+    // Load the explosion FBX in parallel — it's small (~35 KB) so this is a
+    // cheap upfront cost that avoids first-hit latency.
+    ;(async () => {
+      try {
+        const exp = await loadFbx(explosionUrl, normaliseExplosionFbx)
+        if (cancelled) return
+        explosionTemplateRef.current = exp
+      } catch (e) {
+        if (!cancelled) console.warn('[GemMeshLayer] explosion mesh load failed', explosionUrl, e)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [meshUrl, explosionUrl])
+
+  // Build N evenly-distributed outward direction vectors via the Fibonacci
+  // sphere — ported from BuildSphericalDirections in GemExplosion.cs. The
+  // centroid is subtracted so the directions sum to zero and the cluster's
+  // centre of motion stays locked on the explosion origin.
+  const buildSphericalDirections = useCallback((n: number): THREE.Vector3[] => {
+    const dirs: THREE.Vector3[] = []
+    if (n === 0) return dirs
+    const goldenAngle = Math.PI * (1 + Math.sqrt(5))
+    let sx = 0, sy = 0, sz = 0
+    for (let i = 0; i < n; i++) {
+      const phi = Math.acos(1 - 2 * (i + 0.5) / n)
+      const theta = goldenAngle * i
+      const sinPhi = Math.sin(phi)
+      const x = sinPhi * Math.cos(theta)
+      const y = Math.cos(phi)
+      const z = sinPhi * Math.sin(theta)
+      dirs.push(new THREE.Vector3(x, y, z))
+      sx += x; sy += y; sz += z
+    }
+    const cx = sx / n, cy = sy / n, cz = sz / n
+    for (const d of dirs) {
+      d.x -= cx; d.y -= cy; d.z -= cz
+      const m = d.length()
+      if (m > 0.0001) d.multiplyScalar(1 / m)
+      else d.set(0, 1, 0)
+    }
+    return dirs
+  }, [])
+
+  // Animation loop. Drives all per-frame placement so the gems track scrub +
+  // playback without React re-renders per frame.
+  useEffect(() => {
+    const renderer = rendererRef.current
+    const scene = sceneRef.current
+    const camera = cameraRef.current
+    if (!renderer || !scene || !camera) return
+
+    const tick = (now: number) => {
+      rafRef.current = requestAnimationFrame(tick)
+      const dtSec = Math.min(0.1, (now - lastTimestampRef.current) / 1000)
+      lastTimestampRef.current = now
+
+      const template = meshTemplateRef.current
+      const props = lastPropsRef.current
+
+      // World units: 1 unit ≈ one lane width. Five lanes span ~5 units; depth
+      // is computed as "seconds-to-strike × Z_PER_SECOND" so a tweak to the
+      // 2D scroll-speed slider also scales the 3D scroll. Camera lives in
+      // the same coordinate system.
+      const W = renderer.domElement.width / (renderer.getPixelRatio() || 1)
+      const H = renderer.domElement.height / (renderer.getPixelRatio() || 1)
+      const Z_PER_SECOND = 4.0
+      const LANE_UNIT = 1.0
+      const baseGemSize = 0.32 * Math.max(0.05, props.scale)
+
+      // FOV from perspectivePx (matches the CSS perspective opening angle).
+      const fovRad = 2 * Math.atan(H / (2 * Math.max(50, props.perspectivePx)))
+      camera.fov = fovRad * 180 / Math.PI
+      camera.aspect = W / Math.max(1, H)
+
+      // Polar camera: pitched down by angleDeg, at a distance from the strike
+      // point that the Depth slider can adjust. Lift slider then rotates the
+      // camera up beyond the lookAt to push the strike toward the viewport
+      // bottom — same framing knob as GH "highway tilt".
+      //
+      // Depth mapping: depthPx of 0 = baseline 5 wu; +ve = camera further
+      // (smaller runway), -ve = closer (bigger runway). 0.01 wu/px keeps
+      // the slider's pixel range feeling natural.
+      // Lift mapping: liftPx in [-200, 300] maps to additional pitch in
+      // [-0.5, 1.6] × halfFov, so +ve = strike line drops, hitting the
+      // viewport's bottom edge near +200.
+      const camDist = Math.max(1.5, 5.0 + props.depthPx * 0.01)
+      const tiltRad = props.angleDeg * Math.PI / 180
+      camera.position.set(
+        0,
+        camDist * Math.sin(tiltRad),
+        camDist * Math.cos(tiltRad),
+      )
+      camera.lookAt(0, 0, 0)
+      const halfFov = (camera.fov * Math.PI / 180) * 0.5
+      const pitchFactor = 0.45 + props.liftPx * 0.004
+      camera.rotateX(halfFov * pitchFactor)
+      camera.updateProjectionMatrix()
+
+      // Highway-texture scrolling — the gems flow toward the camera at
+      // Z_PER_SECOND world-units/sec, so the floor texture's V offset must
+      // change at the same rate (per tile world-length) to lock visually.
+      // Tile world length = plane depth (60) / repeat.y (8) = 7.5.
+      const floorForScroll = floorMeshRef.current
+      if (floorForScroll) {
+        const mat = floorForScroll.material as THREE.MeshBasicMaterial
+        if (mat.map) {
+          if (props.highwayScroll) {
+            // Z_PER_SECOND = 4 (kept in sync with the gem-pos calc below).
+            // Default flows TOWARD the camera (same direction gems travel).
+            // Reverse-scroll battle debuff flips the sign so the highway
+            // scrolls toward the horizon — disorienting on purpose.
+            const baseOffset = (props.currentTime * (4 / 7.5)) % 1
+            mat.map.offset.y = props.battleReverseScroll ? -baseOffset : baseOffset
+          } else if (mat.map.offset.y !== 0) {
+            mat.map.offset.y = 0
+          }
+        }
+      }
+
+      if (!template) {
+        renderer.render(scene, camera)
+        return
+      }
+
+      // Visibility window in seconds — extend a bit beyond the 2D draw so
+      // gems fade in from far away rather than popping.
+      const topSec = props.currentTime + 3.0
+      const bottomSec = props.currentTime - 0.5
+      const t2s = (t: number) => tickToSec(props.tempoSegments, props.resolution, t)
+
+      const visible: { worldX: number; worldZ: number; lane: number }[] = []
+      for (const n of props.notes) {
+        if (n.lane > 4) continue
+        const ns = t2s(n.tick)
+        if (ns < bottomSec || ns > topSec) continue
+        const ahead = ns - props.currentTime  // seconds, positive = future
+        visible.push({
+          worldX: (n.lane - 2) * LANE_UNIT,  // -2 = lane 0 leftmost
+          worldZ: -ahead * Z_PER_SECOND,
+          lane: n.lane,
+        })
+      }
+      // Silence the "W is unused" linter — the value was read for FOV math
+      void W
+
+      // Pool of mesh clones. Each carries the gem material so we can re-tint
+      // per-instance without leaking colour through shared materials.
+      const pool = lanePoolRef.current
+      while (pool.length < visible.length) {
+        const inst = template.clone(true)
+        inst.traverse((c) => {
+          const m = c as THREE.Mesh
+          if (m.isMesh) {
+            m.material = new THREE.MeshStandardMaterial({
+              color: 0xffffff, metalness: 0.35, roughness: 0.4,
+              side: THREE.DoubleSide,
+            })
+          }
+        })
+        pool.push(inst)
+        scene.add(inst)
+      }
+      while (pool.length > visible.length) {
+        const inst = pool.pop()!
+        scene.remove(inst)
+      }
+
+      const spin = props.spinDegPerSec * (Math.PI / 180) * dtSec
+      for (let i = 0; i < visible.length; i++) {
+        const { worldX, worldZ, lane } = visible[i]
+        const inst = pool[i]
+        // Park gems at half-height so they appear to sit on the runway plane
+        inst.position.set(worldX, baseGemSize * 0.5, worldZ)
+        inst.scale.setScalar(baseGemSize)
+        inst.rotation.y += spin
+        inst.traverse((c) => {
+          const m = c as THREE.Mesh
+          if (m.isMesh) {
+            const mat = m.material as THREE.MeshStandardMaterial
+            if (props.battleInkSplatter) {
+              // Glossy black — barely any diffuse colour, mirror-like surface
+              mat.color.setHex(0x0a0a0a)
+              mat.metalness = 0.95
+              mat.roughness = 0.08
+            } else {
+              mat.color.setHex(LANE_COLOR_HEX[lane])
+              mat.metalness = 0.35
+              mat.roughness = 0.4
+            }
+          }
+        })
+      }
+
+      // ── Ghost gems ────────────────────────────────────────────────────────
+      // Lazy-create one ghost per lane the first time we have a template.
+      if (ghostGemsRef.current.length === 0) {
+        for (let lane = 0; lane < 5; lane++) {
+          const inst = template.clone(true)
+          inst.traverse((c) => {
+            const m = c as THREE.Mesh
+            if (m.isMesh) {
+              m.material = new THREE.MeshStandardMaterial({
+                color: LANE_COLOR_HEX[lane],
+                metalness: 0.25, roughness: 0.55,
+                transparent: true, opacity: 0.5,
+                side: THREE.DoubleSide,
+              })
+            }
+          })
+          const wrap = new THREE.Group()
+          wrap.add(inst)
+          // Park at the raised rest position from the start so the first
+          // frame doesn't lerp from world origin.
+          wrap.position.set((lane - 2) * LANE_UNIT, baseGemSize * props.ghostRestY, 0)
+          wrap.scale.setScalar(baseGemSize)
+          scene.add(wrap)
+          ghostGemsRef.current.push(wrap)
+        }
+      }
+      // Animate each ghost toward "rest" (raised above the strike) or
+      // "pressed" (dropped to exactly the height a falling highway gem sits
+      // at as it crosses the strike line — `baseGemSize * 0.5`). This way the
+      // ghost merges with the incoming gem at the moment of the hit instead
+      // of being below it.
+      const held = heldFretsRef.current
+      // Diagnostic: expose what the 3D layer is reading on window so it can
+      // be compared with the sidebar's Held strip. If the two disagree we
+      // have a ref/closure bug; if they agree, the issue is downstream
+      // (visibility, lerp, occlusion).
+      ;(window as unknown as { __ghostHeld?: number[] }).__ghostHeld = [...held].sort((a, b) => a - b)
+      const RESTING_Y = baseGemSize * props.ghostRestY
+      const PRESSED_Y = baseGemSize * (props.ghostRestY - props.ghostDropRange)
+      for (let lane = 0; lane < 5; lane++) {
+        const ghost = ghostGemsRef.current[lane]
+        if (!ghost) continue
+        const isPressed = held.has(lane)
+        const targetY = isPressed ? PRESSED_Y : RESTING_Y
+        const targetScale = baseGemSize * (isPressed ? 0.95 : 1.0)
+        const lerp = Math.min(1, dtSec * 18)
+        ghost.position.x = (lane - 2) * LANE_UNIT
+        ghost.position.y += (targetY - ghost.position.y) * lerp
+        ghost.position.z = 0
+        const curScale = ghost.scale.x
+        ghost.scale.setScalar(curScale + (targetScale - curScale) * lerp)
+        const innerGem = ghost.children[0]
+        if (innerGem) {
+          innerGem.rotation.y += spin * 0.5
+          // Ink-splatter overrides ghost colour/finish too so the whole
+          // strike line goes glossy black during the debuff.
+          innerGem.traverse((c) => {
+            const m = c as THREE.Mesh
+            if (m.isMesh) {
+              const mat = m.material as THREE.MeshStandardMaterial
+              if (props.battleInkSplatter) {
+                mat.color.setHex(0x0a0a0a)
+                mat.metalness = 0.95
+                mat.roughness = 0.08
+                mat.opacity = 0.55
+              } else {
+                mat.color.setHex(LANE_COLOR_HEX[lane])
+                mat.metalness = 0.25
+                mat.roughness = 0.55
+                mat.opacity = 0.5
+              }
+            }
+          })
+        }
+      }
+
+      // ── Explosion FX ──────────────────────────────────────────────────────
+      // Ports the shard physics from Assets/Art/Scripts/GemExplosion.cs:
+      //   v(t+dt) = v * exp(-linearDamping * dt) + gravity * dt
+      //   pos    += v * dt
+      //   rot    *= axisAngle(angVel * dt)
+      //   angVel *= exp(-angularDamping * dt)
+      // Each shard gets a Fibonacci-sphere direction so the cluster fans out
+      // evenly. Jitter on burst speed, lift, and spin keeps repeats varied.
+      // Tuned for our scaled-down explosion space — shards live in fbx-local
+      // coords (~unit-sized cluster), wrapped by a baseGemSize-scaled Group
+      // (~0.32 wu by default). Original Unity values are too tame here, so
+      // burst is boosted and damping eased so the cluster reaches ~1 wu.
+      const EXPLOSION_BURST = 15.0
+      const EXPLOSION_UPWARD = 2.0
+      const EXPLOSION_RANDOMNESS = 0.25
+      const EXPLOSION_LIN_DAMP = 4
+      const EXPLOSION_ANG_DAMP = 2
+      const EXPLOSION_SPIN = 14            // rad/s
+      const EXPLOSION_GRAVITY_Y = -20
+      const EXPLOSION_LIFETIME_MS = 700
+
+      const expTpl = explosionTemplateRef.current
+      while (explosionQueueRef.current.length > 0) {
+        const lane = explosionQueueRef.current.shift()!
+        if (!expTpl) {
+          // FBX still loading — drop this spawn rather than holding a
+          // long-tail queue that fires once the asset arrives.
+          continue
+        }
+        const root = expTpl.clone(true)
+        // Template was baked at identity by normaliseExplosionFbx — no need
+        // to reset the clone's transform. Each shard's local position is
+        // already in unit space.
+        // Tint every shard with the lane colour, transparent for fade-out.
+        const shardMeshes: THREE.Object3D[] = []
+        root.traverse((c) => {
+          const m = c as THREE.Mesh
+          if (m.isMesh) {
+            m.material = new THREE.MeshStandardMaterial({
+              color: LANE_COLOR_HEX[lane],
+              emissive: LANE_COLOR_HEX[lane],
+              emissiveIntensity: 0.5,
+              metalness: 0.3, roughness: 0.4,
+              transparent: true, opacity: 1.0,
+              side: THREE.DoubleSide,
+            })
+            shardMeshes.push(m)
+          }
+        })
+        // Wrapper holds the position + scale; shards animate relative to it.
+        // explosionScale lets the user shrink the burst independently of the
+        // gem mesh — for less visual chaos on busy strums.
+        const wrap = new THREE.Group()
+        wrap.add(root)
+        wrap.position.set((lane - 2) * LANE_UNIT, baseGemSize * 0.5, 0)
+        wrap.scale.setScalar(baseGemSize * Math.max(0.05, props.explosionScale))
+        scene.add(wrap)
+
+        // Assign per-shard physics state.
+        const dirs = buildSphericalDirections(shardMeshes.length)
+        const shards: ExplosionShard[] = shardMeshes.map((mesh, i) => {
+          const dir = dirs[i]
+          const burstJit = 1 + (Math.random() * 2 - 1) * EXPLOSION_RANDOMNESS
+          const liftJit = 1 + (Math.random() * 2 - 1) * EXPLOSION_RANDOMNESS
+          const spinJit = 1 + (Math.random() * 2 - 1) * EXPLOSION_RANDOMNESS
+          const velocity = new THREE.Vector3(
+            dir.x * EXPLOSION_BURST * burstJit,
+            dir.y * EXPLOSION_BURST * burstJit + EXPLOSION_UPWARD * liftJit,
+            dir.z * EXPLOSION_BURST * burstJit,
+          )
+          // Spin axis perpendicular to travel — same trick as the Unity script
+          let axis = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0, 1, 0))
+          if (axis.lengthSq() < 0.0001) axis.set(1, 0, 0)
+          axis.normalize()
+          const angularVelocity = axis.multiplyScalar(EXPLOSION_SPIN * spinJit)
+          return { mesh, velocity, angularVelocity }
+        })
+
+        explosionsRef.current.push({
+          id: ++explosionIdRef.current,
+          obj: wrap,
+          shards,
+          startMs: now,
+          lane,
+        })
+      }
+
+      // Integrate active explosions.
+      const stillActive: ActiveExplosion[] = []
+      for (const e of explosionsRef.current) {
+        const elapsed = now - e.startMs
+        if (elapsed >= EXPLOSION_LIFETIME_MS) {
+          scene.remove(e.obj)
+          e.obj.traverse((c) => {
+            const m = c as THREE.Mesh
+            if (m.isMesh) {
+              const mat = m.material as THREE.Material | THREE.Material[]
+              if (Array.isArray(mat)) mat.forEach((x) => x.dispose())
+              else mat?.dispose?.()
+            }
+          })
+          continue
+        }
+        const t = elapsed / EXPLOSION_LIFETIME_MS
+        const linDamp = Math.exp(-EXPLOSION_LIN_DAMP * dtSec)
+        const angDamp = Math.exp(-EXPLOSION_ANG_DAMP * dtSec)
+        const gyStep = EXPLOSION_GRAVITY_Y * dtSec
+        for (const s of e.shards) {
+          // v = v * linDamp + gravity*dt
+          s.velocity.multiplyScalar(linDamp)
+          s.velocity.y += gyStep
+          s.angularVelocity.multiplyScalar(angDamp)
+          // pos += v * dt (in wrapper-local units, but the wrapper is scaled
+          // by baseGemSize ≈ 0.32 so the per-second burst of 4 traverses
+          // about 1.3 world units / second in screen space — visually about
+          // right for a quick pop at the strike line).
+          s.mesh.position.x += s.velocity.x * dtSec
+          s.mesh.position.y += s.velocity.y * dtSec
+          s.mesh.position.z += s.velocity.z * dtSec
+          // Rotation: axis-angle on the spin vector
+          const avMag = s.angularVelocity.length()
+          if (avMag > 0.0001) {
+            const q = new THREE.Quaternion().setFromAxisAngle(
+              s.angularVelocity.clone().multiplyScalar(1 / avMag),
+              avMag * dtSec,
+            )
+            s.mesh.quaternion.premultiply(q)
+          }
+        }
+        // Fade opacity over the back half of the lifetime so the shards stay
+        // bright while they're still flying.
+        const opacity = t < 0.5 ? 1.0 : Math.max(0, 1 - (t - 0.5) * 2)
+        e.obj.traverse((c) => {
+          const m = c as THREE.Mesh
+          if (m.isMesh) {
+            const mat = m.material as THREE.MeshStandardMaterial
+            mat.opacity = opacity
+          }
+        })
+        stillActive.push(e)
+      }
+      explosionsRef.current = stillActive
+
+      renderer.render(scene, camera)
+    }
+    rafRef.current = requestAnimationFrame(tick)
+    return () => {
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current)
+    }
+  }, [])
+
+  return (
+    <div
+      ref={containerRef}
+      className="absolute inset-0 pointer-events-none"
+    />
+  )
+})
+
+// BackgroundLayer -------------------------------------------------------------
+// Renders the optional video that sits behind the highway. YouTube goes
+// through an iframe embed (muted, autoplay, looped). Uploaded video files
+// play via a native <video> element with the audio track muted, and follow
+// the editor's audio playhead — paused when the song is paused, seeking
+// when the user scrubs (jump-only, no per-frame writes since the browser
+// already lerps between updates).
+
+function BackgroundLayer({
+  kind, ytId, videoUrl, currentTime, playing,
+}: {
+  kind: 'youtube' | 'video'
+  ytId: string
+  videoUrl: string
+  currentTime: number
+  playing: boolean
+}) {
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+
+  // Keep the <video> playing/paused in sync with the song transport.
+  useEffect(() => {
+    const v = videoRef.current
+    if (!v) return
+    if (playing) v.play().catch(() => undefined)
+    else v.pause()
+  }, [playing])
+
+  // Re-seek when the audio's currentTime drifts away from the video by more
+  // than a small threshold (manual scrubs, jumps). Avoid setting every frame
+  // — small natural drift is invisible and writing currentTime every frame
+  // stutters playback.
+  useEffect(() => {
+    const v = videoRef.current
+    if (!v) return
+    if (Math.abs(v.currentTime - currentTime) > 0.25) {
+      try { v.currentTime = Math.max(0, currentTime) } catch {}
+    }
+  }, [currentTime])
+
+  return (
+    <div className="absolute inset-0 pointer-events-none" style={{ zIndex: 0 }}>
+      {kind === 'youtube' && ytId && (
+        <iframe
+          src={`https://www.youtube.com/embed/${ytId}?autoplay=1&mute=1&controls=0&loop=1&playlist=${ytId}&modestbranding=1&playsinline=1&rel=0`}
+          title="background"
+          allow="autoplay; encrypted-media"
+          // No allowfullscreen — this is a background, not interactive
+          className="absolute inset-0 w-full h-full"
+          style={{ border: 0, opacity: 0.55, objectFit: 'cover' }}
+        />
+      )}
+      {kind === 'video' && videoUrl && (
+        <video
+          ref={videoRef}
+          src={videoUrl}
+          autoPlay
+          muted
+          loop
+          playsInline
+          className="absolute inset-0 w-full h-full"
+          style={{ objectFit: 'cover', opacity: 0.6 }}
+        />
+      )}
+    </div>
+  )
+}
+
+// CollapsibleSection ----------------------------------------------------------
+// Wraps a sidebar panel so its body can be hidden behind the header. Open/closed
+// state is persisted per `id` in localStorage so user preference sticks across
+// reloads. Header gets a chevron + the panel title; an optional `right` slot
+// can hold action buttons (Add-at-playhead, scan, reset, etc) that don't toggle.
+
+function CollapsibleSection({
+  id, title, right, defaultOpen = true, children,
+}: {
+  id: string
+  title: string
+  right?: React.ReactNode
+  defaultOpen?: boolean
+  children: React.ReactNode
+}) {
+  const storageKey = `editor.panel.${id}.open`
+  const [open, setOpen] = useState<boolean>(() => {
+    try {
+      const v = localStorage.getItem(storageKey)
+      return v === null ? defaultOpen : v === '1'
+    } catch { return defaultOpen }
+  })
+  useEffect(() => {
+    try { localStorage.setItem(storageKey, open ? '1' : '0') } catch {}
+  }, [open, storageKey])
+  return (
+    <section>
+      <div
+        className="flex items-center justify-between cursor-pointer select-none group mb-2"
+        onClick={(e) => {
+          // Don't toggle when the click hits a button / input in the right slot
+          if ((e.target as HTMLElement).closest('button, a, input, select, label')) return
+          setOpen((o) => !o)
+        }}
+      >
+        <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider group-hover:text-gray-200 transition-colors flex items-center gap-1">
+          <span className="text-[9px] text-gray-600 group-hover:text-gray-400 inline-block w-2.5 transition-transform" style={{ transform: open ? 'rotate(90deg)' : 'none' }}>
+            ▶
+          </span>
+          {title}
+        </h3>
+        {right}
+      </div>
+      {open && children}
+    </section>
   )
 }
 
@@ -1192,6 +2301,31 @@ export default function BeatmapEditor() {
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
   const [scrollSpeed, setScrollSpeed] = useState(450)
+  // 3D-perspective preview. The canvas keeps drawing in 2D pixel space; we
+  // tilt the rendered surface via CSS so the existing draw loop is untouched.
+  // Editing (click/drag) is gated off in 3D since hit-testing assumes a
+  // non-transformed canvas — wheel scrub and the playhead transport still
+  // work. Settings persist in localStorage so each user's framing sticks.
+  const [view3d, setView3d] = useState<View3DState>(() => loadView3d())
+  useEffect(() => {
+    try { localStorage.setItem('editor.view3d', JSON.stringify(view3d)) } catch {}
+  }, [view3d])
+  const [gemMeshes, setGemMeshes] = useState<GemMeshInfo[]>([])
+  const [highwayTextures, setHighwayTextures] = useState<HighwayTextureInfo[]>([])
+  useEffect(() => {
+    fetch('/api/gem-meshes')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { meshes: GemMeshInfo[] } | null) => {
+        if (data?.meshes) setGemMeshes(data.meshes)
+      })
+      .catch(() => undefined)
+    fetch('/api/highway-textures')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { textures: HighwayTextureInfo[] } | null) => {
+        if (data?.textures) setHighwayTextures(data.textures)
+      })
+      .catch(() => undefined)
+  }, [])
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [tool, setTool] = useState<'select' | 'note' | 'real'>('select')
   // Undo/redo history. Each entry is a snapshot of `notes` (plus the active
@@ -1267,7 +2401,631 @@ export default function BeatmapEditor() {
   // WebAudio with pre-decoded AudioBuffers; the slot resolution is in
   // _resolveRealNoteSlot below.
   const [realNotesEnabled, setRealNotesEnabled] = useState(true)
+
+  // ── Background panel — video behind the highway ───────────────────────────
+  // Three modes:
+  //   • none      — no video, plain black background (default)
+  //   • youtube   — embed a YouTube URL muted + autoplay + loop
+  //   • video     — play an uploaded file (also muted) via <video>
+  // Config + the source YouTube URL the track was ingested from live in
+  // song.ini's [background] section. We hold the live state in React and
+  // PATCH song.ini when the user saves a change.
+  type BackgroundKind = 'none' | 'youtube' | 'video'
+  const [bgKind, setBgKind] = useState<BackgroundKind>('none')
+  const [bgValue, setBgValue] = useState('')
+  const [bgSourceUrl, setBgSourceUrl] = useState('')
+  // True when we've loaded the persisted state at least once; avoids the
+  // sidebar flickering "none" before song.ini comes back.
+  const [bgLoaded, setBgLoaded] = useState(false)
+  // Most-recently-saved snapshot for the dirty indicator.
+  const [bgSaved, setBgSaved] = useState<{ kind: BackgroundKind; value: string }>({ kind: 'none', value: '' })
+  const bgDirty = bgKind !== bgSaved.kind || bgValue !== bgSaved.value
+
+  // Load song.ini's background fields on mount + when track changes.
+  useEffect(() => {
+    if (!trackId) return
+    let cancelled = false
+    fetch(`/api/tracks/${trackId}/song-ini`)
+      .then((r) => (r.ok ? r.json() : {}))
+      .then((data: Record<string, string>) => {
+        if (cancelled) return
+        const kind = (data.background_kind || 'none') as BackgroundKind
+        const value = data.background_value || ''
+        setBgKind(kind === 'youtube' || kind === 'video' ? kind : 'none')
+        setBgValue(value)
+        setBgSaved({ kind: kind === 'youtube' || kind === 'video' ? kind : 'none', value })
+        setBgSourceUrl(data.youtube_source_url || '')
+        setBgLoaded(true)
+      })
+      .catch(() => { if (!cancelled) setBgLoaded(true) })
+    return () => { cancelled = true }
+  }, [trackId])
+
+  const saveBackground = useCallback(async () => {
+    if (!trackId) return
+    try {
+      // PATCH merges into existing song.ini — we need to re-fetch + spread
+      // so we don't blow away non-background fields like name / artist etc.
+      const cur = await fetch(`/api/tracks/${trackId}/song-ini`).then((r) => r.ok ? r.json() : {})
+      const next = {
+        ...cur,
+        background_kind: bgKind,
+        background_value: bgValue,
+        youtube_source_url: bgSourceUrl,
+      }
+      const fd = new FormData()
+      fd.append('fields', JSON.stringify(next))
+      const res = await fetch(`/api/tracks/${trackId}/song-ini`, { method: 'PATCH', body: fd })
+      if (!res.ok) throw new Error(`${res.status}`)
+      setBgSaved({ kind: bgKind, value: bgValue })
+    } catch (e) {
+      console.error('[background] save failed', e)
+    }
+  }, [trackId, bgKind, bgValue, bgSourceUrl])
+
+  const uploadBackgroundVideo = useCallback(async (file: File) => {
+    if (!trackId) return
+    const fd = new FormData()
+    fd.append('file', file)
+    const res = await fetch(`/api/tracks/${trackId}/background-video`, { method: 'POST', body: fd })
+    if (!res.ok) {
+      console.error('[background] upload failed', await res.text())
+      return
+    }
+    const data = await res.json() as { filename: string }
+    setBgKind('video')
+    setBgValue(data.filename)
+  }, [trackId])
+
+  // Extract a YouTube video id from any common URL shape so the iframe URL
+  // is straightforward to construct. Returns '' if nothing matches.
+  const ytId = useMemo(() => {
+    const src = bgKind === 'youtube' ? bgValue : ''
+    if (!src) return ''
+    const m =
+      src.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/v\/)([A-Za-z0-9_-]{6,32})/)
+      ?? src.match(/^([A-Za-z0-9_-]{6,32})$/)
+    return m ? m[1] : ''
+  }, [bgKind, bgValue])
   const [realNotesVolume, setRealNotesVolume] = useState(0.8)
+
+  // ── Player input (Bluetooth / USB guitar via Gamepad API) ─────────────────
+  // Play mode:
+  //   • autohit — existing behaviour: real-note samples auto-fire when the
+  //     playhead crosses each tick.
+  //   • live    — the player drives the hits. Real-notes only fire when the
+  //     player strums while holding the right fret combo near the strike.
+  const [playMode, setPlayMode] = useState<'autohit' | 'live'>(() =>
+    (localStorage.getItem('editor.playMode') as 'autohit' | 'live') || 'autohit',
+  )
+
+  // Performer mode — hide both sidebars + the top header so the highway
+  // fills the window. A small floating toggle lives at the top-right corner
+  // of the canvas and `Esc` (or F11-style) restores the chrome.
+  const [maxHighway, setMaxHighway] = useState(false)
+  useEffect(() => {
+    if (!maxHighway) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMaxHighway(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [maxHighway])
+  useEffect(() => {
+    try { localStorage.setItem('editor.playMode', playMode) } catch {}
+  }, [playMode])
+
+  // ── Live-play scoring ─────────────────────────────────────────────────────
+  // Hit windows lifted from Assets/Scripts/Jamsesh/Gameplay/Guitar/Playback/
+  // GuitarJudge.cs — perfect / good (= early-late) / okay (= veryEarly-veryLate).
+  // okWindow is the early side; lateOkWindow is the (tighter) late side.
+  const HIT_PERFECT_SEC = 0.060
+  const HIT_GOOD_SEC = 0.120     // beyond perfect but within Good = Early/Late
+  const HIT_EARLY_OK_SEC = 0.200 // beyond Good but accepted as VeryEarly
+  const HIT_LATE_OK_SEC = 0.150  // tighter late side — beyond this = miss
+  type Tier = 'perfect' | 'early' | 'late' | 'veryEarly' | 'veryLate'
+
+  interface ScoringSettings {
+    targets: Record<string, number>           // max score per difficulty section name
+    multipliers: Record<Tier, number>         // points × multiplier per tier
+  }
+  const DEFAULT_SCORING_SETTINGS: ScoringSettings = {
+    targets: {
+      EasySingle: 500_000,
+      MediumSingle: 1_000_000,
+      HardSingle: 1_750_000,
+      ExpertSingle: 2_500_000,
+    },
+    multipliers: {
+      veryEarly: 0.30,
+      early: 0.65,
+      perfect: 1.0,
+      late: 0.65,
+      veryLate: 0.30,
+    },
+  }
+  const [scoringSettings, setScoringSettings] = useState<ScoringSettings>(() => {
+    try {
+      const raw = localStorage.getItem('editor.scoring')
+      if (!raw) return DEFAULT_SCORING_SETTINGS
+      const parsed = JSON.parse(raw) as Partial<ScoringSettings>
+      return {
+        targets: { ...DEFAULT_SCORING_SETTINGS.targets, ...(parsed.targets ?? {}) },
+        multipliers: { ...DEFAULT_SCORING_SETTINGS.multipliers, ...(parsed.multipliers ?? {}) },
+      }
+    } catch {
+      return DEFAULT_SCORING_SETTINGS
+    }
+  })
+  useEffect(() => {
+    try { localStorage.setItem('editor.scoring', JSON.stringify(scoringSettings)) } catch {}
+  }, [scoringSettings])
+
+  // Live per-pass scoring state. Reset whenever play starts from the
+  // beginning, the user seeks before the first note, or the difficulty
+  // changes — so retries get a fresh slate.
+  const [score, setScore] = useState(0)
+  const [streak, setStreak] = useState(0)
+  const [maxStreak, setMaxStreak] = useState(0)
+  // Last strum outcome. Hit tiers track perfect / early / late etc;
+  // diagnostic tiers explain why a strum was a miss:
+  //   • miss   — note was missed (passed late-okay window, detected by the
+  //              passive miss-scan effect)
+  //   • empty  — user strummed with no playable note within the timing window
+  //   • frets  — user strummed with a note in window but wrong fret combo
+  type StrumFeedback = Tier | 'miss' | 'empty' | 'frets'
+  const [lastTier, setLastTier] = useState<StrumFeedback | null>(null)
+  const lastTierAtMsRef = useRef<number>(0)  // for fade-out timing on the HUD
+  // Tracks real-note ticks that have already been counted as missed this pass
+  // so we don't break the streak twice for the same note.
+  const liveMissedTicksRef = useRef<Set<number>>(new Set())
+
+  const resetScoring = useCallback(() => {
+    setScore(0)
+    setStreak(0)
+    setMaxStreak(0)
+    setLastTier(null)
+    liveHitTicksRef.current = new Set()
+    liveMissedTicksRef.current = new Set()
+  }, [])
+
+  // Reset on rewind-to-zero (or near it) and on difficulty switch.
+  const lastResetGuardRef = useRef({ time: -1, diff: '' })
+  useEffect(() => {
+    const diff = chart?.activeName || ''
+    const guard = lastResetGuardRef.current
+    if (currentTime < 0.05 && (guard.time > 0.5 || guard.diff !== diff)) {
+      resetScoring()
+    }
+    if (diff !== guard.diff) {
+      resetScoring()
+    }
+    lastResetGuardRef.current = { time: currentTime, diff }
+  }, [currentTime, chart?.activeName, resetScoring])
+
+  // Points per perfect hit at the current difficulty — derived from the
+  // configured target divided by the number of scoreable notes.
+  const noteCountForScoring = useMemo(() => {
+    if (!chart) return 0
+    // A "scoreable" note is a unique tick with at least one playable lane
+    // (0-4 fret OR open=lane 7). Chord ticks count once.
+    const ticks = new Set<number>()
+    for (const n of chart.notes) {
+      if (n.lane <= 4 || n.lane === 7) ticks.add(n.tick)
+    }
+    return ticks.size
+  }, [chart])
+  const pointsPerPerfectHit = useMemo(() => {
+    if (!chart || noteCountForScoring === 0) return 0
+    const target = scoringSettings.targets[chart.activeName] ?? scoringSettings.targets.ExpertSingle ?? 2_500_000
+    return Math.round(target / noteCountForScoring)
+  }, [chart, noteCountForScoring, scoringSettings])
+
+  // List of currently-connected gamepads, refreshed on connect/disconnect.
+  // The dropdown also includes a sentinel "keyboard" entry so keyboard
+  // bindings can be split into their own per-device set.
+  const KEYBOARD_DEVICE_ID = 'keyboard'
+  const [gamepadList, setGamepadList] = useState<Array<{ id: string; index: number; buttons: number }>>([])
+  const [gamepadId, setGamepadId] = useState<string>(() => localStorage.getItem('editor.gamepadId') || '')
+  const isKeyboardDevice = gamepadId === KEYBOARD_DEVICE_ID
+  useEffect(() => {
+    try { localStorage.setItem('editor.gamepadId', gamepadId) } catch {}
+    // Wipe in-flight input state so swapping devices doesn't leak phantom
+    // held frets or pressed keys from the previous device.
+    heldFretsRef.current.clear()
+    pressedKeysRef.current.clear()
+  }, [gamepadId])
+
+  const refreshGamepads = useCallback(() => {
+    const list = (navigator.getGamepads?.() || [])
+      .filter((g): g is Gamepad => !!g)
+      .map((g) => ({ id: g.id, index: g.index, buttons: g.buttons.length }))
+    setGamepadList(list)
+    // Auto-select the only available device on first connection so the user
+    // doesn't have to dig into the dropdown.
+    if (!gamepadId && list.length > 0) setGamepadId(list[0].id)
+  }, [gamepadId])
+
+  // Continuous re-scan while the device list is empty — Chrome only enumerates
+  // a Bluetooth HID gamepad after the first activation on the page, and the
+  // `gamepadconnected` event sometimes fires before our useEffect attaches.
+  useEffect(() => {
+    refreshGamepads()
+    const onChange = () => refreshGamepads()
+    window.addEventListener('gamepadconnected', onChange)
+    window.addEventListener('gamepaddisconnected', onChange)
+    const poll = window.setInterval(() => {
+      if (gamepadList.length === 0) refreshGamepads()
+    }, 1000)
+    return () => {
+      window.removeEventListener('gamepadconnected', onChange)
+      window.removeEventListener('gamepaddisconnected', onChange)
+      window.clearInterval(poll)
+    }
+  }, [refreshGamepads, gamepadList.length])
+
+  // Button mapping. Each slot holds parallel lists of gamepad button indices
+  // and keyboard key codes (event.code, e.g. "KeyG", "Space"), so a single
+  // lane can be triggered by any of: primary fret button, secondary fret
+  // button, a chosen keyboard key, etc. Empty arrays = unbound. Persisted
+  // per device id so swapping guitars doesn't clobber mappings.
+  interface BindingSlot { buttons: number[]; keys: string[] }
+  interface InputBinding {
+    fret1: BindingSlot; fret2: BindingSlot; fret3: BindingSlot; fret4: BindingSlot; fret5: BindingSlot
+    strumUp: BindingSlot; strumDown: BindingSlot
+  }
+  const emptySlot = (): BindingSlot => ({ buttons: [], keys: [] })
+  const DEFAULT_BINDING: InputBinding = {
+    fret1: emptySlot(), fret2: emptySlot(), fret3: emptySlot(),
+    fret4: emptySlot(), fret5: emptySlot(),
+    strumUp: emptySlot(), strumDown: emptySlot(),
+  }
+  // Migrate any legacy shape (single int, plain array, or partial slot)
+  // into the current { buttons, keys } structure.
+  const normaliseBinding = (raw: unknown): InputBinding => {
+    if (!raw || typeof raw !== 'object') return DEFAULT_BINDING
+    const out: InputBinding = {
+      fret1: emptySlot(), fret2: emptySlot(), fret3: emptySlot(),
+      fret4: emptySlot(), fret5: emptySlot(),
+      strumUp: emptySlot(), strumDown: emptySlot(),
+    }
+    for (const k of Object.keys(DEFAULT_BINDING) as (keyof InputBinding)[]) {
+      const v = (raw as Record<string, unknown>)[k]
+      if (typeof v === 'number' && v >= 0) {
+        out[k] = { buttons: [v], keys: [] }
+      } else if (Array.isArray(v)) {
+        out[k] = { buttons: v.filter((x): x is number => typeof x === 'number' && x >= 0), keys: [] }
+      } else if (v && typeof v === 'object') {
+        const slot = v as { buttons?: unknown; keys?: unknown }
+        out[k] = {
+          buttons: Array.isArray(slot.buttons)
+            ? slot.buttons.filter((x): x is number => typeof x === 'number' && x >= 0)
+            : [],
+          keys: Array.isArray(slot.keys)
+            ? slot.keys.filter((x): x is string => typeof x === 'string' && x.length > 0)
+            : [],
+        }
+      }
+    }
+    return out
+  }
+  const bindingKey = `editor.binding.${gamepadId || 'default'}`
+  const [binding, setBinding] = useState<InputBinding>(DEFAULT_BINDING)
+  // Reference snapshot of what's persisted on disk for the current gamepad id.
+  // Used to surface the "modified" indicator + drive the Save button's
+  // disabled state. NOT used for live changes — those live in `binding`.
+  const [savedBinding, setSavedBinding] = useState<InputBinding>(DEFAULT_BINDING)
+  // Load the persisted mapping whenever the selected device changes. Explicit
+  // user-initiated save (button below) is the only path that writes back —
+  // an earlier auto-save effect was racing with this load and clobbering the
+  // stored mapping when the gamepad id resolved post-mount.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(bindingKey)
+      const loaded = raw ? normaliseBinding(JSON.parse(raw)) : DEFAULT_BINDING
+      setBinding(loaded)
+      setSavedBinding(loaded)
+    } catch {
+      setBinding(DEFAULT_BINDING)
+      setSavedBinding(DEFAULT_BINDING)
+    }
+  }, [bindingKey])
+  const saveBinding = () => {
+    try {
+      localStorage.setItem(bindingKey, JSON.stringify(binding))
+      setSavedBinding(binding)
+    } catch {}
+  }
+  const bindingDirty = JSON.stringify(binding) !== JSON.stringify(savedBinding)
+
+  // Imperative handle to the 3D gem mesh layer — used to trigger one-shot
+  // explosion FX on successful live-mode hits.
+  const gemMeshLayerRef = useRef<GemMeshLayerHandle>(null)
+
+  // Per-frame state for the connected gamepad. heldFrets is a Set of lane
+  // indices (0-4) currently held; updated by the poll loop. lastEdge tracks
+  // press/release transitions so we can fire one-shot events on strum.
+  const heldFretsRef = useRef<Set<number>>(new Set())
+  // Keyboard pressed-keys mirror (event.code strings). Drives held-detection
+  // alongside gamepad buttons so a player can use either input device — or
+  // both at once.
+  const pressedKeysRef = useRef<Set<string>>(new Set())
+  // Strum button currently pressed (gamepad or keyboard), per direction.
+  // Used by the held-strip indicator so users can verify their strum input
+  // is firing. Refs track the live value; the React state is only updated
+  // when the value actually changes — otherwise the poll loop would call
+  // setState 60×/sec with the same value and cost reconciliation cycles.
+  const [strumDownLit, setStrumDownLit] = useState(false)
+  const [strumUpLit, setStrumUpLit] = useState(false)
+  const strumDownLitRef = useRef(false)
+  const strumUpLitRef = useRef(false)
+  // Timestamp (performance.now()) of the most recent press transition per
+  // button index. Used by the release-debounce in the poll loop: a button's
+  // release within RELEASE_DEBOUNCE_MS of its last press is treated as a
+  // controller anti-ghost flicker and ignored. Short enough that intentional
+  // taps still register if the user releases after the window.
+  const lastPressMsRef = useRef<Map<number, number>>(new Map())
+  const buttonStateRef = useRef<boolean[]>([])
+  // When non-null, the next input event is captured here instead of being
+  // dispatched to the live-play logic. Used by the "Listen" button. Accepts
+  // either a gamepad button press or a keyboard keydown.
+  type CaptureInput = { kind: 'btn'; index: number } | { kind: 'key'; code: string }
+  const captureNextPressRef = useRef<((input: CaptureInput) => void) | null>(null)
+  // Fires when a strum button transitions to pressed. Set by the live-play
+  // hit-detection effect; the poll loop calls it.
+  const onStrumRef = useRef<(() => void) | null>(null)
+
+  // Window keyboard listener — active when the Keyboard device is selected
+  // OR when a capture is pending (so a user binding a key on a gamepad
+  // device can still press a key to register one — but their gameplay
+  // input still requires the keyboard device to be active to fire). Strums
+  // fire on keydown; fret keys update pressedKeysRef and the rAF poll
+  // picks them up.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      // Don't intercept when the user is typing into an input/textarea.
+      const target = e.target as HTMLElement | null
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return
+      const code = e.code
+      // Capture mode short-circuits before anything else interprets the key.
+      const cap = captureNextPressRef.current
+      if (cap) {
+        captureNextPressRef.current = null
+        cap({ kind: 'key', code })
+        e.preventDefault()
+        return
+      }
+      // Past this point, keyboard only drives gameplay when the Keyboard
+      // device is selected — otherwise we let the page handle the keypress.
+      if (!isKeyboardDevice) return
+      if (pressedKeysRef.current.has(code)) return  // browser auto-repeat
+      pressedKeysRef.current.add(code)
+      if (binding.strumUp.keys.includes(code) || binding.strumDown.keys.includes(code)) {
+        onStrumRef.current?.()
+      }
+    }
+    const onKeyUp = (e: KeyboardEvent) => {
+      pressedKeysRef.current.delete(e.code)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+    }
+  }, [binding, isKeyboardDevice])
+
+  // Poll loop — always runs so keyboard-only users still get held-state
+  // updates. When no gamepad id is selected (or the device isn't found yet)
+  // the gamepad-specific blocks are skipped but the held recompute over
+  // pressedKeysRef still happens each frame.
+  useEffect(() => {
+    let raf = 0
+    const tick = () => {
+      raf = requestAnimationFrame(tick)
+      const pads = navigator.getGamepads?.() || []
+      let gp: Gamepad | null = null
+      if (gamepadId) {
+        for (const p of pads) { if (p && p.id === gamepadId) { gp = p; break } }
+      }
+      // No gamepad → fall through to held recompute (keyboard-only).
+      if (!gp) {
+        buttonStateRef.current = []
+        const computeSlotHeld = (slot: BindingSlot): boolean => {
+          for (const k of slot.keys) if (pressedKeysRef.current.has(k)) return true
+          return false
+        }
+        const lanes: BindingSlot[] = [binding.fret1, binding.fret2, binding.fret3, binding.fret4, binding.fret5]
+        for (let lane = 0; lane < 5; lane++) {
+          if (computeSlotHeld(lanes[lane])) heldFretsRef.current.add(lane)
+          else heldFretsRef.current.delete(lane)
+        }
+        {
+          const dn = computeSlotHeld(binding.strumDown)
+          const up = computeSlotHeld(binding.strumUp)
+          if (dn !== strumDownLitRef.current) { strumDownLitRef.current = dn; setStrumDownLit(dn) }
+          if (up !== strumUpLitRef.current)   { strumUpLitRef.current   = up; setStrumUpLit(up) }
+        }
+        return
+      }
+      if (buttonStateRef.current.length !== gp.buttons.length) {
+        buttonStateRef.current = new Array(gp.buttons.length).fill(false)
+      }
+      // Two-pass: gather every transition this frame first, then apply fret
+      // press/release updates BEFORE strum-edge handlers fire. This way a
+      // simultaneous chord+strum (e.g. fret1 + fret2 + strum all transition
+      // in the same poll frame) has the full held-frets set ready when the
+      // strum handler reads it, regardless of the underlying button-index
+      // ordering on the device.
+      //
+      // Release-debounce: many controllers (CRKD guitars, certain HID
+      // gamepads) have input-matrix anti-ghosting that briefly drops the
+      // 'pressed' state of one button when an adjacent button is pressed.
+      // We suppress release transitions that arrive within RELEASE_DEBOUNCE_MS
+      // of the last press for that button — chord flickers stay held, real
+      // taps after the window release normally.
+      const RELEASE_DEBOUNCE_MS = 40
+      const nowMs = performance.now()
+      const transitions: Array<{ index: number; pressed: boolean }> = []
+      for (let i = 0; i < gp.buttons.length; i++) {
+        const isPressed = gp.buttons[i].pressed
+        const wasPressed = buttonStateRef.current[i]
+        if (isPressed === wasPressed) continue
+        if (isPressed) {
+          buttonStateRef.current[i] = true
+          lastPressMsRef.current.set(i, nowMs)
+          transitions.push({ index: i, pressed: true })
+        } else {
+          const lastPress = lastPressMsRef.current.get(i) ?? 0
+          if (nowMs - lastPress < RELEASE_DEBOUNCE_MS) {
+            // Suspected anti-ghost flicker — leave button as still-pressed.
+            // The next true release after the window expires will fire.
+            continue
+          }
+          buttonStateRef.current[i] = false
+          transitions.push({ index: i, pressed: false })
+        }
+      }
+      // We DO NOT bail early on no-transition frames anymore — keyboard
+      // input arrives via window listeners and needs heldFretsRef to be
+      // recomputed from pressedKeysRef each frame too.
+
+      // Pass 1: capture-mode short-circuit (first press only).
+      for (const t of transitions) {
+        if (!t.pressed) continue
+        const cap = captureNextPressRef.current
+        if (cap) {
+          captureNextPressRef.current = null
+          cap({ kind: 'btn', index: t.index })
+          return  // Eat this entire frame so a paired strum doesn't fire too.
+        }
+      }
+      // Pass 2: fret press/release — recompute heldFretsRef from the full
+      // gamepad + keyboard state. A lane is considered "held" if any of its
+      // bound buttons OR keys is currently pressed.
+      const computeSlotHeld = (slot: BindingSlot): boolean => {
+        for (const idx of slot.buttons) if (buttonStateRef.current[idx]) return true
+        for (const k of slot.keys) if (pressedKeysRef.current.has(k)) return true
+        return false
+      }
+      const laneSlots: BindingSlot[] = [
+        binding.fret1, binding.fret2, binding.fret3, binding.fret4, binding.fret5,
+      ]
+      for (let lane = 0; lane < 5; lane++) {
+        if (computeSlotHeld(laneSlots[lane])) heldFretsRef.current.add(lane)
+        else heldFretsRef.current.delete(lane)
+      }
+      // Strum indicator state — lit while a bound strum input is held.
+      // Refs track the live value; React state only changes on transitions.
+      const dn = computeSlotHeld(binding.strumDown)
+      const up = computeSlotHeld(binding.strumUp)
+      if (dn !== strumDownLitRef.current) { strumDownLitRef.current = dn; setStrumDownLit(dn) }
+      if (up !== strumUpLitRef.current)   { strumUpLitRef.current   = up; setStrumUpLit(up) }
+      // Pass 3: strum edges — gamepad press transitions only (keyboard
+      // strums fire from the keydown listener instead).
+      for (const t of transitions) {
+        if (!t.pressed) continue
+        if (binding.strumUp.buttons.includes(t.index) || binding.strumDown.buttons.includes(t.index)) {
+          onStrumRef.current?.()
+        }
+      }
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [gamepadId, binding])
+
+  // Auto-map wizard — steps the user through each binding in sequence.
+  // null = idle; otherwise the binding key currently waiting on a press.
+  const [autoMapStep, setAutoMapStep] = useState<keyof InputBinding | null>(null)
+  const autoMapOrder: (keyof InputBinding)[] = useMemo(
+    () => ['fret1', 'fret2', 'fret3', 'fret4', 'fret5', 'strumUp', 'strumDown'],
+    [],
+  )
+  const startAutoMap = () => {
+    if (!gamepadId) return
+    setAutoMapStep(autoMapOrder[0])
+  }
+  // Each step: install a captureNextPress that REPLACES the binding's
+  // appropriate side (button OR key) then advances to the next slot.
+  useEffect(() => {
+    if (!autoMapStep) return
+    captureNextPressRef.current = (input: CaptureInput) => {
+      setBinding((b) => {
+        const slot = b[autoMapStep]
+        const next: BindingSlot = input.kind === 'btn'
+          ? { buttons: [input.index], keys: slot.keys }
+          : { buttons: slot.buttons, keys: [input.code] }
+        return { ...b, [autoMapStep]: next }
+      })
+      const idx = autoMapOrder.indexOf(autoMapStep)
+      const next = idx >= 0 && idx + 1 < autoMapOrder.length ? autoMapOrder[idx + 1] : null
+      setAutoMapStep(next)
+    }
+    return () => { captureNextPressRef.current = null }
+  }, [autoMapStep, autoMapOrder])
+
+  // Listen ADDS to the binding's array — supports secondary frets, keyboard
+  // alternates, etc. Only the input type matching the selected device is
+  // accepted (gamepad device → button presses; keyboard device → keys).
+  const listenForBinding = (key: keyof InputBinding) => {
+    setAutoMapStep(null)
+    captureNextPressRef.current = (input: CaptureInput) => {
+      // Filter to the active device kind so a stray keypress doesn't bind on
+      // a gamepad device (and vice versa).
+      if (isKeyboardDevice && input.kind !== 'key') return
+      if (!isKeyboardDevice && input.kind !== 'btn') return
+      setBinding((b) => {
+        const slot = b[key]
+        if (input.kind === 'btn') {
+          if (slot.buttons.includes(input.index)) return b
+          return { ...b, [key]: { ...slot, buttons: [...slot.buttons, input.index] } }
+        }
+        if (slot.keys.includes(input.code)) return b
+        return { ...b, [key]: { ...slot, keys: [...slot.keys, input.code] } }
+      })
+    }
+  }
+
+  const BINDING_LABELS: Record<keyof InputBinding, string> = {
+    fret1: 'Green',     fret2: 'Red',       fret3: 'Yellow',
+    fret4: 'Blue',      fret5: 'Orange',
+    strumUp: 'Strum ↑', strumDown: 'Strum ↓',
+  }
+
+  // Live mirror of heldFretsRef as React state, polled every animation frame.
+  // Drives the small lane-indicator strip under the bindings list so the user
+  // can verify multi-fret detection at a glance. Diff-checked so we only
+  // re-render when the set actually changes. Also mirrors what the 3D ghost
+  // renderer is reading (via __ghostHeld) so we can detect a ref/closure
+  // mismatch between the input layer and the renderer.
+  const [heldFretsView, setHeldFretsView] = useState<number[]>([])
+  const [ghostHeldView, setGhostHeldView] = useState<number[]>([])
+  // Throttle the diagnostic mirror to ~12 fps. The strip is a visual aid;
+  // updating it 60×/sec triggers React reconciliation on the entire editor
+  // tree four-five times more often than necessary and shows up as a frame
+  // budget burn on the runway scroll.
+  useEffect(() => {
+    const DIAGNOSTIC_INTERVAL_MS = 80
+    let raf = 0
+    let lastUpdate = 0
+    const tick = (now: number) => {
+      raf = requestAnimationFrame(tick)
+      if (now - lastUpdate < DIAGNOSTIC_INTERVAL_MS) return
+      lastUpdate = now
+      const cur = [...heldFretsRef.current].sort((a, b) => a - b)
+      setHeldFretsView((prev) => {
+        if (prev.length === cur.length && prev.every((v, i) => v === cur[i])) return prev
+        return cur
+      })
+      const ghost = ((window as unknown as { __ghostHeld?: number[] }).__ghostHeld) || []
+      setGhostHeldView((prev) => {
+        if (prev.length === ghost.length && prev.every((v, i) => v === ghost[i])) return prev
+        return ghost
+      })
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [])
   const [realNotesReady, setRealNotesReady] = useState(false)
   const realNotesCtxRef = useRef<AudioContext | null>(null)
   const realNotesGainRef = useRef<GainNode | null>(null)
@@ -1446,11 +3204,23 @@ export default function BeatmapEditor() {
     }
   }, [])
 
-  // Load chart and beatmap meta in parallel
+  // Load chart, custom scene-event types, and beatmap meta in parallel. The
+  // custom types must be resolved before parsing so the parser knows which
+  // non-`onboard_*` event names to claim (vs. leave in passthrough).
   useEffect(() => {
-    fetch(`/api/tracks/${trackId}/beatmaps/${beatmapId}/chart`)
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`${r.status}`))))
-      .then((data) => setChart(parseChart(data.chart)))
+    Promise.all([
+      fetch(`/api/tracks/${trackId}/beatmaps/${beatmapId}/chart`)
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`${r.status}`)))),
+      fetch('/api/scene-events/types')
+        .then((r) => (r.ok ? r.json() : []))
+        .catch(() => []),
+    ])
+      .then(([data, types]) => {
+        const adapted = (types as RawCustomType[]).map(adaptCustomType)
+        setCustomSceneTypes(adapted)
+        const customNames = new Set(adapted.map((t) => t.name))
+        setChart(parseChart(data.chart, undefined, customNames))
+      })
       .catch((e) => setLoadError((e as Error).message))
 
     fetch(`/api/tracks/${trackId}`)
@@ -1834,7 +3604,10 @@ export default function BeatmapEditor() {
         const AC = window.AudioContext
           || (window as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
         if (!AC) return
-        realNotesCtxRef.current = new AC()
+        // latencyHint: 'interactive' picks the smallest hardware buffer the
+        // browser/OS can sustain, trading a bit of CPU for ~tens of ms less
+        // input-to-sound delay. Critical when the user is strumming live.
+        realNotesCtxRef.current = new AC({ latencyHint: 'interactive' })
         const gain = realNotesCtxRef.current.createGain()
         gain.gain.value = realNotesVolume
         gain.connect(realNotesCtxRef.current.destination)
@@ -1898,48 +3671,257 @@ export default function BeatmapEditor() {
     realNotesEntriesRef.current = entries
   }, [chart, tempoSegments, _resolveRealNoteSlot])
 
-  // Fire matching samples as the playhead crosses real-notes during playback.
-  // Detects seeks via a delta threshold and rebases without firing.
-  useEffect(() => {
-    if (!playing || !realNotesEnabled || !realNotesReady) {
-      realNotesLastTimeRef.current = currentTime
-      return
-    }
+  // Helper — fire a single decoded sample now via the AudioContext. Used by
+  // both the autohit-mode cross effect and the live-mode strum handler.
+  // Schedules with `start(0)` (= "as soon as possible" in the audio thread)
+  // for the lowest hardware-buffered latency. Autohit batches fire on the
+  // same rAF tick anyway, so they remain phase-locked without the old
+  // 5 ms look-ahead.
+  const fireSampleNow = useCallback((packSlot: number, sampleName: string) => {
     const ctx = realNotesCtxRef.current
     const gain = realNotesGainRef.current
     const buffers = realNotesBuffersRef.current
     if (!ctx || !gain || !buffers) return
     if (ctx.state === 'suspended') ctx.resume().catch(() => undefined)
+    let inner = buffers.get(packSlot)
+    if (!inner || !inner.has(sampleName)) inner = buffers.get(0)
+    const buf = inner?.get(sampleName)
+    if (!buf) return
+    const src = ctx.createBufferSource()
+    src.buffer = buf
+    src.connect(gain)
+    src.start(0)
+  }, [])
+
+  // Fire matching samples as the playhead crosses real-notes during playback.
+  // Only active in 'autohit' mode — in 'live' mode the player drives hits via
+  // the gamepad. Detects seeks via a delta threshold and rebases without
+  // firing.
+  useEffect(() => {
+    if (!playing || !realNotesEnabled || !realNotesReady || playMode !== 'autohit') {
+      realNotesLastTimeRef.current = currentTime
+      return
+    }
     const prev = realNotesLastTimeRef.current
     const delta = currentTime - prev
-    // Detect seeks / pause-resume gaps and rebase without firing.
     if (delta < 0 || delta > 0.5) {
       realNotesLastTimeRef.current = currentTime
       return
     }
-    if (delta <= 0) return  // playhead hasn't advanced (paused)
+    if (delta <= 0) return
     const entries = realNotesEntriesRef.current
-    // Binary search would be nicer but this is < 1000 entries on typical
-    // charts; linear scan with early break is plenty fast.
+    const liveEntries = liveEntriesRef.current
     for (const e of entries) {
       if (e.sec <= prev) continue
       if (e.sec > currentTime) break
-      // Try the requested pack-slot first; if that slot has no decoded
-      // buffer (tombstoned, missing file, decode failure) fall back to
-      // pack-slot 0 so the note still audibly fires.
-      let inner = buffers.get(e.packSlot)
-      if (!inner || !inner.has(e.sampleName)) inner = buffers.get(0)
-      const buf = inner?.get(e.sampleName)
-      if (!buf) continue
-      const src = ctx.createBufferSource()
-      src.buffer = buf
-      src.connect(gain)
-      // Schedule slightly into the future (~5ms) so all simultaneous notes
-      // start phase-locked rather than smearing across frames.
-      src.start(ctx.currentTime + 0.005)
+      if (e.sampleName) fireSampleNow(e.packSlot, e.sampleName)
+      // Spawn explosions on the lanes the note covers. Look up the fret set
+      // from the live-entry index (same set, same sec) so we don't have to
+      // walk chart.notes here.
+      const matched = liveEntries.find((l) => l.sec === e.sec)
+      if (matched) {
+        const lanes = matched.frets === null ? [0, 1, 2, 3, 4] : [...matched.frets]
+        for (const lane of lanes) gemMeshLayerRef.current?.spawnExplosion(lane)
+      }
     }
     realNotesLastTimeRef.current = currentTime
-  }, [currentTime, playing, realNotesEnabled, realNotesReady])
+  }, [currentTime, playing, realNotesEnabled, realNotesReady, playMode, fireSampleNow])
+
+  // ── Live play hit detection ───────────────────────────────────────────────
+  // Per-tick fret requirement, computed once from the chart so the strum
+  // handler can match held frets to the nearest real-note without walking
+  // chart.notes every press. Each entry: { sec, packSlot, sampleName, frets:
+  // Set<lane>|null }. `frets === null` means open note (no frets held).
+  const liveEntriesRef = useRef<Array<{ sec: number; packSlot: number; sampleName: string; frets: Set<number> | null }>>([])
+  // Set of (real-note tick × seconds) already hit this play pass so a single
+  // strum can't double-fire the same note. Cleared on seek/pause.
+  const liveHitTicksRef = useRef<Set<number>>(new Set())
+
+  useEffect(() => {
+    if (!chart) { liveEntriesRef.current = []; return }
+    // Live play scores EVERY playable tick (any lane 0-4 fret or lane 7
+    // open), not only real-note flagged ticks. Real-note flags are about
+    // pitched sample playback — they don't affect whether a note exists on
+    // the highway. We resolve a sample for the tick when one is available;
+    // otherwise the hit just registers silently.
+    const tickGroups = new Map<number, { frets: Set<number>; open: boolean }>()
+    for (const n of chart.notes) {
+      if (n.lane > 4 && n.lane !== 7) continue   // skip mod-lanes 5/6/8
+      const g = tickGroups.get(n.tick) ?? { frets: new Set<number>(), open: false }
+      if (n.lane === 7) g.open = true
+      else g.frets.add(n.lane)
+      tickGroups.set(n.tick, g)
+    }
+    const out: typeof liveEntriesRef.current = []
+    for (const [tick, g] of tickGroups) {
+      const resolved = _resolveRealNoteSlot(tick)
+      out.push({
+        sec: tickToSec(tempoSegments, chart.resolution, tick),
+        packSlot: resolved?.packSlot ?? 0,
+        sampleName: resolved?.sampleName ?? '',
+        frets: g.open ? null : g.frets,
+      })
+    }
+    out.sort((a, b) => a.sec - b.sec)
+    liveEntriesRef.current = out
+  }, [chart, tempoSegments, _resolveRealNoteSlot])
+
+  // Reset the per-pass hit set on seek / pause so notes can be re-attempted.
+  useEffect(() => {
+    if (!playing) {
+      liveHitTicksRef.current = new Set()
+    }
+  }, [playing])
+
+  // Install the strum handler — fired by the gamepad poll loop on every
+  // strum-button press. Uses the asymmetric Unity hit window (200ms early
+  // / 150ms late) and classifies each hit into one of 5 tolerance tiers.
+  // Scoring rolls in via pointsPerPerfectHit × the tier's multiplier.
+  useEffect(() => {
+    if (!playing || playMode !== 'live') {
+      onStrumRef.current = null
+      return
+    }
+    onStrumRef.current = () => {
+      const t = currentTimeRef.current
+      const entries = liveEntriesRef.current
+      const held = heldFretsRef.current
+      let best: typeof entries[number] | null = null
+      let bestDist = HIT_EARLY_OK_SEC + 0.001
+      // Track whether ANY note was in the timing window — even if its fret
+      // combo didn't match — so we can distinguish "no notes around" from
+      // "wrong fingers" feedback.
+      let anyInWindow = false
+      for (const e of entries) {
+        const key = Math.round(e.sec * 1000)
+        if (liveHitTicksRef.current.has(key)) continue
+        const delta = e.sec - t
+        if (delta > HIT_EARLY_OK_SEC) break
+        if (delta < -HIT_LATE_OK_SEC) continue
+        anyInWindow = true
+        const matches = e.frets === null
+          ? held.size === 0
+          : e.frets.size === held.size && [...e.frets].every((l) => held.has(l))
+        if (!matches) continue
+        const dist = Math.abs(delta)
+        if (dist < bestDist) { best = e; bestDist = dist }
+      }
+      lastTierAtMsRef.current = performance.now()
+      if (!best) {
+        // No matching hit — surface why for the user. Strum still doesn't
+        // break the streak (only a passively-missed note does).
+        setLastTier(anyInWindow ? 'frets' : 'empty')
+        return
+      }
+      {
+        const key = Math.round(best.sec * 1000)
+        liveHitTicksRef.current.add(key)
+        liveMissedTicksRef.current.delete(key)  // a hit can't also be a miss
+        const delta = best.sec - t
+        const abs = Math.abs(delta)
+        let tier: Tier
+        if (abs <= HIT_PERFECT_SEC) tier = 'perfect'
+        else if (abs <= HIT_GOOD_SEC) tier = delta >= 0 ? 'early' : 'late'
+        else tier = delta >= 0 ? 'veryEarly' : 'veryLate'
+
+        // Award points — non-realtime path so React state batches per tick.
+        // Sample only fires when this tick has a real-note flag (lane 8) and
+        // playback is enabled; regular gems hit silently with score only.
+        if (realNotesEnabled && realNotesReady && best.sampleName) {
+          fireSampleNow(best.packSlot, best.sampleName)
+        }
+        const earned = Math.round(pointsPerPerfectHit * scoringSettings.multipliers[tier])
+        setScore((s) => s + earned)
+        setStreak((s) => {
+          const next = s + 1
+          setMaxStreak((m) => Math.max(m, next))
+          return next
+        })
+        setLastTier(tier)
+        lastTierAtMsRef.current = performance.now()
+
+        const lanesToBoom = best.frets === null ? [0, 1, 2, 3, 4] : [...best.frets]
+        for (const lane of lanesToBoom) gemMeshLayerRef.current?.spawnExplosion(lane)
+      }
+    }
+    return () => { onStrumRef.current = null }
+  }, [playing, playMode, realNotesEnabled, realNotesReady, fireSampleNow, pointsPerPerfectHit, scoringSettings])
+
+  // Miss detection — scans for entries whose late-okay window has passed
+  // without being hit and breaks the streak. Runs on currentTime change
+  // (driven by the audio element's timeupdate / our rAF mirror) so it
+  // catches missed notes shortly after they slide past the strike line.
+  useEffect(() => {
+    if (!playing || playMode !== 'live') return
+    const t = currentTimeRef.current
+    const cutoff = t - HIT_LATE_OK_SEC
+    let brokeAny = false
+    for (const e of liveEntriesRef.current) {
+      if (e.sec > cutoff) break       // sorted — remaining are still hittable
+      const key = Math.round(e.sec * 1000)
+      if (liveHitTicksRef.current.has(key)) continue
+      if (liveMissedTicksRef.current.has(key)) continue
+      liveMissedTicksRef.current.add(key)
+      brokeAny = true
+    }
+    if (brokeAny) {
+      setStreak(0)
+      setLastTier('miss')
+      lastTierAtMsRef.current = performance.now()
+    }
+  }, [currentTime, playing, playMode])
+
+  // currentTime mirrored in a ref so the strum handler (re-installed only when
+  // play state flips) always sees the live playhead position.
+  const currentTimeRef = useRef(currentTime)
+  useEffect(() => { currentTimeRef.current = currentTime }, [currentTime])
+
+  // Pre-warm the AudioContext on the first user gesture inside the editor.
+  // Browsers boot AudioContexts in the 'suspended' state until they see a
+  // user gesture, and resume() takes some ms the first time it's called.
+  // Warming on first click means the first strum doesn't pay that cost.
+  useEffect(() => {
+    const warm = () => {
+      const ctx = realNotesCtxRef.current
+      if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => undefined)
+    }
+    window.addEventListener('click', warm)
+    window.addEventListener('keydown', warm)
+    return () => {
+      window.removeEventListener('click', warm)
+      window.removeEventListener('keydown', warm)
+    }
+  }, [])
+
+  // Resolve the slot name a real-note SHOULD play given a held-frets set —
+  // mirrors _resolveRealNoteSlot but driven by the player's input rather than
+  // the chart. Used for free-play preview.
+  const resolveSlotForHeldFrets = useCallback((held: Set<number>): string | null => {
+    if (held.size === 0) return 'open'
+    if (held.size === 1) return `lane_${[...held][0] + 1}`
+    if (held.size === 2) {
+      const sorted = [...held].sort((a, b) => a - b)
+      if (sorted[1] - sorted[0] === 1) return `chord_${sorted[0] + 1}${sorted[1] + 1}`
+      return `lane_${sorted[0] + 1}`  // non-adjacent → fall back to lower fret's solo sample
+    }
+    // 3+ frets — no canonical chord sample, fall back to the lowest fret
+    return `lane_${Math.min(...held) + 1}`
+  }, [])
+
+  // Free-play preview: when the song isn't playing and the user has the
+  // "Preview with guitar" toggle on, strums fire the matching sample from the
+  // currently-active applied sound pack so the user can audition the patches.
+  const [guitarPreview, setGuitarPreview] = useState(false)
+  useEffect(() => {
+    // Only wire when not playing — once playback starts, the live-mode strum
+    // handler (installed elsewhere) takes precedence.
+    if (playing || !guitarPreview || !realNotesReady) return
+    onStrumRef.current = () => {
+      const slotName = resolveSlotForHeldFrets(heldFretsRef.current)
+      if (slotName) fireSampleNow(activeRealSlot, slotName)
+    }
+    return () => { onStrumRef.current = null }
+  }, [playing, guitarPreview, realNotesReady, activeRealSlot, fireSampleNow, resolveSlotForHeldFrets])
 
   // Decode song.ogg → peaks for waveform overlay. Bucket size of 20ms gives
   // ~50 peaks/second, enough resolution to read transients on the runway
@@ -2466,15 +4448,28 @@ export default function BeatmapEditor() {
 
       const isSelected = selectedIds.has(i)
       const mods = modByTick.get(n.tick)
-      ctx.beginPath()
-      ctx.arc(x, y, NOTE_R, 0, Math.PI * 2)
-      ctx.fillStyle = LANE_FILL[n.lane]
-      ctx.fill()
-      ctx.lineWidth = isSelected ? 4 : 2
-      ctx.strokeStyle = isSelected ? '#ffffff'
-        : mods?.tap ? '#22d3ee'   // cyan ring on tap notes
-        : '#000000'
-      ctx.stroke()
+      // 3D mesh layer is rendering this gem on top — skip the 2D circle so the
+      // mesh isn't competing with a flat disc behind it. Sustain tail above
+      // still draws (it's a thin line, mesh covers the head).
+      const meshActive = view3d.enabled && !!view3d.meshName
+      if (!meshActive) {
+        ctx.beginPath()
+        ctx.arc(x, y, NOTE_R, 0, Math.PI * 2)
+        ctx.fillStyle = LANE_FILL[n.lane]
+        ctx.fill()
+        ctx.lineWidth = isSelected ? 4 : 2
+        ctx.strokeStyle = isSelected ? '#ffffff'
+          : mods?.tap ? '#22d3ee'   // cyan ring on tap notes
+          : '#000000'
+        ctx.stroke()
+      } else if (isSelected) {
+        // Selection ring still useful in mesh mode — drawn larger so it haloes the gem.
+        ctx.beginPath()
+        ctx.arc(x, y, NOTE_R + 4, 0, Math.PI * 2)
+        ctx.lineWidth = 3
+        ctx.strokeStyle = '#ffffff'
+        ctx.stroke()
+      }
 
       // Forced-HOPO indicator: small upward triangle riding on top of the gem.
       if (mods?.hopo) {
@@ -2548,7 +4543,7 @@ export default function BeatmapEditor() {
       ctx.fillStyle = '#67e8f9'
       ctx.fillText('Real note · click drops a gem with the real-note flag (cyan dot)', 12, 62)
     }
-  }, [chart, currentTime, scrollSpeed, selectedIds, snapDivisor, isDrums, laneLabels, tool, waveformOnHighway])
+  }, [chart, currentTime, scrollSpeed, selectedIds, snapDivisor, isDrums, laneLabels, tool, waveformOnHighway, view3d.enabled, view3d.meshName])
 
   // Resize canvas backing store on container size change
   useEffect(() => {
@@ -2559,8 +4554,13 @@ export default function BeatmapEditor() {
     }
   }, [canvasSize])
 
-  // Drive draw loop
+  // Drive draw loop. Skipped entirely when 3D + mesh mode hides the 2D
+  // canvas — there's no point rasterising thousands of pixels into a
+  // `display:none` surface, and that wasted work shows up as jank on the
+  // Three.js highway scroll.
+  const skip2DDraw = view3d.enabled && !!view3d.meshName
   useEffect(() => {
+    if (skip2DDraw) return
     let raf: number
     const loop = () => {
       draw()
@@ -2568,7 +4568,7 @@ export default function BeatmapEditor() {
     }
     raf = requestAnimationFrame(loop)
     return () => cancelAnimationFrame(raf)
-  }, [draw])
+  }, [draw, skip2DDraw])
 
   // Mouse interactions
   const canvasToCoords = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -2622,7 +4622,31 @@ export default function BeatmapEditor() {
 
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!chart) return
+    // 3D preview disables editing — the canvas is CSS-tilted so click coords
+    // don't map to the underlying pixel grid. Wheel scrub still works.
+    if (view3d.enabled) return
     const { cx, cy } = canvasToCoords(e)
+
+    // Click in the left timestamp gutter: seek the playhead to the tick
+    // represented by the cursor's vertical position. Same y→tick mapping as
+    // note placement, so a click next to a ruler label parks the playhead
+    // exactly on that beat. Drag is not armed here so a plain click doesn't
+    // clear the current selection.
+    {
+      const canvas = canvasRef.current!
+      const GUTTER_W = 64
+      if (cx < GUTTER_W) {
+        const HIT = canvas.height - 110
+        const targetSec = currentTime + (HIT - cy) / Math.max(1, scrollSpeed)
+        const clamped = duration > 0
+          ? Math.max(0, Math.min(duration, targetSec))
+          : Math.max(0, targetSec)
+        if (audioRef.current) audioRef.current.currentTime = clamped
+        setCurrentTime(clamped)
+        return
+      }
+    }
+
     const id = findNoteAt(cx, cy)
 
     // Click on existing note: select / shift-toggle, then start a group drag.
@@ -2705,8 +4729,14 @@ export default function BeatmapEditor() {
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!chart) return
+    if (view3d.enabled) return
     const canvas = canvasRef.current!
     const { cx, cy } = canvasToCoords(e)
+
+    // Cursor affordance: the ruler gutter is a click-to-seek target.
+    if (!dragRef.current && !placeRef.current && !scrubRef.current) {
+      canvas.style.cursor = cx < 64 ? 'ns-resize' : 'crosshair'
+    }
 
     // Empty-area drag = scrub the playhead. Map y-delta (in canvas pixels)
     // through scrollSpeed back to a seconds-delta so 1 px of drag matches
@@ -3127,7 +5157,12 @@ export default function BeatmapEditor() {
     )
     const newNotes = parseSectionNotes(newFull, name)
     // Tutorial section is shared across difficulties — just keep current state.
-    setChart({ ...chart, fullText: newFull, activeName: name, notes: newNotes })
+    // Track the new section in availableSections so the dropdown reflects it as
+    // "live" even before the first save creates the on-disk block.
+    const nextAvailable = chart.availableSections.includes(name)
+      ? chart.availableSections
+      : [...chart.availableSections, name]
+    setChart({ ...chart, fullText: newFull, activeName: name, notes: newNotes, availableSections: nextAvailable })
     setSelectedIds(new Set())
     historyRef.current = []
     futureRef.current = []
@@ -3205,15 +5240,6 @@ export default function BeatmapEditor() {
     setDirty(true)
   }
 
-  const setSceneFlag = (key: keyof SceneFlags, value: number) => {
-    if (!chart) return
-    setChart({
-      ...chart,
-      sceneFlags: { ...chart.sceneFlags, [key]: value },
-    })
-    setDirty(true)
-  }
-
   const playheadTick = useMemo(() => {
     if (!chart) return 0
     const snap = Math.max(1, Math.round(chart.resolution / snapDivisor))
@@ -3241,20 +5267,33 @@ export default function BeatmapEditor() {
   // first event after add/delete so the panel doesn't go blank.
   const [selectedTutorialId, setSelectedTutorialId] = useState<string | null>(null)
 
-  // ── VO import — two paths in one modal:
+  // ── VO library — one modal with three paths:
   //   (a) Paste an ElevenLabs Studio URL; backend pulls the chapter's latest
-  //       rendered audio + script. Requires Studio API access on the account.
-  //   (b) Upload an audio file directly (works without Studio access — you
-  //       download the rendered audio from Studio in your browser first).
-  //       Optional script text is stored on the VO so a future Generate
-  //       (Chatterbox / ElevenLabs TTS) can regenerate it.
+  //       rendered audio + script.
+  //   (b) Multi-file upload to the shared library. Each upload is tagged with
+  //       a batch label (e.g. "Guitar Lesson 1 elevenlabs Ryan") so files can
+  //       be browsed and re-used across tutorials. Filenames carry the
+  //       narration script (the uploader names files by line); the derived
+  //       text auto-fills the VO event when inserted.
+  //   (c) Browse the library, preview clips, and insert one at the playhead.
   const [studioImportOpen, setStudioImportOpen] = useState(false)
   const [studioImportUrl, setStudioImportUrl] = useState('')
   const [studioImportBusy, setStudioImportBusy] = useState(false)
   const [studioImportError, setStudioImportError] = useState('')
-  const [studioUploadFile, setStudioUploadFile] = useState<File | null>(null)
-  const [studioUploadText, setStudioUploadText] = useState('')
-  const studioUploadRef = useRef<HTMLInputElement | null>(null)
+  const [studioImportStatus, setStudioImportStatus] = useState('')
+
+  // Multi-file upload to library
+  const [libBatchTag, setLibBatchTag] = useState('')
+  const [libUploadFiles, setLibUploadFiles] = useState<File[]>([])
+  const libUploadRef = useRef<HTMLInputElement | null>(null)
+
+  // Browse library
+  interface LibBatch { batch: string; label: string; file_count: number }
+  interface LibFile { name: string; text: string; size_bytes: number }
+  const [libBatches, setLibBatches] = useState<LibBatch[]>([])
+  const [libSelectedBatch, setLibSelectedBatch] = useState<string>('')
+  const [libBatchFiles, setLibBatchFiles] = useState<LibFile[]>([])
+  const [libBusyName, setLibBusyName] = useState<string>('')
 
   const runStudioImport = async () => {
     if (!chart) return
@@ -3302,44 +5341,112 @@ export default function BeatmapEditor() {
     }
   }
 
-  const runStudioUpload = async () => {
-    if (!chart || !studioUploadFile) {
-      setStudioImportError('Pick an audio file first')
+  const loadLibBatches = useCallback(async () => {
+    try {
+      const res = await fetch('/api/tutorial/vo-library/batches')
+      if (!res.ok) throw new Error(`Failed to list batches (${res.status})`)
+      const data = await res.json() as LibBatch[]
+      setLibBatches(data)
+    } catch (e) {
+      setStudioImportError((e as Error).message)
+    }
+  }, [])
+
+  const loadLibBatchFiles = useCallback(async (batch: string) => {
+    if (!batch) { setLibBatchFiles([]); return }
+    try {
+      const res = await fetch(`/api/tutorial/vo-library/batches/${encodeURIComponent(batch)}`)
+      if (!res.ok) throw new Error(`Failed to list files (${res.status})`)
+      const data = await res.json() as { files: LibFile[] }
+      setLibBatchFiles(data.files || [])
+    } catch (e) {
+      setStudioImportError((e as Error).message)
+      setLibBatchFiles([])
+    }
+  }, [])
+
+  // Refresh batches whenever the modal opens; refresh the file list when the
+  // selected batch changes.
+  useEffect(() => {
+    if (studioImportOpen) {
+      loadLibBatches()
+    }
+  }, [studioImportOpen, loadLibBatches])
+
+  useEffect(() => {
+    loadLibBatchFiles(libSelectedBatch)
+  }, [libSelectedBatch, loadLibBatchFiles])
+
+  const runLibraryUpload = async () => {
+    const tag = libBatchTag.trim()
+    if (!tag) {
+      setStudioImportError('Add a batch tag first (e.g. "Guitar Lesson 1 elevenlabs Ryan")')
+      return
+    }
+    if (libUploadFiles.length === 0) {
+      setStudioImportError('Pick at least one audio file')
       return
     }
     setStudioImportBusy(true)
     setStudioImportError('')
+    setStudioImportStatus('')
     try {
       const fd = new FormData()
-      fd.append('file', studioUploadFile)
-      const res = await fetch(`/api/tutorial/${trackId}/beatmaps/${beatmapId}/vo/upload`, {
-        method: 'POST',
-        body: fd,
-      })
+      fd.append('batch_tag', tag)
+      for (const f of libUploadFiles) fd.append('files', f)
+      const res = await fetch('/api/tutorial/vo-library/upload', { method: 'POST', body: fd })
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
         throw new Error(err.detail || `Upload failed (${res.status})`)
       }
-      const data = await res.json() as { rel_path: string }
+      const data = await res.json() as { batch: string; label: string; files: LibFile[] }
+      setStudioImportStatus(`Saved ${data.files.length} VO${data.files.length === 1 ? '' : 's'} to "${data.label}".`)
+      setLibUploadFiles([])
+      if (libUploadRef.current) libUploadRef.current.value = ''
+      await loadLibBatches()
+      setLibSelectedBatch(data.batch)
+    } catch (e) {
+      setStudioImportError((e as Error).message)
+    } finally {
+      setStudioImportBusy(false)
+    }
+  }
+
+  const insertLibraryFile = async (batch: string, file: LibFile) => {
+    if (!chart) return
+    setLibBusyName(file.name)
+    setStudioImportError('')
+    setStudioImportStatus('')
+    try {
+      const res = await fetch(
+        `/api/tutorial/${trackId}/beatmaps/${beatmapId}/vo/from-library`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ batch, name: file.name }),
+        },
+      )
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || `Insert failed (${res.status})`)
+      }
+      const data = await res.json() as { rel_path: string; text: string }
       const ev: TutorialVoEvent = {
         kind: 'vo',
         id: `vo-${Date.now()}`,
         tick: playheadTick,
         file: data.rel_path,
-        text: studioUploadText.trim(),
+        text: data.text || file.text,
         engine: 'elevenlabs',
         voiceId: '',
       }
       updateTutorial([...chart.tutorial, ev], true)
       setSelectedTutorialId(ev.id)
-      setStudioImportOpen(false)
-      setStudioUploadFile(null)
-      setStudioUploadText('')
-      if (studioUploadRef.current) studioUploadRef.current.value = ''
+      setStudioImportStatus(`Inserted "${ev.text.slice(0, 50)}${ev.text.length > 50 ? '…' : ''}" at ${fmtTick(playheadTick)}.`)
     } catch (e) {
       setStudioImportError((e as Error).message)
     } finally {
-      setStudioImportBusy(false)
+      setLibBusyName('')
     }
   }
 
@@ -3450,6 +5557,84 @@ export default function BeatmapEditor() {
 
   const [sceneSelectedId, setSceneSelectedId] = useState<string | null>(null)
   const [scenePickerOpen, setScenePickerOpen] = useState(false)
+  // User-registered scene event types fetched from the backend. Merged with
+  // SCENE_EVENT_CATALOG via `mergedSceneCatalog` so picker / parser /
+  // serializer / value editor all see the full set.
+  const [customSceneTypes, setCustomSceneTypes] = useState<SceneEventCatalogEntry[]>([])
+  const mergedSceneCatalog = useMemo<SceneEventCatalogEntry[]>(
+    () => [...SCENE_EVENT_CATALOG, ...customSceneTypes],
+    [customSceneTypes],
+  )
+  // Create-type modal + handover-doc modal state.
+  const [typeModalOpen, setTypeModalOpen] = useState(false)
+  const [handoverModal, setHandoverModal] = useState<{ name: string; md: string } | null>(null)
+  // Form state lives on the parent so it survives unrelated re-renders.
+  const [typeFormName, setTypeFormName] = useState('')
+  const [typeFormLabel, setTypeFormLabel] = useState('')
+  const [typeFormGroup, setTypeFormGroup] = useState('Custom')
+  const [typeFormDesc, setTypeFormDesc] = useState('')
+  const [typeFormParamKind, setTypeFormParamKind] = useState<SceneEventParam['type']>('duration')
+  const [typeFormMin, setTypeFormMin] = useState('')
+  const [typeFormMax, setTypeFormMax] = useState('')
+  const [typeFormStep, setTypeFormStep] = useState('')
+  const [typeFormOptions, setTypeFormOptions] = useState('')
+  const [typeFormBusy, setTypeFormBusy] = useState(false)
+  const [typeFormError, setTypeFormError] = useState('')
+
+  const resetTypeForm = useCallback(() => {
+    setTypeFormName(''); setTypeFormLabel(''); setTypeFormGroup('Custom')
+    setTypeFormDesc(''); setTypeFormParamKind('duration')
+    setTypeFormMin(''); setTypeFormMax(''); setTypeFormStep('')
+    setTypeFormOptions(''); setTypeFormError('')
+  }, [])
+
+  const submitNewType = async () => {
+    setTypeFormBusy(true)
+    setTypeFormError('')
+    try {
+      let param: SceneEventParam
+      if (typeFormParamKind === 'duration') param = { type: 'duration' }
+      else if (typeFormParamKind === 'hex_color') param = { type: 'hex_color' }
+      else if (typeFormParamKind === 'none') param = { type: 'none' }
+      else if (typeFormParamKind === 'number') {
+        param = {
+          type: 'number',
+          min: typeFormMin ? Number(typeFormMin) : undefined,
+          max: typeFormMax ? Number(typeFormMax) : undefined,
+          step: typeFormStep ? Number(typeFormStep) : undefined,
+        }
+      } else {
+        const opts = typeFormOptions.split('|').map((s) => s.trim()).filter(Boolean)
+        if (opts.length === 0) throw new Error('Enum needs at least one option (pipe-separated, e.g. slow|fast)')
+        param = { type: 'enum', options: opts }
+      }
+      const body = {
+        name: typeFormName.trim(),
+        item_label: typeFormLabel.trim() || typeFormName.trim(),
+        group_label: typeFormGroup.trim() || 'Custom',
+        description: typeFormDesc.trim(),
+        param,
+      }
+      const res = await fetch('/api/scene-events/types', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || `Create failed (${res.status})`)
+      }
+      const data = await res.json() as { type: RawCustomType; handover_md: string }
+      setCustomSceneTypes((prev) => [...prev, adaptCustomType(data.type)])
+      setHandoverModal({ name: data.type.name, md: data.handover_md })
+      setTypeModalOpen(false)
+      resetTypeForm()
+    } catch (e) {
+      setTypeFormError((e as Error).message)
+    } finally {
+      setTypeFormBusy(false)
+    }
+  }
 
   const updateScene = (next: SceneEvent[]) => {
     if (!chart) return
@@ -3467,6 +5652,11 @@ export default function BeatmapEditor() {
     updateScene(chart.sceneEvents.map((e) => (e.id === id ? { ...e, duration } : e)))
   }
 
+  const setSceneEventValue = (id: string, value: string) => {
+    if (!chart) return
+    updateScene(chart.sceneEvents.map((e) => (e.id === id ? { ...e, value } : e)))
+  }
+
   const removeSceneEvent = (id: string) => {
     if (!chart) return
     updateScene(chart.sceneEvents.filter((e) => e.id !== id))
@@ -3475,12 +5665,14 @@ export default function BeatmapEditor() {
 
   const addSceneEvent = (name: string) => {
     if (!chart) return
-    const entry = SCENE_EVENT_CATALOG.find((e) => e.name === name)
+    const entry = findCatalogEntry(name, customSceneTypes)
+    const isDur = entry ? entryAcceptsDuration(entry) : false
     const ev: SceneEvent = {
       id: `scene-${Date.now()}`,
       tick: playheadTick,
       name,
-      duration: entry?.acceptsDuration ? 384 : 0,
+      duration: isDur ? 384 : 0,
+      value: defaultValueForParam(entry?.param),
     }
     updateScene([...chart.sceneEvents, ev])
     setSceneSelectedId(ev.id)
@@ -3706,7 +5898,7 @@ export default function BeatmapEditor() {
 
   return (
     <div className="fixed inset-0 bg-black flex flex-col z-[60]">
-      <header className="h-20 shrink-0 border-b border-gray-800 bg-gray-950 flex items-center px-3 gap-3">
+      <header className={`${maxHighway ? 'hidden' : ''} h-20 shrink-0 border-b border-gray-800 bg-gray-950 flex items-center px-3 gap-3`}>
         {/* Title + cover live in the left sidebar now; use the browser back
             button to leave. The whole header is the timelines. */}
         <div className="flex-1 min-w-0 flex flex-col gap-1">
@@ -3762,7 +5954,7 @@ export default function BeatmapEditor() {
             capped at ~420px so the lanes sit at a comfortable density even
             on wide monitors. The canvas backing-store is sized to this
             container by the ResizeObserver, not to the full viewport. */}
-        <aside className="w-80 shrink-0 border-r border-gray-800 bg-gray-950 overflow-y-auto p-4 space-y-5">
+        <aside className={`${maxHighway ? 'hidden' : ''} w-80 shrink-0 border-r border-gray-800 bg-gray-950 overflow-y-auto p-4 space-y-5`}>
           <section className="flex items-center gap-3">
             {meta?.hasAlbumArt && (
               <img
@@ -3790,8 +5982,40 @@ export default function BeatmapEditor() {
             </div>
           </section>
 
-          <section>
-            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Transport</h3>
+          {chart && (() => {
+            // Always offer the canonical 5-lane guitar set so the user can
+            // start authoring on a fresh beatmap; layer in any extra sections
+            // (drums, keyboard, etc.) the chart actually carries. Each option
+            // shows its current note count so empty difficulties are obvious.
+            const STANDARD = ['EasySingle', 'MediumSingle', 'HardSingle', 'ExpertSingle']
+            const allNames = [...STANDARD]
+            for (const s of chart.availableSections) {
+              if (!allNames.includes(s)) allNames.push(s)
+            }
+            const noteCountOf = (name: string): number => {
+              if (name === chart.activeName) return chart.notes.length
+              if (!chart.availableSections.includes(name)) return 0
+              return parseSectionNotes(chart.fullText, name).length
+            }
+            return (
+              <CollapsibleSection id="difficulty" title="Difficulty">
+                <select
+                  value={chart.activeName}
+                  onChange={(e) => switchDifficulty(e.target.value)}
+                  className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-jam-500"
+                >
+                  {allNames.map((s) => {
+                    const count = noteCountOf(s)
+                    const exists = chart.availableSections.includes(s)
+                    const tag = exists ? `${count} note${count === 1 ? '' : 's'}` : 'empty'
+                    return <option key={s} value={s}>{`${s} · ${tag}`}</option>
+                  })}
+                </select>
+              </CollapsibleSection>
+            )
+          })()}
+
+          <CollapsibleSection id="transport" title="Transport">
             <div className="flex items-center gap-1 mb-2">
               <button
                 onClick={() => seekSeconds(0)}
@@ -3948,6 +6172,32 @@ export default function BeatmapEditor() {
                 {realNotesReady ? (realNotesEnabled ? 'on' : 'off') : 'no pack'}
               </span>
             </label>
+            {/* Play mode — Autohit fires every real-note as the playhead
+                crosses it. Live waits for the player to strum (gamepad input).
+                Live works without an applied sound pack too (ghost gems
+                still press, explosions still fire) — sample audio just
+                doesn't play until a pack is added. */}
+            <div className="mt-2 flex items-center gap-1">
+              <span className="text-[11px] text-gray-500 mr-1 shrink-0">Mode</span>
+              {(['autohit', 'live'] as const).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setPlayMode(m)}
+                  className={`flex-1 px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                    playMode === m
+                      ? 'bg-cyan-700/70 text-white border border-cyan-500/60'
+                      : 'bg-gray-800 hover:bg-gray-700 text-gray-300 border border-transparent'
+                  }`}
+                  title={
+                    m === 'autohit'
+                      ? 'Game auto-fires every real-note sample on cross.'
+                      : 'Player drives hits — strum your guitar in time with held frets to fire each note.'
+                  }
+                >
+                  {m === 'autohit' ? 'Autohit' : 'Live'}
+                </button>
+              ))}
+            </div>
             <div className="mt-1 flex items-center gap-2">
               <span className="text-[11px] text-gray-500 shrink-0">Real vol</span>
               <input
@@ -3989,10 +6239,9 @@ export default function BeatmapEditor() {
                 1×
               </button>
             </div>
-          </section>
+          </CollapsibleSection>
 
-          <section>
-            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Tools</h3>
+          <CollapsibleSection id="tools" title="Tools">
             <div className="grid grid-cols-3 gap-1 mb-2">
               <button
                 onClick={() => setTool('select')}
@@ -4046,13 +6295,19 @@ export default function BeatmapEditor() {
                 ↷ Redo
               </button>
             </div>
-            <p className="text-[10px] text-gray-600 mt-1.5 leading-snug">
-              Shift-click to multi-select. Ctrl/Cmd + C/X/V copy, cut, paste at playhead. Ctrl+A selects all.
-              <br />
-              F = toggle force-HOPO · T = toggle tap · R = toggle real-note · O = toggle open · H = toggle 1-beat sustain · = quantize to grid.
-              <br />
-              <span className="text-gray-500">Note tool: click a lane to drop a gem · drag up while clicking to set a hold · shift-click for OPEN.</span>
-            </p>
+            <details className="mt-1.5 group">
+              <summary className="cursor-pointer text-[10px] text-gray-500 hover:text-gray-300 select-none flex items-center gap-1">
+                <span className="text-[10px] text-gray-600 group-open:rotate-90 transition-transform inline-block w-2">▶</span>
+                <span>? Help — shortcuts & note-tool quick reference</span>
+              </summary>
+              <p className="text-[10px] text-gray-600 mt-1 leading-snug pl-3">
+                Shift-click to multi-select. Ctrl/Cmd + C/X/V copy, cut, paste at playhead. Ctrl+A selects all.
+                <br />
+                F = toggle force-HOPO · T = toggle tap · R = toggle real-note · O = toggle open · H = toggle 1-beat sustain · = quantize to grid.
+                <br />
+                <span className="text-gray-500">Note tool: click a lane to drop a gem · drag up while clicking to set a hold · shift-click for OPEN.</span>
+              </p>
+            </details>
             {chart && selectedIds.size >= 1 && (() => {
               // Sustain editor — visible whenever at least one gem/open is
               // selected. For multi-selection we show the value of the first
@@ -4194,10 +6449,333 @@ export default function BeatmapEditor() {
                 </div>
               )
             })()}
-          </section>
+          </CollapsibleSection>
 
-          <section>
-            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Snap to grid</h3>
+          <CollapsibleSection
+            id="input-device"
+            title="Input device"
+            right={
+              <button
+                onClick={refreshGamepads}
+                className="text-[10px] px-1.5 py-0.5 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded"
+                title="Re-scan for connected gamepads"
+              >
+                ↻ scan
+              </button>
+            }
+          >
+            <select
+              value={gamepadId}
+              onChange={(e) => setGamepadId(e.target.value)}
+              className="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1.5 text-[11px] text-gray-200 focus:outline-none focus:border-jam-500"
+            >
+              <option value="">— no device —</option>
+              <option value={KEYBOARD_DEVICE_ID}>Keyboard</option>
+              {gamepadList.map((gp) => (
+                <option key={gp.id} value={gp.id}>{gp.id.slice(0, 50)}</option>
+              ))}
+            </select>
+            {gamepadList.length === 0 && (
+              <div className="text-[10px] text-gray-500 mt-1 leading-snug space-y-1">
+                <p>No gamepad detected. Try in this order:</p>
+                <ol className="list-decimal pl-4 space-y-0.5 text-gray-500">
+                  <li><span className="text-gray-300">Click anywhere in this page</span> first — Chrome won't enumerate Bluetooth gamepads until the page has had user input.</li>
+                  <li>Press a button on the guitar.</li>
+                  <li>If still nothing, switch the CRKD <span className="font-semibold">mode dial to 4 (Xinput)</span> — modes 1/2/3 (Switch/PS/generic) aren't always recognised by the browser's Gamepad API.</li>
+                  <li>Verify the browser sees it at <a href="https://hardwaretester.com/gamepad" target="_blank" rel="noopener noreferrer" className="text-emerald-400 hover:text-emerald-300 underline">hardwaretester.com/gamepad</a> — if it's blank there too, it's a browser/OS pairing issue, not this app.</li>
+                </ol>
+                <p className="text-gray-600 pt-1">
+                  Raw enumeration:{' '}
+                  <span className="font-mono">
+                    {(navigator.getGamepads?.() || []).map((g, i) => g ? `[${i}] ${g.id}` : `[${i}] null`).join(' · ') || 'getGamepads unavailable'}
+                  </span>
+                </p>
+              </div>
+            )}
+            <div className="mt-2 space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-gray-500 uppercase tracking-wider">Bindings</span>
+                  <button
+                    onClick={startAutoMap}
+                    disabled={!!autoMapStep || !gamepadId}
+                    className="text-[10px] px-1.5 py-0.5 bg-emerald-700/60 hover:bg-emerald-600/70 disabled:opacity-40 text-emerald-100 rounded"
+                    title={gamepadId ? 'Walk through pressing each fret + strum in order' : 'Connect a gamepad to use auto-map'}
+                  >
+                    {autoMapStep ? 'mapping…' : 'auto-map'}
+                  </button>
+                </div>
+                {(Object.keys(BINDING_LABELS) as (keyof InputBinding)[]).map((k) => {
+                  const v = binding[k]
+                  const listening = captureNextPressRef.current !== null && autoMapStep === k
+                  const isCurrentWizardStep = autoMapStep === k
+                  const btnLabel = v.buttons.length === 0 ? '—' : v.buttons.map((i) => `btn ${i}`).join(', ')
+                  // Pretty key labels — strip leading "Key" / "Digit", show
+                  // arrows etc as symbols. Falls back to raw code.
+                  const prettyKey = (code: string) =>
+                    code.startsWith('Key') ? code.slice(3)
+                    : code.startsWith('Digit') ? code.slice(5)
+                    : code === 'ArrowUp' ? '↑'
+                    : code === 'ArrowDown' ? '↓'
+                    : code === 'ArrowLeft' ? '←'
+                    : code === 'ArrowRight' ? '→'
+                    : code === 'Space' ? '␣'
+                    : code
+                  const keyLabel = v.keys.length === 0 ? '—' : v.keys.map(prettyKey).join('+')
+                  const displayLabel = isKeyboardDevice ? keyLabel : btnLabel
+                  const hasAny = isKeyboardDevice ? v.keys.length > 0 : v.buttons.length > 0
+                  return (
+                    <div key={k} className="flex items-center gap-1 text-[11px]">
+                      <span className={`w-14 ${isCurrentWizardStep ? 'text-emerald-300' : 'text-gray-400'}`}>
+                        {BINDING_LABELS[k]}
+                      </span>
+                      <span
+                        className="flex-1 font-mono text-gray-500 truncate"
+                        title={isKeyboardDevice
+                          ? `Keyboard: ${v.keys.join(' / ') || 'none'}`
+                          : `Gamepad: ${btnLabel}`}
+                      >
+                        {displayLabel}
+                      </span>
+                      <button
+                        onClick={() => listenForBinding(k)}
+                        disabled={listening || isCurrentWizardStep}
+                        className="px-1.5 py-0.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-gray-300 rounded text-[10px]"
+                        title={isKeyboardDevice
+                          ? `Press a key to bind ${BINDING_LABELS[k]}. Multiple keys per lane allowed.`
+                          : `Press a gamepad button to bind ${BINDING_LABELS[k]}. Multiple buttons per lane allowed.`}
+                      >
+                        {isCurrentWizardStep ? 'press…' : hasAny ? '+' : 'listen'}
+                      </button>
+                      <button
+                        onClick={() => setBinding((b) => {
+                          const slot = b[k]
+                          // Only clear the active device's side so swapping
+                          // devices preserves the other set.
+                          return { ...b, [k]: isKeyboardDevice
+                            ? { buttons: slot.buttons, keys: [] }
+                            : { buttons: [], keys: slot.keys } }
+                        })}
+                        className="px-1.5 py-0.5 bg-gray-800 hover:bg-gray-700 text-gray-500 rounded text-[10px]"
+                        title={isKeyboardDevice
+                          ? 'Clear all keys bound to this lane'
+                          : 'Clear all gamepad buttons bound to this lane'}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  )
+                })}
+                {autoMapStep && (
+                  <p className="text-[10px] text-emerald-300 leading-snug pt-1">
+                    Press the <span className="font-semibold">{BINDING_LABELS[autoMapStep]}</span> button on the guitar…
+                    <button
+                      onClick={() => setAutoMapStep(null)}
+                      className="ml-2 underline text-gray-400 hover:text-gray-200"
+                    >
+                      cancel
+                    </button>
+                  </p>
+                )}
+                {/* Live held-frets indicator. One pill per lane lights up
+                    when the corresponding fret button is currently in the
+                    heldFretsRef set. If you press 2 frets and only one pill
+                    lights, the device isn't reporting the second button as
+                    pressed (could be anti-ghosting on the controller, a bad
+                    binding, or two bindings sharing the same button index). */}
+                <div className="flex items-center gap-1 pt-1">
+                  <span className="text-[10px] text-gray-500 mr-1 w-12">Held:</span>
+                  {[0, 1, 2, 3, 4].map((lane) => {
+                    const on = heldFretsView.includes(lane)
+                    const colors = ['bg-green-500', 'bg-red-500', 'bg-yellow-500', 'bg-blue-500', 'bg-orange-500']
+                    return (
+                      <div
+                        key={lane}
+                        className={`w-5 h-3 rounded ${on ? colors[lane] : 'bg-gray-800 border border-gray-700'}`}
+                        title={`Lane ${lane}${on ? ' — pressed' : ''}`}
+                      />
+                    )
+                  })}
+                  <div
+                    className={`w-3 h-3 rounded ${strumUpLit ? 'bg-fuchsia-400' : 'bg-gray-800 border border-gray-700'}`}
+                    title={`Strum ↑${strumUpLit ? ' — pressed' : ''}`}
+                  />
+                  <div
+                    className={`w-3 h-3 rounded ${strumDownLit ? 'bg-fuchsia-400' : 'bg-gray-800 border border-gray-700'}`}
+                    title={`Strum ↓${strumDownLit ? ' — pressed' : ''}`}
+                  />
+                  <span className="ml-auto text-[10px] font-mono text-gray-500">
+                    {heldFretsView.length}/5
+                  </span>
+                </div>
+                {/* What the 3D ghost renderer is reading. If this strip
+                    differs from the Held strip above, the GemMeshLayer has a
+                    ref/closure problem (different held set). If they always
+                    match, the issue is in the ghost animation logic. */}
+                <div className="flex items-center gap-1">
+                  <span className="text-[10px] text-gray-500 mr-1 w-12">3D sees:</span>
+                  {[0, 1, 2, 3, 4].map((lane) => {
+                    const on = ghostHeldView.includes(lane)
+                    const colors = ['bg-green-500', 'bg-red-500', 'bg-yellow-500', 'bg-blue-500', 'bg-orange-500']
+                    return (
+                      <div
+                        key={lane}
+                        className={`w-5 h-3 rounded ${on ? colors[lane] : 'bg-gray-800 border border-gray-700'} opacity-70`}
+                        title={`3D layer ${on ? 'is animating' : 'is NOT animating'} lane ${lane}`}
+                      />
+                    )
+                  })}
+                  <span className="ml-auto text-[10px] font-mono text-gray-500">
+                    {ghostHeldView.length}/5
+                  </span>
+                </div>
+                <div className="flex items-center gap-1 pt-1">
+                  <button
+                    onClick={saveBinding}
+                    disabled={!bindingDirty}
+                    className={`flex-1 px-2 py-1 rounded text-[10px] font-medium transition-colors ${
+                      bindingDirty
+                        ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                        : 'bg-gray-800 text-gray-500 cursor-default'
+                    }`}
+                    title="Persist this mapping for the selected device (per-device, survives refresh)."
+                  >
+                    {bindingDirty ? '✓ Save config' : 'Saved'}
+                  </button>
+                  {bindingDirty && (
+                    <button
+                      onClick={() => setBinding(savedBinding)}
+                      className="px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded text-[10px]"
+                      title="Discard changes and revert to the saved mapping."
+                    >
+                      revert
+                    </button>
+                  )}
+                </div>
+              </div>
+          </CollapsibleSection>
+
+          <CollapsibleSection
+            id="scoring"
+            title="Scoring"
+            right={
+              <button
+                onClick={resetScoring}
+                className="text-[10px] px-1.5 py-0.5 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded"
+                title="Reset score, streak, and hit/miss tracking for this pass"
+              >
+                ↺ reset
+              </button>
+            }
+          >
+            <p className="text-[10px] text-gray-600 leading-snug mb-2">
+              Hit windows lifted from <span className="font-mono">GuitarJudge.cs</span>:
+              Perfect ±60ms · Good 60–120ms · Okay 120–200ms early / 120–150ms late.
+              Streak holds on any tier; only a fully-missed note (past late-okay) breaks it.
+            </p>
+            <span className="text-[10px] uppercase tracking-wider text-gray-500 block mt-1 mb-1">Per-difficulty target</span>
+            <div className="grid grid-cols-2 gap-1">
+              {(['EasySingle', 'MediumSingle', 'HardSingle', 'ExpertSingle'] as const).map((d) => (
+                <label key={d} className="block">
+                  <span className="text-[10px] text-gray-500">{d.replace('Single', '')}</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step={50000}
+                    value={scoringSettings.targets[d] ?? 0}
+                    onChange={(e) => setScoringSettings((s) => ({
+                      ...s,
+                      targets: { ...s.targets, [d]: Math.max(0, Number(e.target.value) || 0) },
+                    }))}
+                    className="w-full bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-[11px] font-mono text-gray-200"
+                  />
+                </label>
+              ))}
+            </div>
+            {chart && (
+              <p className="text-[10px] text-gray-500 mt-1">
+                <span className="font-mono">{chart.activeName}</span>: {noteCountForScoring} scoreable notes ·
+                <span className="text-emerald-300 font-mono"> {pointsPerPerfectHit.toLocaleString()}</span> pts / perfect
+              </p>
+            )}
+            <span className="text-[10px] uppercase tracking-wider text-gray-500 block mt-2 mb-1">Tolerance multipliers</span>
+            <div className="space-y-0.5">
+              {(['veryEarly', 'early', 'perfect', 'late', 'veryLate'] as const).map((tier) => (
+                <div key={tier} className="flex items-center gap-1 text-[11px]">
+                  <span className={`w-20 ${
+                    tier === 'perfect' ? 'text-emerald-300' :
+                    tier === 'early' || tier === 'late' ? 'text-cyan-300' :
+                    'text-amber-400'
+                  }`}>
+                    {tier === 'veryEarly' ? 'Very early' :
+                     tier === 'veryLate' ? 'Very late' :
+                     tier[0].toUpperCase() + tier.slice(1)}
+                  </span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1.5}
+                    step={0.05}
+                    value={scoringSettings.multipliers[tier]}
+                    onChange={(e) => setScoringSettings((s) => ({
+                      ...s,
+                      multipliers: { ...s.multipliers, [tier]: Number(e.target.value) },
+                    }))}
+                    className="flex-1 accent-emerald-500"
+                  />
+                  <span className="w-10 text-right font-mono text-gray-500 tabular-nums">
+                    {scoringSettings.multipliers[tier].toFixed(2)}×
+                  </span>
+                </div>
+              ))}
+            </div>
+            <button
+              onClick={() => setScoringSettings(DEFAULT_SCORING_SETTINGS)}
+              className="w-full mt-2 px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded text-[10px]"
+              title="Restore targets + multipliers to defaults"
+            >
+              ↺ Reset scoring defaults
+            </button>
+            {/* Battle mode debuffs — gimmick visual effects layered on the
+                runway. Nested here rather than in 3D View because they're
+                scoring/gameplay modifiers a chart can throw at the player. */}
+            <details className="group mt-2 pt-2 border-t border-gray-800">
+              <summary className="cursor-pointer text-[11px] text-red-400 hover:text-red-300 select-none flex items-center justify-between py-1 px-2 bg-gray-900 border border-gray-800 rounded">
+                <span>⚔ Battle mode debuffs</span>
+                <span className="text-[10px] text-gray-600 group-open:rotate-90 transition-transform">▶</span>
+              </summary>
+              <div className="pt-2">
+                <p className="text-[10px] text-gray-600 leading-snug mb-2">
+                  Gimmick visual effects to throw at the player. Stack freely.
+                </p>
+                <label className="flex items-center gap-2 cursor-pointer select-none mb-1">
+                  <input
+                    type="checkbox"
+                    checked={view3d.battleReverseScroll}
+                    onChange={(e) => setView3d((v) => ({ ...v, battleReverseScroll: e.target.checked }))}
+                    className="h-3.5 w-3.5 rounded border-gray-600 bg-gray-900 accent-red-500 cursor-pointer"
+                  />
+                  <span className="text-[11px] text-gray-300">Reverse scroll</span>
+                  <span className="text-[10px] text-gray-500 ml-auto" title="Highway texture flows AWAY from the camera instead of toward it. Disorienting on purpose.">
+                    {view3d.battleReverseScroll ? 'on' : 'off'}
+                  </span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={view3d.battleInkSplatter}
+                    onChange={(e) => setView3d((v) => ({ ...v, battleInkSplatter: e.target.checked }))}
+                    className="h-3.5 w-3.5 rounded border-gray-600 bg-gray-900 accent-red-500 cursor-pointer"
+                  />
+                  <span className="text-[11px] text-gray-300">Ink splatter</span>
+                  <span className="text-[10px] text-gray-500 ml-auto" title="Jet-black highway, no lane separators, all gems become glossy black.">
+                    {view3d.battleInkSplatter ? 'on' : 'off'}
+                  </span>
+                </label>
+              </div>
+            </details>
+          </CollapsibleSection>
+
+          <CollapsibleSection id="snap" title="Snap to grid">
             <div className="grid grid-cols-4 gap-1">
               {SNAP_OPTIONS.map((opt) => (
                 <button
@@ -4216,13 +6794,13 @@ export default function BeatmapEditor() {
             <p className="text-[11px] text-gray-600 mt-1">
               Drag-to-move and arrow nudge snap to this beat fraction.
             </p>
-          </section>
+          </CollapsibleSection>
 
-          <section>
-            <div className="flex items-baseline justify-between mb-2">
-              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Scroll speed</h3>
-              <span className="text-[11px] font-mono text-gray-500 tabular-nums">{scrollSpeed} px/s</span>
-            </div>
+          <CollapsibleSection
+            id="scroll-speed"
+            title="Scroll speed"
+            right={<span className="text-[11px] font-mono text-gray-500 tabular-nums">{scrollSpeed} px/s</span>}
+          >
             <input
               type="range"
               min={150}
@@ -4232,10 +6810,313 @@ export default function BeatmapEditor() {
               onChange={(e) => setScrollSpeed(Number(e.target.value))}
               className="w-full accent-jam-500"
             />
-          </section>
+          </CollapsibleSection>
 
-          <section>
-            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Shortcuts</h3>
+          <CollapsibleSection
+            id="view3d"
+            title="3D view"
+            right={
+              <label className="flex items-center gap-1 text-[11px] text-gray-400">
+                <input
+                  type="checkbox"
+                  checked={view3d.enabled}
+                  onChange={(e) => setView3d((v) => ({ ...v, enabled: e.target.checked }))}
+                  className="accent-emerald-500"
+                />
+                enabled
+              </label>
+            }
+          >
+            {view3d.enabled ? (
+              <details className="group">
+                <summary className="cursor-pointer text-[11px] text-gray-400 hover:text-gray-200 select-none flex items-center justify-between py-1 px-2 bg-gray-900 border border-gray-800 rounded mb-2">
+                  <span>⚙ Camera / mesh / scene settings</span>
+                  <span className="text-[10px] text-gray-600 group-open:rotate-90 transition-transform">▶</span>
+                </summary>
+                <p className="text-[10px] text-gray-600 leading-snug mb-2">
+                  Tilts the runway with CSS perspective for an in-game preview. Note editing is off in this mode — toggle off to author.
+                </p>
+                {[
+                  { key: 'angleDeg',      label: 'Tilt angle',         unit: '°',   min: 0,    max: 80,   step: 1   },
+                  { key: 'perspectivePx', label: 'Perspective',        unit: 'px',  min: 400,  max: 2400, step: 50  },
+                  { key: 'depthPx',       label: 'Camera distance',    unit: 'px',  min: -300, max: 300,  step: 5   },
+                  { key: 'liftPx',        label: 'Strike line down',   unit: 'px',  min: -200, max: 400,  step: 5   },
+                ].map(({ key, label, unit, min, max, step }) => {
+                  const k = key as 'angleDeg' | 'perspectivePx' | 'depthPx' | 'liftPx'
+                  return (
+                    <div key={key} className="mb-1.5">
+                      <div className="flex items-baseline justify-between">
+                        <span className="text-[10px] text-gray-500">{label}</span>
+                        <span className="text-[10px] font-mono text-gray-500 tabular-nums">{view3d[k]}{unit}</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={min}
+                        max={max}
+                        step={step}
+                        value={view3d[k]}
+                        onChange={(e) => setView3d((v) => ({ ...v, [k]: Number(e.target.value) }))}
+                        className="w-full accent-emerald-500"
+                      />
+                    </div>
+                  )
+                })}
+                <div className="mb-1.5">
+                  <div className="flex items-baseline justify-between">
+                    <span className="text-[10px] text-gray-500">Horizon fade</span>
+                    <span className="text-[10px] font-mono text-gray-500 tabular-nums">{view3d.horizonFade.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={view3d.horizonFade}
+                    onChange={(e) => setView3d((v) => ({ ...v, horizonFade: Number(e.target.value) }))}
+                    className="w-full accent-emerald-500"
+                  />
+                </div>
+                <div className="pt-2 mt-2 border-t border-gray-800">
+                  <span className="text-[10px] uppercase tracking-wider text-gray-500 block mb-1">Gem mesh</span>
+                  <select
+                    value={view3d.meshName}
+                    onChange={(e) => setView3d((v) => ({ ...v, meshName: e.target.value }))}
+                    className="w-full bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-[11px] text-gray-200 font-mono"
+                  >
+                    <option value="">(2D circles)</option>
+                    {gemMeshes.map((m) => (
+                      <option key={m.name} value={m.name}>{m.stem}</option>
+                    ))}
+                  </select>
+                  {gemMeshes.length === 0 && (
+                    <p className="text-[10px] text-gray-600 mt-1 leading-snug">
+                      No gem meshes found. Check the Unity project path in <span className="font-mono">JAMSESHQUEST_GEMS_DIR</span>.
+                    </p>
+                  )}
+                  {view3d.meshName && (
+                    <>
+                      <div className="mt-2">
+                        <div className="flex items-baseline justify-between">
+                          <span className="text-[10px] text-gray-500">Gem size</span>
+                          <span className="text-[10px] font-mono text-gray-500 tabular-nums">{view3d.meshScale.toFixed(2)}×</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0.3}
+                          max={2.5}
+                          step={0.05}
+                          value={view3d.meshScale}
+                          onChange={(e) => setView3d((v) => ({ ...v, meshScale: Number(e.target.value) }))}
+                          className="w-full accent-emerald-500"
+                        />
+                      </div>
+                      <div className="mt-1">
+                        <div className="flex items-baseline justify-between">
+                          <span className="text-[10px] text-gray-500">Spin speed</span>
+                          <span className="text-[10px] font-mono text-gray-500 tabular-nums">{view3d.meshSpinDegPerSec}°/s</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={360}
+                          step={5}
+                          value={view3d.meshSpinDegPerSec}
+                          onChange={(e) => setView3d((v) => ({ ...v, meshSpinDegPerSec: Number(e.target.value) }))}
+                          className="w-full accent-emerald-500"
+                        />
+                      </div>
+                      <div className="mt-1">
+                        <div className="flex items-baseline justify-between">
+                          <span className="text-[10px] text-gray-500">Explosion size</span>
+                          <span className="text-[10px] font-mono text-gray-500 tabular-nums">{view3d.explosionScale.toFixed(2)}×</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0.1}
+                          max={2.0}
+                          step={0.05}
+                          value={view3d.explosionScale}
+                          onChange={(e) => setView3d((v) => ({ ...v, explosionScale: Number(e.target.value) }))}
+                          className="w-full accent-emerald-500"
+                          title="Multiplier for the shard cluster size at hit time. <1.0 shrinks the burst."
+                        />
+                      </div>
+                      <div className="mt-1">
+                        <div className="flex items-baseline justify-between">
+                          <span className="text-[10px] text-gray-500">Ghost rest height</span>
+                          <span className="text-[10px] font-mono text-gray-500 tabular-nums">{view3d.ghostRestY.toFixed(2)}×</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={4}
+                          step={0.05}
+                          value={view3d.ghostRestY}
+                          onChange={(e) => setView3d((v) => ({ ...v, ghostRestY: Number(e.target.value) }))}
+                          className="w-full accent-emerald-500"
+                          title="Resting Y position of the ghost gems above the runway plane (× baseGemSize)"
+                        />
+                      </div>
+                      <div className="mt-1">
+                        <div className="flex items-baseline justify-between">
+                          <span className="text-[10px] text-gray-500">Ghost drop range</span>
+                          <span className="text-[10px] font-mono text-gray-500 tabular-nums">{view3d.ghostDropRange.toFixed(2)}×</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={3}
+                          step={0.05}
+                          value={view3d.ghostDropRange}
+                          onChange={(e) => setView3d((v) => ({ ...v, ghostDropRange: Number(e.target.value) }))}
+                          className="w-full accent-emerald-500"
+                          title="How far the ghost gem falls when the fret is pressed (× baseGemSize). Pressed Y = rest − drop range."
+                        />
+                      </div>
+                    </>
+                  )}
+                </div>
+                <div className="pt-2 mt-2 border-t border-gray-800">
+                  <span className="text-[10px] uppercase tracking-wider text-gray-500 block mb-1">Highway texture</span>
+                  <select
+                    value={view3d.highwayTexture}
+                    onChange={(e) => setView3d((v) => ({ ...v, highwayTexture: e.target.value }))}
+                    className="w-full bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-[11px] text-gray-200 font-mono"
+                  >
+                    <option value="">(none — dark plane)</option>
+                    {highwayTextures.map((t) => (
+                      <option key={t.name} value={t.name}>{t.stem}</option>
+                    ))}
+                  </select>
+                  {highwayTextures.length === 0 && (
+                    <p className="text-[10px] text-gray-600 mt-1 leading-snug">
+                      No textures found. Check the path in <span className="font-mono">JAMSESHQUEST_HIGHWAYS_DIR</span>.
+                    </p>
+                  )}
+                  <label className="mt-1 flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={view3d.highwayScroll}
+                      onChange={(e) => setView3d((v) => ({ ...v, highwayScroll: e.target.checked }))}
+                      className="h-3.5 w-3.5 rounded border-gray-600 bg-gray-900 accent-emerald-500 cursor-pointer"
+                    />
+                    <span className="text-[11px] text-gray-300">Scroll with gems</span>
+                    <span className="text-[10px] text-gray-500 ml-auto" title="Animates the texture's V offset so the highway flows toward the camera at the same rate as falling gems.">
+                      {view3d.highwayScroll ? 'on' : 'off'}
+                    </span>
+                  </label>
+                  <div className="mt-2 flex items-center gap-2">
+                    <span className="text-[10px] text-gray-500">Tint</span>
+                    <input
+                      type="color"
+                      value={view3d.highwayTint}
+                      onChange={(e) => setView3d((v) => ({ ...v, highwayTint: e.target.value.toUpperCase() }))}
+                      className="h-6 w-10 bg-gray-900 border border-gray-700 rounded cursor-pointer"
+                    />
+                    <input
+                      type="text"
+                      value={view3d.highwayTint}
+                      onChange={(e) => setView3d((v) => ({ ...v, highwayTint: e.target.value }))}
+                      className="flex-1 bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-[10px] font-mono text-gray-200"
+                    />
+                  </div>
+                  <div className="mt-1">
+                    <div className="flex items-baseline justify-between">
+                      <span className="text-[10px] text-gray-500">Tint opacity</span>
+                      <span className="text-[10px] font-mono text-gray-500 tabular-nums">{view3d.highwayTintOpacity.toFixed(2)}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.01}
+                      value={view3d.highwayTintOpacity}
+                      onChange={(e) => setView3d((v) => ({ ...v, highwayTintOpacity: Number(e.target.value) }))}
+                      className="w-full accent-emerald-500"
+                    />
+                  </div>
+                </div>
+                <div className="pt-2 mt-2 border-t border-gray-800">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[10px] uppercase tracking-wider text-gray-500">Lane separators</span>
+                    <label className="flex items-center gap-1 text-[10px] text-gray-400">
+                      <input
+                        type="checkbox"
+                        checked={view3d.laneSeparators}
+                        onChange={(e) => setView3d((v) => ({ ...v, laneSeparators: e.target.checked }))}
+                        className="accent-emerald-500"
+                      />
+                      on
+                    </label>
+                  </div>
+                  {view3d.laneSeparators && (
+                    <>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-gray-500 w-10">Colour</span>
+                        <input
+                          type="color"
+                          value={view3d.laneSeparatorColor}
+                          onChange={(e) => setView3d((v) => ({ ...v, laneSeparatorColor: e.target.value.toUpperCase() }))}
+                          className="h-6 w-10 bg-gray-900 border border-gray-700 rounded cursor-pointer"
+                        />
+                        <input
+                          type="text"
+                          value={view3d.laneSeparatorColor}
+                          onChange={(e) => setView3d((v) => ({ ...v, laneSeparatorColor: e.target.value }))}
+                          className="flex-1 bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-[10px] font-mono text-gray-200"
+                        />
+                      </div>
+                      <div className="mt-1">
+                        <div className="flex items-baseline justify-between">
+                          <span className="text-[10px] text-gray-500">Width</span>
+                          <span className="text-[10px] font-mono text-gray-500 tabular-nums">{(view3d.laneSeparatorWidth * 1000).toFixed(0)}px</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0.005}
+                          max={0.15}
+                          step={0.005}
+                          value={view3d.laneSeparatorWidth}
+                          onChange={(e) => setView3d((v) => ({ ...v, laneSeparatorWidth: Number(e.target.value) }))}
+                          className="w-full accent-emerald-500"
+                          title="Stripe thickness in world units (×1000 ≈ pixels at default zoom)."
+                        />
+                      </div>
+                      <div className="mt-1">
+                        <div className="flex items-baseline justify-between">
+                          <span className="text-[10px] text-gray-500">Outer glow</span>
+                          <span className="text-[10px] font-mono text-gray-500 tabular-nums">{view3d.laneSeparatorGlow.toFixed(2)}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          value={view3d.laneSeparatorGlow}
+                          onChange={(e) => setView3d((v) => ({ ...v, laneSeparatorGlow: Number(e.target.value) }))}
+                          className="w-full accent-emerald-500"
+                          title="Halo opacity (×4 wider than the main stripe) for a soft outer glow."
+                        />
+                      </div>
+                    </>
+                  )}
+                </div>
+                <button
+                  onClick={() => setView3d({ ...VIEW3D_DEFAULT, enabled: true })}
+                  className="w-full mt-2 px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded text-[10px]"
+                  title="Reset all sliders to their defaults"
+                >
+                  ↺ Reset 3D defaults
+                </button>
+              </details>
+            ) : (
+              <p className="text-[11px] text-gray-600 leading-snug">
+                Off — flat 2D authoring view. Turn on for an in-game preview with tunable angle, perspective, and horizon fade.
+              </p>
+            )}
+          </CollapsibleSection>
+
+          <CollapsibleSection id="shortcuts" title="Shortcuts" defaultOpen={false}>
             <p className="text-[10px] text-gray-500 leading-snug">
               <span className="font-mono text-gray-300">Click</span> select ·
               <span className="font-mono text-gray-300"> Drag</span> move ·
@@ -4245,11 +7126,36 @@ export default function BeatmapEditor() {
               <span className="font-mono text-gray-300"> Del</span> delete ·
               <span className="font-mono text-gray-300"> Space</span> play
             </p>
-          </section>
+          </CollapsibleSection>
         </aside>
 
-        <div className="flex-1 flex justify-center bg-black min-w-0 px-4">
-          <div ref={containerRef} className="relative w-full max-w-[660px]">
+        <div
+          className="flex-1 flex justify-center bg-black min-w-0 px-4 overflow-hidden relative"
+          style={view3d.enabled ? { perspective: `${view3d.perspectivePx}px`, perspectiveOrigin: '50% 100%' } : undefined}
+        >
+          {/* Background video layer — sits behind the canvas wrapper. YouTube
+              iframes can't be muted reliably via the API on every browser, so
+              we lean on the URL params (mute=1) AND set the muted property
+              via the <video> attribute for uploaded files. */}
+          {bgKind !== 'none' && (
+            <BackgroundLayer
+              kind={bgKind}
+              ytId={ytId}
+              videoUrl={bgKind === 'video' && bgValue ? `/api/tracks/${trackId}/background-video?v=${encodeURIComponent(bgValue)}` : ''}
+              currentTime={currentTime}
+              playing={playing}
+            />
+          )}
+          <div
+            ref={containerRef}
+            // In 3D + mesh mode the runway is rendered by Three.js with real
+            // perspective, and the near-edge of the floor spreads outward
+            // wider than the 660-px authoring cap. Drop the cap there so the
+            // canvas fills the whole centre column and the runway doesn't
+            // get clipped at the sidebar boundaries.
+            className={`relative w-full z-10 ${view3d.enabled && view3d.meshName ? '' : 'max-w-[660px]'}`}
+            style={view3d.enabled ? { transformStyle: 'preserve-3d' } : undefined}
+          >
             <canvas
               ref={canvasRef}
               onMouseDown={handleMouseDown}
@@ -4258,7 +7164,226 @@ export default function BeatmapEditor() {
               onMouseLeave={handleMouseUp}
               onWheel={handleWheel}
               className="absolute inset-0 w-full h-full cursor-crosshair"
+              style={
+                // True-3D mesh mode renders the runway entirely in three.js,
+                // so hide the 2D layer to stop it from showing a redundant
+                // (and possibly mis-aligned) tilted runway behind the gems.
+                view3d.enabled && view3d.meshName
+                  ? { display: 'none' }
+                  : view3d.enabled
+                    ? {
+                        transform: `translateY(${view3d.liftPx}px) translateZ(${view3d.depthPx}px) rotateX(${view3d.angleDeg}deg)`,
+                        transformOrigin: '50% 100%',
+                        transition: 'transform 120ms ease-out',
+                      }
+                    : undefined
+              }
             />
+            {/* Horizon fade — gradient from black at top (far) to transparent
+                near the strike line, so distant notes recede instead of
+                fighting the foreground for attention. Sits above the canvas
+                but below the badge / error toast. */}
+            {view3d.enabled && view3d.horizonFade > 0 && (
+              <div
+                className="absolute inset-0 pointer-events-none"
+                style={{
+                  background: `linear-gradient(to bottom, rgba(0,0,0,${view3d.horizonFade}) 0%, rgba(0,0,0,0) 55%)`,
+                  transform: `translateY(${view3d.liftPx}px) translateZ(${view3d.depthPx}px) rotateX(${view3d.angleDeg}deg)`,
+                  transformOrigin: '50% 100%',
+                }}
+              />
+            )}
+            {view3d.enabled && view3d.meshName && chart && (
+              <GemMeshLayer
+                ref={gemMeshLayerRef}
+                meshUrl={`/api/gem-meshes/${encodeURIComponent(view3d.meshName)}`}
+                explosionUrl="/api/gem-meshes/GemExplosion.fbx"
+                notes={chart.notes}
+                tempoSegments={tempoSegments}
+                resolution={chart.resolution}
+                currentTime={currentTime}
+                scrollSpeed={scrollSpeed}
+                canvasW={canvasSize.w}
+                canvasH={canvasSize.h}
+                scale={view3d.meshScale}
+                spinDegPerSec={view3d.meshSpinDegPerSec}
+                explosionScale={view3d.explosionScale}
+                angleDeg={view3d.angleDeg}
+                perspectivePx={view3d.perspectivePx}
+                ghostRestY={view3d.ghostRestY}
+                ghostDropRange={view3d.ghostDropRange}
+                depthPx={view3d.depthPx}
+                liftPx={view3d.liftPx}
+                highwayTextureUrl={view3d.highwayTexture ? `/api/highway-textures/${encodeURIComponent(view3d.highwayTexture)}` : ''}
+                highwayScroll={view3d.highwayScroll}
+                highwayTint={view3d.highwayTint}
+                highwayTintOpacity={view3d.highwayTintOpacity}
+                laneSeparators={view3d.laneSeparators}
+                laneSeparatorColor={view3d.laneSeparatorColor}
+                laneSeparatorWidth={view3d.laneSeparatorWidth}
+                laneSeparatorGlow={view3d.laneSeparatorGlow}
+                battleReverseScroll={view3d.battleReverseScroll}
+                battleInkSplatter={view3d.battleInkSplatter}
+                heldFretsRef={heldFretsRef}
+              />
+            )}
+            {view3d.enabled && (
+              <div className="absolute top-3 right-3 bg-emerald-900/80 border border-emerald-700 text-emerald-100 text-[10px] font-mono px-2 py-0.5 rounded pointer-events-none uppercase tracking-wider">
+                3D preview · editing off
+              </div>
+            )}
+            {/* Floating fullscreen-highway toggle. Lives at the canvas's
+                bottom-right so it stays clear of the score/streak HUD at the
+                top. Esc also exits. */}
+            <button
+              onClick={() => setMaxHighway((v) => !v)}
+              className={`absolute bottom-3 right-3 z-20 px-2 py-1 rounded text-[10px] font-mono uppercase tracking-wider transition-colors ${
+                maxHighway
+                  ? 'bg-gray-900/70 hover:bg-gray-800 text-gray-300 border border-gray-700'
+                  : 'bg-gray-900/70 hover:bg-gray-800 text-gray-300 border border-gray-800'
+              }`}
+              title={maxHighway ? 'Exit highway-only view (Esc)' : 'Hide sidebars + top bar — maximise the highway'}
+            >
+              {maxHighway ? '↙ Exit' : '⛶ Max'}
+            </button>
+            {/* Compact transport — only shown when sidebars are hidden so the
+                user can still play / pause / scrub / seek without restoring
+                the chrome. Mirrors the sidebar's transport row, scaled for an
+                overlay. */}
+            {maxHighway && (
+              <div className="absolute bottom-3 left-3 z-20 flex items-center gap-1 bg-gray-900/75 backdrop-blur-sm border border-gray-700 rounded px-2 py-1">
+                <button
+                  onClick={() => seekSeconds(0)}
+                  className="w-7 h-7 rounded bg-gray-800 hover:bg-gray-700 text-gray-200 flex items-center justify-center text-xs"
+                  title="Rewind to start"
+                >
+                  ⏮
+                </button>
+                <button
+                  onClick={() => {
+                    if (!chart) return
+                    const stepTicks = Math.max(1, Math.round(chart.resolution / snapDivisor))
+                    const curTick = secToTick(tempoSegments, chart.resolution, currentTime)
+                    const newTick = Math.max(0, curTick - stepTicks)
+                    seekSeconds(tickToSec(tempoSegments, chart.resolution, newTick))
+                  }}
+                  disabled={!chart}
+                  className="w-7 h-7 rounded bg-gray-800 hover:bg-gray-700 disabled:opacity-30 text-gray-200 flex items-center justify-center text-[10px] font-mono"
+                  title="Back one snap unit"
+                >
+                  −
+                </button>
+                <button
+                  onClick={togglePlay}
+                  className="w-9 h-9 rounded-full bg-jam-600 hover:bg-jam-500 text-white flex items-center justify-center text-sm"
+                  title={playing ? 'Pause (Space)' : 'Play (Space)'}
+                >
+                  {playing ? '❚❚' : '▶'}
+                </button>
+                <button
+                  onClick={() => {
+                    if (!chart) return
+                    const stepTicks = Math.max(1, Math.round(chart.resolution / snapDivisor))
+                    const curTick = secToTick(tempoSegments, chart.resolution, currentTime)
+                    const newTick = curTick + stepTicks
+                    const newSec = tickToSec(tempoSegments, chart.resolution, newTick)
+                    seekSeconds(duration > 0 ? Math.min(duration, newSec) : newSec)
+                  }}
+                  disabled={!chart}
+                  className="w-7 h-7 rounded bg-gray-800 hover:bg-gray-700 disabled:opacity-30 text-gray-200 flex items-center justify-center text-[10px] font-mono"
+                  title="Forward one snap unit"
+                >
+                  +
+                </button>
+                <button
+                  onClick={() => seekSeconds(duration || 0)}
+                  disabled={!duration}
+                  className="w-7 h-7 rounded bg-gray-800 hover:bg-gray-700 disabled:opacity-30 text-gray-200 flex items-center justify-center text-xs"
+                  title="Skip to end"
+                >
+                  ⏭
+                </button>
+                <span className="ml-1 text-[11px] font-mono text-gray-300 tabular-nums">
+                  {Math.floor(currentTime / 60)}:{Math.floor(currentTime % 60).toString().padStart(2, '0')}
+                  <span className="text-gray-600"> / </span>
+                  {Math.floor(duration / 60)}:{Math.floor(duration % 60).toString().padStart(2, '0')}
+                </span>
+                <input
+                  type="range"
+                  min={0}
+                  max={duration || 0}
+                  step={0.05}
+                  value={currentTime}
+                  onChange={(e) => seekSeconds(Number(e.target.value))}
+                  className="w-40 ml-2 accent-jam-500"
+                  title="Scrub"
+                />
+              </div>
+            )}
+            {/* Live-play HUD — streak (top-left) + score (top-right). Shown
+                whenever Live mode is selected so the user can see scoring
+                state even when paused; the values reset when playback
+                rewinds to the start. */}
+            {playMode === 'live' && (
+              <>
+                <div className="absolute top-3 left-3 pointer-events-none flex flex-col items-start">
+                  <span className="uppercase tracking-wider text-gray-400 font-mono" style={{ fontSize: 50 }}>Streak</span>
+                  <span
+                    className={`font-bold font-mono leading-none ${
+                      streak >= 50 ? 'text-fuchsia-300' :
+                      streak >= 25 ? 'text-amber-300' :
+                      streak >= 10 ? 'text-cyan-300' :
+                      'text-white'
+                    }`}
+                    style={{ fontSize: 150, textShadow: '0 0 24px rgba(0,0,0,0.95)' }}
+                  >
+                    {streak}
+                  </span>
+                  {maxStreak > 0 && (
+                    <span className="text-gray-500 font-mono" style={{ fontSize: 50 }}>best · {maxStreak}</span>
+                  )}
+                  {lastTier && (
+                    <span
+                      className={`font-bold font-mono mt-2 ${
+                        lastTier === 'perfect' ? 'text-emerald-300' :
+                        lastTier === 'early' || lastTier === 'late' ? 'text-cyan-300' :
+                        lastTier === 'veryEarly' || lastTier === 'veryLate' ? 'text-amber-400' :
+                        lastTier === 'miss' ? 'text-red-400' :
+                        lastTier === 'frets' ? 'text-orange-400' :
+                        'text-gray-400'
+                      }`}
+                      style={{ fontSize: 60, textShadow: '0 0 20px rgba(0,0,0,0.95)' }}
+                      title={
+                        lastTier === 'frets' ? 'A note was within timing window but the held fret combo didn\'t match.'
+                        : lastTier === 'empty' ? 'No note within the timing window when you strummed.'
+                        : undefined
+                      }
+                    >
+                      {lastTier === 'perfect' ? 'PERFECT'
+                        : lastTier === 'early' ? 'EARLY'
+                        : lastTier === 'late' ? 'LATE'
+                        : lastTier === 'veryEarly' ? 'VERY EARLY'
+                        : lastTier === 'veryLate' ? 'VERY LATE'
+                        : lastTier === 'miss' ? 'MISS'
+                        : lastTier === 'frets' ? 'WRONG FRETS'
+                        : 'NO NOTE'}
+                    </span>
+                  )}
+                </div>
+                <div className="absolute top-3 right-3 pointer-events-none flex flex-col items-end" style={{ marginTop: view3d.enabled ? 24 : 0 }}>
+                  <span className="uppercase tracking-wider text-gray-400 font-mono" style={{ fontSize: 50 }}>Score</span>
+                  <span
+                    className="font-bold font-mono leading-none text-white tabular-nums"
+                    style={{ fontSize: 150, textShadow: '0 0 24px rgba(0,0,0,0.95)' }}
+                  >
+                    {score.toLocaleString()}
+                  </span>
+                  <span className="text-gray-500 font-mono" style={{ fontSize: 50 }}>
+                    {pointsPerPerfectHit.toLocaleString()} / perfect
+                  </span>
+                </div>
+              </>
+            )}
             {ruleError && (
               <div className="absolute top-3 left-1/2 -translate-x-1/2 bg-red-900/90 border border-red-700 text-red-100 text-[12px] font-medium px-3 py-1.5 rounded shadow-lg pointer-events-none max-w-[90%] text-center">
                 ⚠ {ruleError}
@@ -4267,30 +7392,119 @@ export default function BeatmapEditor() {
           </div>
         </div>
 
-        <aside className="w-80 shrink-0 border-l border-gray-800 bg-gray-950 overflow-y-auto p-4 space-y-5">
-          <section>
-            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Difficulty</h3>
-            <select
-              value={chart?.activeName || ''}
-              onChange={(e) => switchDifficulty(e.target.value)}
-              disabled={!chart || (chart?.availableSections.length ?? 0) === 0}
-              className="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-jam-500"
-            >
-              {chart && chart.availableSections.length === 0 && <option value="">(no sections)</option>}
-              {chart?.availableSections.map((s) => (
-                <option key={s} value={s}>{s}</option>
-              ))}
-            </select>
-            {chart && chart.availableSections.length > 1 && (
-              <p className="text-[11px] text-gray-600 mt-1">
-                Switching difficulty keeps in-memory edits — Save writes them all back.
-              </p>
+        <aside className={`${maxHighway ? 'hidden' : ''} w-80 shrink-0 border-l border-gray-800 bg-gray-950 overflow-y-auto p-4 space-y-5`}>
+          <CollapsibleSection
+            id="background"
+            title="Background"
+            right={
+              bgKind !== 'none' && (
+                <span className="text-[10px] text-emerald-400 font-mono">
+                  {bgKind === 'youtube' ? 'YouTube' : 'video'}
+                </span>
+              )
+            }
+          >
+            {!bgLoaded ? (
+              <p className="text-[10px] text-gray-600">loading…</p>
+            ) : (
+              <>
+                <p className="text-[10px] text-gray-600 leading-snug mb-2">
+                  Plays a muted video behind the highway. YouTube embeds + uploaded files both supported.
+                </p>
+                <div className="grid grid-cols-3 gap-1 mb-2">
+                  {(['none', 'youtube', 'video'] as const).map((k) => (
+                    <button
+                      key={k}
+                      onClick={() => setBgKind(k)}
+                      className={`px-2 py-1 rounded text-[10px] font-medium transition-colors ${
+                        bgKind === k
+                          ? 'bg-emerald-700/60 text-white border border-emerald-500/60'
+                          : 'bg-gray-800 hover:bg-gray-700 text-gray-300 border border-transparent'
+                      }`}
+                    >
+                      {k === 'none' ? 'Off' : k === 'youtube' ? 'YouTube' : 'Upload'}
+                    </button>
+                  ))}
+                </div>
+                {bgKind === 'youtube' && (
+                  <div>
+                    <label className="block text-[10px] text-gray-500 mb-1">YouTube URL</label>
+                    <input
+                      type="text"
+                      value={bgValue}
+                      onChange={(e) => setBgValue(e.target.value)}
+                      placeholder="https://www.youtube.com/watch?v=…"
+                      className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] font-mono text-gray-200"
+                    />
+                    {bgSourceUrl && bgSourceUrl !== bgValue && (
+                      <button
+                        onClick={() => setBgValue(bgSourceUrl)}
+                        className="mt-1 text-[10px] text-emerald-400 hover:text-emerald-300 underline"
+                        title={bgSourceUrl}
+                      >
+                        ↺ use source video ({bgSourceUrl.slice(0, 40)}…)
+                      </button>
+                    )}
+                    {ytId && (
+                      <p className="text-[10px] text-gray-600 mt-1 font-mono truncate">id: {ytId}</p>
+                    )}
+                  </div>
+                )}
+                {bgKind === 'video' && (
+                  <div className="space-y-1">
+                    <label className="block text-[10px] text-gray-500">Uploaded file</label>
+                    <span className="block text-[11px] font-mono text-gray-300 truncate">
+                      {bgValue || '— none —'}
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <label className="flex-1 px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded text-[10px] cursor-pointer text-center">
+                        {bgValue ? 'Replace' : 'Upload video'}
+                        <input
+                          type="file"
+                          accept="video/mp4,video/webm,video/quicktime,video/x-m4v,video/ogg,.mp4,.webm,.mov,.m4v,.ogv"
+                          className="hidden"
+                          onChange={(e) => {
+                            const f = e.target.files?.[0]
+                            if (f) uploadBackgroundVideo(f)
+                            e.target.value = ''
+                          }}
+                        />
+                      </label>
+                      {bgValue && (
+                        <button
+                          onClick={async () => {
+                            await fetch(`/api/tracks/${trackId}/background-video`, { method: 'DELETE' })
+                            setBgValue('')
+                          }}
+                          className="px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-500 rounded text-[10px]"
+                          title="Remove uploaded video"
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+                <button
+                  onClick={saveBackground}
+                  disabled={!bgDirty}
+                  className={`w-full mt-2 px-2 py-1 rounded text-[10px] font-medium transition-colors ${
+                    bgDirty
+                      ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                      : 'bg-gray-800 text-gray-500 cursor-default'
+                  }`}
+                  title="Persist the background config to song.ini"
+                >
+                  {bgDirty ? '✓ Save background' : 'Saved'}
+                </button>
+              </>
             )}
-          </section>
+          </CollapsibleSection>
 
-          <section>
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Sections</h3>
+          <CollapsibleSection
+            id="sections"
+            title="Sections"
+            right={
               <button
                 onClick={addSectionAtPlayhead}
                 disabled={!chart}
@@ -4299,7 +7513,8 @@ export default function BeatmapEditor() {
               >
                 + Add at playhead
               </button>
-            </div>
+            }
+          >
             {(!chart || chart.sections.length === 0) ? (
               <p className="text-[11px] text-gray-600">No section markers. Sections appear as labelled rules on the runway.</p>
             ) : (
@@ -4338,11 +7553,12 @@ export default function BeatmapEditor() {
                 ))}
               </ul>
             )}
-          </section>
+          </CollapsibleSection>
 
-          <section>
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Tempo map</h3>
+          <CollapsibleSection
+            id="tempo-map"
+            title="Tempo map"
+            right={
               <button
                 onClick={addTempoMarkerAtPlayhead}
                 disabled={!chart}
@@ -4351,7 +7567,8 @@ export default function BeatmapEditor() {
               >
                 + Add at playhead
               </button>
-            </div>
+            }
+          >
             {!chart ? null : (
               <ul className="space-y-1 max-h-44 overflow-y-auto">
                 {chart.tempoMarkers.map((m, idx) => (
@@ -4405,37 +7622,7 @@ export default function BeatmapEditor() {
               First marker fixed at tick 0. Tempo changes phase-lock everything
               downstream — notes, VOs, click track, timeline strips.
             </p>
-          </section>
-
-          {chart && (
-            <section className="border-t border-gray-800 pt-4">
-              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Scene</h3>
-              <p className="text-[11px] text-gray-600 mb-2 leading-snug">
-                Song-wide flags applied at load. <span className="font-mono">0</span> = off,
-                <span className="font-mono"> 0.1</span> = on, higher = more intense.
-              </p>
-              <div className="grid grid-cols-2 gap-2">
-                {([
-                  ['floorcrowd', 'Floor crowd'],
-                  ['lasers_center', 'Lasers · center'],
-                  ['lasers_left', 'Lasers · left'],
-                  ['lasers_right', 'Lasers · right'],
-                ] as const).map(([key, label]) => (
-                  <label key={key} className="block">
-                    <span className="text-[10px] text-gray-500">{label}</span>
-                    <input
-                      type="number"
-                      min={0}
-                      step={0.1}
-                      value={chart.sceneFlags[key]}
-                      onChange={(e) => setSceneFlag(key, Math.max(0, Number(e.target.value) || 0))}
-                      className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-[11px] text-gray-200 font-mono"
-                    />
-                  </label>
-                ))}
-              </div>
-            </section>
-          )}
+          </CollapsibleSection>
 
           {chart && (() => {
             // Active applied packs (skip tombstones in the list).
@@ -4445,18 +7632,37 @@ export default function BeatmapEditor() {
             const isEditing = editingSlot !== null
             const isPickerOpenForNew = !isEditing && livePacks.length === 0
             return (
-              <section className="border-t border-gray-800 pt-4">
-                <div className="flex items-center justify-between mb-2">
-                  <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Sound packs</h3>
-                  {livePacks.length > 0 && (
-                    <span className="text-[10px] text-cyan-300 font-mono">
-                      {livePacks.length} pack{livePacks.length === 1 ? '' : 's'}
-                    </span>
-                  )}
-                </div>
+              <CollapsibleSection
+                id="sound-packs"
+                title="Sound packs"
+                right={livePacks.length > 0 ? (
+                  <span className="text-[10px] text-cyan-300 font-mono">
+                    {livePacks.length} pack{livePacks.length === 1 ? '' : 's'}
+                  </span>
+                ) : undefined}
+              >
                 <p className="text-[10px] text-gray-600 mb-2 leading-snug">
                   Add as many packs as you want; each Real-note can point at any one of them. Per-note pack assignment lives below in the selected-note editor.
                 </p>
+                {/* Guitar preview — strum the connected gamepad while the song
+                    is paused to audition the active pack's samples. Held frets
+                    resolve to single-lane / chord / open samples the same way
+                    the chart does on real-notes. */}
+                <label className="flex items-center gap-2 mb-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={guitarPreview}
+                    onChange={(e) => setGuitarPreview(e.target.checked)}
+                    disabled={!realNotesReady || !gamepadId}
+                    className="h-3.5 w-3.5 rounded border-gray-600 bg-gray-900 accent-cyan-500 cursor-pointer disabled:cursor-not-allowed"
+                  />
+                  <span className={`text-[11px] ${realNotesReady && gamepadId ? 'text-gray-300' : 'text-gray-600'}`}>
+                    Preview with guitar
+                  </span>
+                  <span className="text-[10px] text-gray-500 ml-auto" title="Strum the connected gamepad while the song is paused to audition the active pack's patches. Held frets pick the slot.">
+                    {!gamepadId ? 'no device' : !realNotesReady ? 'no pack' : guitarPreview ? 'on' : 'off'}
+                  </span>
+                </label>
 
                 {/* Applied pack list */}
                 {livePacks.length > 0 && (
@@ -4577,13 +7783,12 @@ export default function BeatmapEditor() {
                     + Add sound pack
                   </button>
                 )}
-              </section>
+              </CollapsibleSection>
             )
           })()}
 
           {chart && (
-            <section className="border-t border-gray-800 pt-4">
-              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Add at playhead</h3>
+            <CollapsibleSection id="add-at-playhead" title="Add at playhead">
               <div className="grid grid-cols-4 gap-1 mb-1">
                 <div className="relative">
                   <button
@@ -4595,8 +7800,10 @@ export default function BeatmapEditor() {
                   </button>
                   {scenePickerOpen && (
                     <ScenePicker
+                      catalog={mergedSceneCatalog}
                       onPick={addSceneEvent}
                       onClose={() => setScenePickerOpen(false)}
+                      onCreateType={() => { setScenePickerOpen(false); setTypeModalOpen(true) }}
                     />
                   )}
                 </div>
@@ -4629,19 +7836,132 @@ export default function BeatmapEditor() {
                 VOs fire on their own tick — STEPs only gate note pass/fail. Drop VOs anywhere; you don't need a STEP first.
               </p>
               <button
-                onClick={() => { setStudioImportOpen(true); setStudioImportError('') }}
+                onClick={() => { setStudioImportOpen(true); setStudioImportError(''); setStudioImportStatus('') }}
                 className="w-full px-2 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-jam-600 text-gray-200 rounded text-[11px] font-medium transition-colors"
-                title="Paste an elevenlabs.io/app/studio/... link to pull a rendered chapter as a VO"
+                title="Upload VO files to the shared library or insert a previously-uploaded clip at the playhead"
               >
-                ↓ Import VO from ElevenLabs Studio
+                ↓ VO library (upload / insert)
               </button>
-            </section>
+            </CollapsibleSection>
           )}
 
+          {chart && sceneSelectedId && (() => {
+            const ev = chart.sceneEvents.find((e) => e.id === sceneSelectedId)
+            if (!ev) return null
+            const entry = findCatalogEntry(ev.name, customSceneTypes)
+            const param: SceneEventParam = entry?.param ?? { type: 'duration' }
+            return (
+              <CollapsibleSection
+                id="selected-scene-event"
+                title="Selected scene event"
+                right={
+                  <button
+                    onClick={() => removeSceneEvent(ev.id)}
+                    className="text-[10px] text-red-400 hover:text-red-300"
+                    title="Delete this event"
+                  >
+                    delete
+                  </button>
+                }
+              >
+                <p className="text-[11px] text-gray-200 font-mono truncate" title={ev.name}>{entry?.itemLabel || ev.name}</p>
+                <p className="text-[10px] text-gray-600 truncate">{ev.name} · tick {ev.tick}</p>
+                {entry?.description && (
+                  <p className="text-[10px] text-gray-500 mt-1 leading-snug">{entry.description}</p>
+                )}
+                <div className="mt-2">
+                  {param.type === 'duration' && (
+                    <label className="block">
+                      <span className="text-[10px] text-gray-500">Duration (ticks)</span>
+                      <input
+                        type="number"
+                        min={0}
+                        step={chart.resolution}
+                        value={ev.duration}
+                        onChange={(e) => resizeSceneEvent(ev.id, Math.max(0, Number(e.target.value) || 0))}
+                        className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-[11px] text-gray-200 font-mono"
+                      />
+                    </label>
+                  )}
+                  {param.type === 'hex_color' && (
+                    <label className="block">
+                      <span className="text-[10px] text-gray-500">Colour (#RRGGBB)</span>
+                      <div className="flex items-center gap-2 mt-0.5">
+                        <input
+                          type="color"
+                          value={/^#[0-9a-fA-F]{6}$/.test(ev.value) ? ev.value : '#ffffff'}
+                          onChange={(e) => setSceneEventValue(ev.id, e.target.value.toUpperCase())}
+                          className="h-7 w-12 bg-gray-900 border border-gray-700 rounded cursor-pointer"
+                        />
+                        <input
+                          type="text"
+                          value={ev.value}
+                          onChange={(e) => setSceneEventValue(ev.id, e.target.value.trim())}
+                          placeholder="#FF8800"
+                          className="flex-1 bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-[11px] text-gray-200 font-mono"
+                        />
+                      </div>
+                    </label>
+                  )}
+                  {param.type === 'number' && (
+                    <label className="block">
+                      <span className="text-[10px] text-gray-500">
+                        Value
+                        {(param.min !== undefined || param.max !== undefined) &&
+                          ` (${param.min ?? '−∞'} … ${param.max ?? '+∞'})`}
+                      </span>
+                      <input
+                        type="number"
+                        min={param.min}
+                        max={param.max}
+                        step={param.step ?? 'any'}
+                        value={ev.value}
+                        onChange={(e) => setSceneEventValue(ev.id, e.target.value)}
+                        className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-[11px] text-gray-200 font-mono"
+                      />
+                    </label>
+                  )}
+                  {param.type === 'enum' && (
+                    <label className="block">
+                      <span className="text-[10px] text-gray-500">Option</span>
+                      <select
+                        value={ev.value}
+                        onChange={(e) => setSceneEventValue(ev.id, e.target.value)}
+                        className="w-full bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-[11px] text-gray-200 font-mono"
+                      >
+                        {param.options.map((o) => (
+                          <option key={o} value={o}>{o}</option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  {param.type === 'none' && (
+                    <p className="text-[10px] text-gray-600 italic">No parameter — fires as a bare cue.</p>
+                  )}
+                </div>
+                {!entry?.builtin && entry && (
+                  <button
+                    onClick={() => {
+                      fetch(`/api/scene-events/types/${encodeURIComponent(ev.name)}/handover`)
+                        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`${r.status}`))))
+                        .then((d: { handover_md: string }) => setHandoverModal({ name: ev.name, md: d.handover_md }))
+                        .catch(() => undefined)
+                    }}
+                    className="mt-2 w-full px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded text-[10px]"
+                    title="Re-open the engineer handover doc for this custom event type"
+                  >
+                    ⤓ View handover doc
+                  </button>
+                )}
+              </CollapsibleSection>
+            )
+          })()}
+
           {chart && (
-            <section className="border-t border-gray-800 pt-4">
-              <div className="flex items-center justify-between mb-2">
-                <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Tutorial</h3>
+            <CollapsibleSection
+              id="tutorial"
+              title="Tutorial"
+              right={
                 <label className="flex items-center gap-1 text-[11px] text-gray-400">
                   <input
                     type="checkbox"
@@ -4651,7 +7971,8 @@ export default function BeatmapEditor() {
                   />
                   enabled
                 </label>
-              </div>
+              }
+            >
               {chart.tutorialEnabled && (
                 <>
                   <div className="mb-2 p-2 bg-gray-900 border border-gray-800 rounded">
@@ -5027,7 +8348,7 @@ export default function BeatmapEditor() {
                   </p>
                 </>
               )}
-            </section>
+            </CollapsibleSection>
           )}
         </aside>
       </div>
@@ -5059,88 +8380,169 @@ export default function BeatmapEditor() {
             if (e.target === e.currentTarget && !studioImportBusy) setStudioImportOpen(false)
           }}
         >
-          <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-md p-5 space-y-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-xl max-h-[90vh] overflow-y-auto p-5 space-y-4">
             <div>
-              <h3 className="text-lg font-semibold text-sky-300">Import VO from ElevenLabs Studio</h3>
+              <h3 className="text-lg font-semibold text-sky-300">VO library</h3>
               <p className="text-xs text-gray-500 mt-0.5">
-                Either paste a Studio URL (requires Studio API access on your
-                account) or upload an audio file you've already downloaded
-                from Studio. Either path drops a VO at the playhead.
+                Pull from ElevenLabs Studio, batch-upload local files to the
+                shared library, or insert a previously-uploaded clip at the
+                playhead. Library files keep their original names — name each
+                file as its script line so the narration text auto-fills.
               </p>
             </div>
 
-            {/* Path A: Studio URL — works only if the account is whitelisted */}
-            <div className="space-y-1">
-              <label className="block text-xs text-gray-400">Paste Studio URL</label>
-              <input
-                type="text"
-                value={studioImportUrl}
-                onChange={(e) => setStudioImportUrl(e.target.value)}
-                placeholder="https://elevenlabs.io/app/studio/<project>?chapterId=<chapter>"
-                disabled={studioImportBusy}
-                autoFocus
-                className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-[12px] font-mono text-gray-200 focus:outline-none focus:border-sky-500 disabled:opacity-50"
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !studioImportBusy) runStudioImport()
-                }}
-              />
-              <button
-                onClick={runStudioImport}
-                disabled={studioImportBusy || !studioImportUrl.trim()}
-                className="w-full mt-1 px-3 py-1.5 bg-sky-600 hover:bg-sky-500 disabled:opacity-40 text-white rounded text-xs font-medium"
-              >
-                {studioImportBusy ? 'Fetching…' : 'Fetch from Studio'}
-              </button>
-            </div>
+            {/* Path A: Studio URL */}
+            <details className="bg-gray-950/60 border border-gray-800 rounded">
+              <summary className="px-3 py-2 text-xs uppercase tracking-wider text-gray-400 cursor-pointer">
+                Fetch from ElevenLabs Studio
+              </summary>
+              <div className="p-3 space-y-1 border-t border-gray-800">
+                <input
+                  type="text"
+                  value={studioImportUrl}
+                  onChange={(e) => setStudioImportUrl(e.target.value)}
+                  placeholder="https://elevenlabs.io/app/studio/<project>?chapterId=<chapter>"
+                  disabled={studioImportBusy}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-[12px] font-mono text-gray-200 focus:outline-none focus:border-sky-500 disabled:opacity-50"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !studioImportBusy) runStudioImport()
+                  }}
+                />
+                <button
+                  onClick={runStudioImport}
+                  disabled={studioImportBusy || !studioImportUrl.trim()}
+                  className="w-full mt-1 px-3 py-1.5 bg-sky-600 hover:bg-sky-500 disabled:opacity-40 text-white rounded text-xs font-medium"
+                >
+                  {studioImportBusy ? 'Fetching…' : 'Fetch + add VO at playhead'}
+                </button>
+              </div>
+            </details>
 
-            <div className="flex items-center gap-2 text-[10px] text-gray-600 uppercase tracking-wider">
-              <div className="flex-1 h-px bg-gray-800" />
-              or upload manually
-              <div className="flex-1 h-px bg-gray-800" />
-            </div>
+            {/* Path B: Multi-file upload to library */}
+            <details open className="bg-gray-950/60 border border-gray-800 rounded">
+              <summary className="px-3 py-2 text-xs uppercase tracking-wider text-emerald-300 cursor-pointer">
+                Upload files to library
+              </summary>
+              <div className="p-3 space-y-2 border-t border-gray-800">
+                <label className="block text-xs text-gray-400">Batch tag</label>
+                <input
+                  type="text"
+                  value={libBatchTag}
+                  onChange={(e) => setLibBatchTag(e.target.value)}
+                  placeholder='e.g. "Guitar Lesson 1 elevenlabs Ryan"'
+                  disabled={studioImportBusy}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-[12px] text-gray-200 focus:outline-none focus:border-emerald-500 disabled:opacity-50"
+                />
+                <label className="block text-xs text-gray-400 pt-1">Audio files (multi-select OK)</label>
+                <input
+                  ref={libUploadRef}
+                  type="file"
+                  multiple
+                  accept=".ogg,.mp3,.wav,.flac,.m4a,audio/*"
+                  onChange={(e) => setLibUploadFiles(Array.from(e.target.files || []))}
+                  disabled={studioImportBusy}
+                  className="w-full text-[11px] text-gray-300 file:mr-2 file:px-2 file:py-1 file:rounded file:border-0 file:bg-gray-700 file:hover:bg-gray-600 file:text-gray-100 file:text-[11px] file:cursor-pointer cursor-pointer disabled:opacity-50"
+                />
+                {libUploadFiles.length > 0 && (
+                  <div className="text-[10px] text-gray-500 max-h-24 overflow-y-auto bg-gray-900 border border-gray-800 rounded p-1.5">
+                    {libUploadFiles.map((f) => (
+                      <div key={f.name} className="truncate font-mono">· {f.name}</div>
+                    ))}
+                  </div>
+                )}
+                <button
+                  onClick={runLibraryUpload}
+                  disabled={studioImportBusy || libUploadFiles.length === 0 || !libBatchTag.trim()}
+                  className="w-full px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white rounded text-xs font-medium"
+                >
+                  {studioImportBusy ? 'Uploading…' : `Upload ${libUploadFiles.length || ''} file${libUploadFiles.length === 1 ? '' : 's'} to library`}
+                </button>
+                <p className="text-[10px] text-gray-600 leading-snug">
+                  Files are saved to the shared library only. Insert them into
+                  this tutorial from the section below.
+                </p>
+              </div>
+            </details>
 
-            {/* Path B: Manual file upload — always works */}
-            <div className="space-y-1">
-              <label className="block text-xs text-gray-400">Audio file</label>
-              <input
-                ref={studioUploadRef}
-                type="file"
-                accept=".ogg,.mp3,.wav,.flac,.m4a,audio/*"
-                onChange={(e) => setStudioUploadFile(e.target.files?.[0] || null)}
-                disabled={studioImportBusy}
-                className="w-full text-[11px] text-gray-300 file:mr-2 file:px-2 file:py-1 file:rounded file:border-0 file:bg-gray-700 file:hover:bg-gray-600 file:text-gray-100 file:text-[11px] file:cursor-pointer cursor-pointer disabled:opacity-50"
-              />
-              <label className="block text-xs text-gray-400 mt-2">Script text (optional)</label>
-              <textarea
-                value={studioUploadText}
-                onChange={(e) => setStudioUploadText(e.target.value)}
-                placeholder="What the VO says — stored on the event so you can re-generate later."
-                rows={2}
-                disabled={studioImportBusy}
-                className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-[11px] text-gray-200 focus:outline-none focus:border-sky-500 resize-y disabled:opacity-50"
-              />
-              <button
-                onClick={runStudioUpload}
-                disabled={studioImportBusy || !studioUploadFile}
-                className="w-full mt-1 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white rounded text-xs font-medium"
-              >
-                {studioImportBusy ? 'Uploading…' : 'Upload + add VO'}
-              </button>
-            </div>
+            {/* Path C: Browse the library */}
+            <details open className="bg-gray-950/60 border border-gray-800 rounded">
+              <summary className="px-3 py-2 text-xs uppercase tracking-wider text-amber-300 cursor-pointer">
+                Insert from library
+              </summary>
+              <div className="p-3 space-y-2 border-t border-gray-800">
+                {libBatches.length === 0 ? (
+                  <p className="text-[11px] text-gray-500">No batches in the library yet.</p>
+                ) : (
+                  <>
+                    <label className="block text-xs text-gray-400">Batch</label>
+                    <select
+                      value={libSelectedBatch}
+                      onChange={(e) => setLibSelectedBatch(e.target.value)}
+                      className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-[12px] text-gray-200 focus:outline-none focus:border-amber-500"
+                    >
+                      <option value="">— pick a batch —</option>
+                      {libBatches.map((b) => (
+                        <option key={b.batch} value={b.batch}>
+                          {b.label} ({b.file_count})
+                        </option>
+                      ))}
+                    </select>
+                    {libSelectedBatch && libBatchFiles.length > 0 && (
+                      <div className="max-h-72 overflow-y-auto border border-gray-800 rounded divide-y divide-gray-800">
+                        {libBatchFiles.map((f) => {
+                          const busy = libBusyName === f.name
+                          return (
+                            <div key={f.name} className="flex items-center gap-2 px-2 py-1.5 bg-gray-900 hover:bg-gray-800">
+                              <audio
+                                src={`/api/tutorial/vo-library/file/${encodeURIComponent(libSelectedBatch)}/${encodeURIComponent(f.name)}`}
+                                controls
+                                preload="none"
+                                className="h-7 flex-shrink-0"
+                                style={{ width: 160 }}
+                              />
+                              <div className="flex-1 min-w-0">
+                                <div className="text-[11px] text-gray-200 truncate" title={f.text}>{f.text || f.name}</div>
+                                <div className="text-[10px] text-gray-600 truncate">{f.name}</div>
+                              </div>
+                              <button
+                                onClick={() => insertLibraryFile(libSelectedBatch, f)}
+                                disabled={busy || studioImportBusy}
+                                className="px-2 py-1 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white rounded text-[11px] font-medium flex-shrink-0"
+                                title={`Insert at ${fmtTick(playheadTick)}`}
+                              >
+                                {busy ? '…' : '+ insert'}
+                              </button>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
+                    {libSelectedBatch && libBatchFiles.length === 0 && (
+                      <p className="text-[11px] text-gray-500">Empty batch.</p>
+                    )}
+                  </>
+                )}
+                <p className="text-[10px] text-gray-600 leading-snug">
+                  Insert drops a VO event at the current playhead
+                  (<span className="font-mono text-gray-400">{fmtTick(playheadTick)}</span>).
+                  Advance the playhead between inserts to sequence them.
+                </p>
+              </div>
+            </details>
 
+            {studioImportStatus && (
+              <p className="text-xs text-emerald-400 break-words">{studioImportStatus}</p>
+            )}
             {studioImportError && (
               <p className="text-xs text-red-400 break-words">{studioImportError}</p>
             )}
-            <p className="text-[10px] text-gray-600">
-              Adding at <span className="font-mono text-gray-400">{fmtTick(playheadTick)}</span>.
-            </p>
             <div className="flex justify-end pt-1">
               <button
                 onClick={() => setStudioImportOpen(false)}
                 disabled={studioImportBusy}
                 className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-gray-300 rounded text-xs"
               >
-                Cancel
+                Close
               </button>
             </div>
           </div>
@@ -5211,6 +8613,207 @@ export default function BeatmapEditor() {
                 className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-gray-200 rounded-md text-sm transition-colors"
               >
                 {musicBusy ? 'Working…' : 'Cancel'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {typeModalOpen && (
+        <div
+          className="fixed inset-0 bg-black/70 backdrop-blur-sm z-[70] flex items-center justify-center px-4"
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !typeFormBusy) { setTypeModalOpen(false); resetTypeForm() }
+          }}
+        >
+          <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-5 space-y-3">
+            <div>
+              <h3 className="text-lg font-semibold text-emerald-300">New scene event type</h3>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Registers the type globally — every chart can use it. After saving you'll
+                get a handover doc to send the Unity engineer.
+              </p>
+            </div>
+            <label className="block">
+              <span className="text-xs text-gray-400">Payload name (lowercase / underscores)</span>
+              <input
+                type="text"
+                value={typeFormName}
+                onChange={(e) => setTypeFormName(e.target.value)}
+                placeholder="leftlasercolour"
+                disabled={typeFormBusy}
+                className="w-full mt-0.5 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-[12px] font-mono text-gray-200 focus:outline-none focus:border-emerald-500 disabled:opacity-50"
+              />
+            </label>
+            <label className="block">
+              <span className="text-xs text-gray-400">Display label</span>
+              <input
+                type="text"
+                value={typeFormLabel}
+                onChange={(e) => setTypeFormLabel(e.target.value)}
+                placeholder="Lasers · left colour"
+                disabled={typeFormBusy}
+                className="w-full mt-0.5 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-[12px] text-gray-200 focus:outline-none focus:border-emerald-500 disabled:opacity-50"
+              />
+            </label>
+            <label className="block">
+              <span className="text-xs text-gray-400">Group</span>
+              <input
+                type="text"
+                value={typeFormGroup}
+                onChange={(e) => setTypeFormGroup(e.target.value)}
+                placeholder="Custom"
+                disabled={typeFormBusy}
+                className="w-full mt-0.5 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-[12px] text-gray-200 focus:outline-none focus:border-emerald-500 disabled:opacity-50"
+              />
+              <span className="text-[10px] text-gray-600">Picker section the event lands in.</span>
+            </label>
+            <label className="block">
+              <span className="text-xs text-gray-400">Description</span>
+              <textarea
+                value={typeFormDesc}
+                onChange={(e) => setTypeFormDesc(e.target.value)}
+                placeholder="What this event drives on the game side — feeds the handover doc + the tooltip."
+                rows={3}
+                disabled={typeFormBusy}
+                className="w-full mt-0.5 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-[12px] text-gray-200 focus:outline-none focus:border-emerald-500 resize-y disabled:opacity-50"
+              />
+            </label>
+            <label className="block">
+              <span className="text-xs text-gray-400">Parameter type</span>
+              <select
+                value={typeFormParamKind}
+                onChange={(e) => setTypeFormParamKind(e.target.value as SceneEventParam['type'])}
+                disabled={typeFormBusy}
+                className="w-full mt-0.5 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-[12px] text-gray-200 focus:outline-none focus:border-emerald-500 disabled:opacity-50"
+              >
+                <option value="duration">Duration (ticks)</option>
+                <option value="hex_color">Hex colour (#RRGGBB)</option>
+                <option value="number">Number (min/max/step)</option>
+                <option value="enum">Enum (pipe-separated options)</option>
+                <option value="none">No parameter</option>
+              </select>
+            </label>
+            {typeFormParamKind === 'number' && (
+              <div className="grid grid-cols-3 gap-2">
+                <label className="block">
+                  <span className="text-[10px] text-gray-500">min</span>
+                  <input
+                    type="number"
+                    value={typeFormMin}
+                    onChange={(e) => setTypeFormMin(e.target.value)}
+                    placeholder="0"
+                    disabled={typeFormBusy}
+                    className="w-full bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-[11px] font-mono text-gray-200 disabled:opacity-50"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-[10px] text-gray-500">max</span>
+                  <input
+                    type="number"
+                    value={typeFormMax}
+                    onChange={(e) => setTypeFormMax(e.target.value)}
+                    placeholder="1"
+                    disabled={typeFormBusy}
+                    className="w-full bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-[11px] font-mono text-gray-200 disabled:opacity-50"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-[10px] text-gray-500">step</span>
+                  <input
+                    type="number"
+                    value={typeFormStep}
+                    onChange={(e) => setTypeFormStep(e.target.value)}
+                    placeholder="0.1"
+                    disabled={typeFormBusy}
+                    className="w-full bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-[11px] font-mono text-gray-200 disabled:opacity-50"
+                  />
+                </label>
+              </div>
+            )}
+            {typeFormParamKind === 'enum' && (
+              <label className="block">
+                <span className="text-xs text-gray-400">Options (pipe-separated)</span>
+                <input
+                  type="text"
+                  value={typeFormOptions}
+                  onChange={(e) => setTypeFormOptions(e.target.value)}
+                  placeholder="slow|medium|fast"
+                  disabled={typeFormBusy}
+                  className="w-full mt-0.5 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-[12px] font-mono text-gray-200 focus:outline-none focus:border-emerald-500 disabled:opacity-50"
+                />
+              </label>
+            )}
+            {typeFormError && (
+              <p className="text-xs text-red-400 break-words">{typeFormError}</p>
+            )}
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                onClick={() => { setTypeModalOpen(false); resetTypeForm() }}
+                disabled={typeFormBusy}
+                className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-gray-300 rounded text-xs"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submitNewType}
+                disabled={typeFormBusy || !typeFormName.trim()}
+                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white rounded text-xs font-medium"
+              >
+                {typeFormBusy ? 'Saving…' : 'Save + view handover doc'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {handoverModal && (
+        <div
+          className="fixed inset-0 bg-black/70 backdrop-blur-sm z-[80] flex items-center justify-center px-4"
+          onClick={(e) => { if (e.target === e.currentTarget) setHandoverModal(null) }}
+        >
+          <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto p-5 space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-lg font-semibold text-emerald-300">
+                Handover doc · <span className="font-mono">{handoverModal.name}</span>
+              </h3>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => navigator.clipboard.writeText(handoverModal.md)}
+                  className="px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded text-[11px]"
+                  title="Copy markdown to clipboard"
+                >
+                  Copy
+                </button>
+                <button
+                  onClick={() => {
+                    const blob = new Blob([handoverModal.md], { type: 'text/markdown' })
+                    const url = URL.createObjectURL(blob)
+                    const a = document.createElement('a')
+                    a.href = url
+                    a.download = `scene-event-${handoverModal.name}.md`
+                    a.click()
+                    URL.revokeObjectURL(url)
+                  }}
+                  className="px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded text-[11px]"
+                  title="Download as .md"
+                >
+                  Download
+                </button>
+              </div>
+            </div>
+            <p className="text-[11px] text-gray-500">
+              Send this to the Unity engineer so the runtime can subscribe to the
+              new event. The payload format is the source of truth — match it on
+              both sides.
+            </p>
+            <pre className="bg-gray-950 border border-gray-800 rounded p-3 text-[11px] text-gray-200 whitespace-pre-wrap break-words font-mono">{handoverModal.md}</pre>
+            <div className="flex justify-end">
+              <button
+                onClick={() => setHandoverModal(null)}
+                className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded text-xs"
+              >
+                Close
               </button>
             </div>
           </div>

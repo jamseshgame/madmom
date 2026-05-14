@@ -1,5 +1,13 @@
 # Compiled Python files
 *.pyc
+*.pyd
+
+# Local tooling sandboxes
+/.claude/
+/.playwright-mcp/
+
+# Editor debug screenshots at repo root
+/gem-*.png
 
 # Python distutil files
 /dist/
