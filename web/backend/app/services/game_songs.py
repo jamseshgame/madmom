@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import shutil
+import time
+import uuid
 from pathlib import Path
 
 import httpx
 
 from ..config import settings
 from .github_publisher import _api, _headers, publish_song_folder
+from .tracks import TRACKS_DIR, Track
 
 LOCAL_DIR = Path(settings.upload_dir) / '_game-songs'
 
@@ -36,6 +40,124 @@ def _parse_song_ini(text: str) -> dict[str, str]:
 
 def _local_path(folder: str) -> Path:
     return LOCAL_DIR / folder
+
+
+def _link_or_copy(src: Path, dst: Path) -> None:
+    """Symlink src→dst, falling back to a file copy if the OS refuses
+    (Windows without Developer Mode, exotic filesystems). Idempotent."""
+    if dst.exists() or dst.is_symlink():
+        return
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        dst.symlink_to(src)
+    except (OSError, NotImplementedError):
+        shutil.copy2(str(src), str(dst))
+
+
+def _link_or_copy_dir(src: Path, dst: Path) -> None:
+    """Directory variant. Same fallback semantics."""
+    if dst.exists() or dst.is_symlink():
+        return
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        dst.symlink_to(src, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        shutil.copytree(str(src), str(dst))
+
+
+def _find_track_by_source_game_song(folder: str) -> Track | None:
+    """Scan the Tracks store for one already shimmed off this game-song folder.
+    Used to keep `clone_game_song_to_studio_track` idempotent across repeat
+    pulls of the same song."""
+    if not TRACKS_DIR.exists():
+        return None
+    for d in TRACKS_DIR.iterdir():
+        meta = d / 'track.json'
+        if not meta.is_file():
+            continue
+        try:
+            data = json.loads(meta.read_text(encoding='utf-8'))
+        except json.JSONDecodeError:
+            continue
+        if data.get('source_game_song') == folder:
+            return Track.load(d.name)
+    return None
+
+
+def clone_game_song_to_studio_track(folder: str) -> tuple[str, str]:
+    """Create (or reuse) a Studio Track whose files symlink back into the
+    pulled game-song folder, so the editor can open it and edits flow back
+    to the same on-disk paths "Push to game repo" reads from.
+
+    Returns (track_id, beatmap_id). Raises FileNotFoundError if the
+    game-song hasn't been pulled yet.
+    """
+    src = _local_path(folder)
+    if not src.exists():
+        raise FileNotFoundError(f'{folder} not pulled locally')
+
+    existing = _find_track_by_source_game_song(folder)
+    if existing and existing.beatmaps:
+        return existing.id, existing.beatmaps[0]['id']
+
+    ini_path = src / 'song.ini'
+    ini = _parse_song_ini(ini_path.read_text(encoding='utf-8', errors='replace')) if ini_path.exists() else {}
+
+    track = Track(
+        id=uuid.uuid4().hex[:12],
+        name=ini.get('name', folder),
+        created_at=time.time(),
+        stems={'song': 'song.ogg'},
+        model='manual',
+        output_format='ogg',
+        artist=ini.get('artist', ''),
+        album=ini.get('album', ''),
+        genre=ini.get('genre', ''),
+        year=ini.get('year', ''),
+        source_game_song=folder,
+    )
+    track.stems_dir.mkdir(parents=True, exist_ok=True)
+    if (src / 'song.ogg').exists():
+        _link_or_copy(src / 'song.ogg', track.stems_dir / 'song.ogg')
+    if ini_path.exists():
+        # Studio's track-level metadata reader looks at stems_dir/song.ini.
+        _link_or_copy(ini_path, track.stems_dir / 'song.ini')
+
+    beatmap_id = uuid.uuid4().hex[:12]
+    bm_dir = track.beatmaps_dir / beatmap_id
+    bm_dir.mkdir(parents=True, exist_ok=True)
+
+    # Editor prefers `notes.chart`; the pulled file is `notes_fixed_slides.chart`.
+    # Link both names so the chart is found whichever the editor asks for.
+    chart_src = src / 'notes_fixed_slides.chart'
+    if not chart_src.exists():
+        candidate = next(iter(src.glob('*.chart')), None)
+        if candidate:
+            chart_src = candidate
+    if chart_src.exists():
+        _link_or_copy(chart_src, bm_dir / 'notes.chart')
+
+    if (src / 'song.ogg').exists():
+        _link_or_copy(src / 'song.ogg', bm_dir / 'song.ogg')
+    if ini_path.exists():
+        _link_or_copy(ini_path, bm_dir / 'song.ini')
+    # vo/ and realnotes/ — link the whole subdir so any new clips/packs added
+    # later show up automatically without re-running this function.
+    for subdir in ('vo', 'realnotes'):
+        sub = src / subdir
+        if sub.is_dir():
+            _link_or_copy_dir(sub, bm_dir / subdir)
+
+    track.beatmaps.append({
+        'id': beatmap_id,
+        'stem': 'song',
+        'generated_at': time.time(),
+        'folder_name': folder,
+        'song_name': ini.get('name', folder),
+        'active': True,
+    })
+    track.save()
+    return track.id, beatmap_id
 
 
 async def list_game_songs() -> list[dict]:

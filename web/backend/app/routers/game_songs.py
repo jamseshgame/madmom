@@ -7,6 +7,7 @@ import json
 from fastapi import APIRouter, Form, HTTPException
 
 from ..services.game_songs import (
+    clone_game_song_to_studio_track,
     get_local_song_ini,
     list_game_songs,
     pull_game_song,
@@ -31,7 +32,15 @@ async def get_all():
 async def pull(folder: str):
     try:
         dest = await pull_game_song(folder)
-        return {'folder': folder, 'local_path': str(dest)}
+        # Also stand up (or reuse) a Studio Track shim so the song is
+        # editable from the beatmap editor. Idempotent across re-pulls.
+        track_id, beatmap_id = clone_game_song_to_studio_track(folder)
+        return {
+            'folder': folder,
+            'local_path': str(dest),
+            'track_id': track_id,
+            'beatmap_id': beatmap_id,
+        }
     except RuntimeError as e:
         raise HTTPException(503, str(e))
     except Exception as e:

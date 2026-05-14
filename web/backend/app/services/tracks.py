@@ -28,6 +28,12 @@ class Track:
     year: str = ''
     # Beatmap records: each {id, stem, generated_at, folder_name, song_name}
     beatmaps: list[dict[str, Any]] = field(default_factory=list)
+    # Set when this Track was created from a Game-Library pull (the value is
+    # the SongInbox folder name). Tracks with this set live in `_tracks/` but
+    # their stem + beatmap files symlink back to `_game-songs/<folder>/` so
+    # edits in the Studio editor flow back to the same place "Push to game
+    # repo" pushes from. Empty string for normal Studio-created tracks.
+    source_game_song: str = ''
 
     @property
     def dir(self) -> Path:

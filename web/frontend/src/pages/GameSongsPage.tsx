@@ -50,6 +50,10 @@ export default function GameSongsPage() {
   const [metaError, setMetaError] = useState('')
   const [busy, setBusy] = useState<string>('') // 'pulling' | 'saving' | 'pushing'
   const [flash, setFlash] = useState('')
+  // Track + beatmap ids returned by the pull endpoint after it stands up a
+  // Studio-track shim pointing at the pulled folder. Used to render the
+  // "Edit beatmap" link in the detail view's action row.
+  const [studioLink, setStudioLink] = useState<{ trackId: string; beatmapId: string } | null>(null)
   const [sortKey, setSortKey] = useState<keyof Song>('name')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
 
@@ -107,12 +111,17 @@ export default function GameSongsPage() {
     setMeta(null)
     setMetaError('')
     setFlash('')
+    setStudioLink(null)
     setBusy('pulling')
     try {
       const pullRes = await fetch(`/api/game-songs/${encodeURIComponent(folder)}/pull`, { method: 'POST' })
       if (!pullRes.ok) {
         const err = await pullRes.json().catch(() => ({}))
         throw new Error(err.detail || `Pull failed: ${pullRes.status}`)
+      }
+      const pullJson = await pullRes.json().catch(() => ({}))
+      if (pullJson.track_id && pullJson.beatmap_id) {
+        setStudioLink({ trackId: pullJson.track_id, beatmapId: pullJson.beatmap_id })
       }
       const metaRes = await fetch(`/api/game-songs/${encodeURIComponent(folder)}/meta`)
       if (!metaRes.ok) {
@@ -194,6 +203,15 @@ export default function GameSongsPage() {
             <h1 className="text-2xl font-bold mt-1">{editing}</h1>
           </div>
           <div className="flex gap-2">
+            {studioLink && (
+              <a
+                href={`/edit/${studioLink.trackId}/${studioLink.beatmapId}`}
+                className="px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-jam-500/40 text-jam-200 rounded-lg text-sm font-medium inline-flex items-center"
+                title="Open the chart in the Studio editor. Saves write back to this same pulled folder, so Push to game repo picks up edits."
+              >
+                ✎ Edit beatmap
+              </a>
+            )}
             <button
               onClick={saveLocal}
               disabled={!meta || !!busy}
