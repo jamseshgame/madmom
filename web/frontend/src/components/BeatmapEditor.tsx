@@ -2760,9 +2760,36 @@ export default function BeatmapEditor() {
     if (src) fetchSourceData(src)
   }, [activeSourceId, chart, fetchSourceData])
 
-  // Placeholders for Task 5 (consumed in JSX below; popover UI added in Task 5).
   const [pendingClip, setPendingClip] = useState<{ startSec: number; endSec: number; name: string; sourceId: string } | null>(null)
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null)
+
+  const saveClipFromPending = async () => {
+    if (!chart || !pendingClip) return
+    const { startSec, endSec, name, sourceId } = pendingClip
+    const cleanName = name.trim() || `Clip ${chart.clips.length + 1}`
+    const src = chart.importedSources.find((s) => s.id === sourceId)
+    if (!src) return
+    const cache = await fetchSourceData(src)
+    if (!cache) return
+    const slice = sliceSourceChartForClip(cache.notes, cache.tempoSegments, cache.resolution, startSec, endSec)
+    let id: string
+    do {
+      id = Math.random().toString(36).slice(2, 10)
+    } while (chart.musicSections[`MusicSeg_${id}`] !== undefined)
+    const sectionName = `MusicSeg_${id}`
+    const newClip: Clip = {
+      id, sectionName, name: cleanName, sourceId,
+      startSec, endSec, notesCount: slice.notesCount, bpm: slice.bpm,
+    }
+    setChart({
+      ...chart,
+      musicSections: { ...chart.musicSections, [sectionName]: slice.sectionBody },
+      clips: [...chart.clips, newClip],
+    })
+    setDirty(true)
+    setSelectedClipId(id)
+    setPendingClip(null)
+  }
 
   // Resolve the WaveformStrip props from the active source (or own).
   const activePeaks = activeSourceId
@@ -6406,9 +6433,8 @@ export default function BeatmapEditor() {
   )
 
   void elVoicesLoaded
-  // Silence noUnusedLocals for forward-declared symbols (consumed by Tasks 5+)
-  void sliceSourceChartForClip
-  void pendingClip; void setActiveSourceId
+  // Silence noUnusedLocals for forward-declared symbols (consumed by Tasks 6+)
+  void setActiveSourceId
 
   return (
     <div className="fixed inset-0 bg-black flex flex-col z-[60]">
@@ -6458,6 +6484,31 @@ export default function BeatmapEditor() {
             onCommitDragRegion={activeSourceId ? (s, e) => setPendingClip({ startSec: s, endSec: e, name: '', sourceId: activeSourceId }) : undefined}
             emptyStateText={activeSourceId ? 'Loading source…' : 'No audio attached.'}
           />
+          {pendingClip && (
+            <div className="px-3 py-2 bg-gray-900 border-y border-gray-800 flex items-center gap-2">
+              <span className="text-[10px] text-gray-500 uppercase tracking-wider">New clip</span>
+              <input
+                autoFocus
+                type="text"
+                value={pendingClip.name}
+                onChange={(e) => setPendingClip({ ...pendingClip, name: e.target.value })}
+                placeholder={`Clip name (${(pendingClip.endSec - pendingClip.startSec).toFixed(1)}s)`}
+                className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-200 w-48"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void saveClipFromPending()
+                  if (e.key === 'Escape') setPendingClip(null)
+                }}
+              />
+              <button onClick={() => void saveClipFromPending()}
+                className="text-[11px] px-2 py-1 bg-cyan-700 hover:bg-cyan-600 rounded text-white">
+                Save clip
+              </button>
+              <button onClick={() => setPendingClip(null)}
+                className="text-[11px] px-2 py-1 bg-gray-800 hover:bg-gray-700 rounded text-gray-300">
+                Cancel
+              </button>
+            </div>
+          )}
           <div className="h-6">
             {chart && duration > 0 ? (
               <SceneTimeline
