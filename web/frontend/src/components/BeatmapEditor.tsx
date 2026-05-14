@@ -7,6 +7,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRe
 import { useParams } from 'react-router-dom'
 import * as THREE from 'three'
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js'
+import { WaveformStrip } from './WaveformStrip'
 
 // .chart parsing ------------------------------------------------------------
 
@@ -1119,6 +1120,8 @@ interface TimelineProps {
   snapDivisor: number
   onSeek: (sec: number) => void
   onMoveEvent: (id: string, tick: number) => void
+  view: { start: number; end: number }
+  onViewChange: (v: { start: number; end: number }) => void
 }
 
 function TutorialTimeline({
@@ -1130,24 +1133,13 @@ function TutorialTimeline({
   snapDivisor,
   onSeek,
   onMoveEvent,
+  view,
+  onViewChange,
 }: TimelineProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [width, setWidth] = useState(600)
-  const [view, setView] = useState({ start: 0, end: Math.max(duration, 1) })
   const dragRef = useRef<{ id: string; offset: number; lastTick: number } | null>(null)
   const [scrubbing, setScrubbing] = useState(false)
-
-  // Sync view to duration whenever it changes (e.g. song.ogg loaded)
-  useEffect(() => {
-    setView((v) => {
-      const realEnd = Math.max(duration, 1)
-      // If we'd previously fit the whole song, keep showing the whole song.
-      if (v.end <= 0 || v.end > realEnd || (v.start === 0 && v.end <= realEnd && Math.abs((v.end - v.start) - realEnd) < 0.01)) {
-        return { start: 0, end: realEnd }
-      }
-      return v
-    })
-  }, [duration])
 
   useEffect(() => {
     const el = containerRef.current
@@ -1181,7 +1173,7 @@ function TutorialTimeline({
       let en = view.end + delta
       if (s < 0) { en -= s; s = 0 }
       if (en > duration) { s -= en - duration; en = duration }
-      setView({ start: Math.max(0, s), end: Math.min(duration, en) })
+      onViewChange({ start: Math.max(0, s), end: Math.min(duration, en) })
       return
     }
     // Wheel → zoom around cursor
@@ -1189,7 +1181,7 @@ function TutorialTimeline({
     const newSpan = Math.max(1.0, Math.min(duration, span * factor))
     const ratio = (cursorSec - view.start) / span
     const newStart = Math.max(0, Math.min(duration - newSpan, cursorSec - ratio * newSpan))
-    setView({ start: newStart, end: newStart + newSpan })
+    onViewChange({ start: newStart, end: newStart + newSpan })
   }
 
   // Drag a block to reposition its tick. Listens at document level so the
@@ -2740,6 +2732,45 @@ export default function BeatmapEditor() {
       return null
     }
   }, [])
+
+  const [tutorialPeaks, setTutorialPeaks] = useState<Float32Array | null>(null)
+  const [peaksBucketSec] = useState(0.020)
+  const [timelineView, setTimelineView] = useState<{ start: number; end: number }>({ start: 0, end: 0 })
+
+  // Sync the shared timeline view to song duration when it lands.
+  useEffect(() => {
+    if (duration > 0) setTimelineView((v) => v.end <= 0 ? { start: 0, end: duration } : v)
+  }, [duration])
+
+  // Fetch the tutorial's own song peaks.
+  useEffect(() => {
+    if (!trackId || !beatmapId) return
+    let cancelled = false
+    fetch(`/api/tracks/${trackId}/beatmaps/${beatmapId}/song-peaks`)
+      .then((r) => (r.ok ? r.arrayBuffer() : null))
+      .then((buf) => { if (!cancelled && buf) setTutorialPeaks(new Float32Array(buf)) })
+      .catch(() => undefined)
+    return () => { cancelled = true }
+  }, [trackId, beatmapId])
+
+  // When the user picks an imported source, prefetch its data into the cache.
+  useEffect(() => {
+    if (!activeSourceId || !chart) return
+    const src = chart.importedSources.find((s) => s.id === activeSourceId)
+    if (src) fetchSourceData(src)
+  }, [activeSourceId, chart, fetchSourceData])
+
+  // Placeholders for Task 5 (consumed in JSX below; popover UI added in Task 5).
+  const [pendingClip, setPendingClip] = useState<{ startSec: number; endSec: number; name: string; sourceId: string } | null>(null)
+  const [selectedClipId, setSelectedClipId] = useState<string | null>(null)
+
+  // Resolve the WaveformStrip props from the active source (or own).
+  const activePeaks = activeSourceId
+    ? sourceCache[activeSourceId]?.peaks ?? null
+    : tutorialPeaks
+  const activeDuration = activeSourceId
+    ? sourceCache[activeSourceId]?.duration ?? 0
+    : duration
 
   // ── Background panel — video behind the highway ───────────────────────────
   // Three modes:
@@ -6375,9 +6406,9 @@ export default function BeatmapEditor() {
   )
 
   void elVoicesLoaded
-  // Silence noUnusedLocals for forward-declared symbols (consumed by Tasks 4+)
+  // Silence noUnusedLocals for forward-declared symbols (consumed by Tasks 5+)
   void sliceSourceChartForClip
-  void activeSourceId; void setActiveSourceId; void fetchSourceData
+  void pendingClip; void setActiveSourceId
 
   return (
     <div className="fixed inset-0 bg-black flex flex-col z-[60]">
@@ -6396,6 +6427,8 @@ export default function BeatmapEditor() {
                 snapDivisor={snapDivisor}
                 onSeek={seekSeconds}
                 onMoveEvent={(id, tick) => updateTutorialEvent(id, { tick } as Partial<TutorialEvent>)}
+                view={timelineView}
+                onViewChange={setTimelineView}
               />
             ) : (
               <div className="h-full bg-gray-950 border border-gray-800 rounded text-[11px] text-gray-700 flex items-center justify-center">
@@ -6403,6 +6436,28 @@ export default function BeatmapEditor() {
               </div>
             )}
           </div>
+          <WaveformStrip
+            peaks={activePeaks}
+            duration={activeDuration}
+            bucketSec={peaksBucketSec}
+            currentTime={currentTime}
+            onSeek={(s) => {
+              if (audioRef.current) audioRef.current.currentTime = s
+              setCurrentTime(s)
+            }}
+            view={timelineView}
+            onViewChange={setTimelineView}
+            clips={(chart?.clips ?? []).filter((c) => c.endSec > c.startSec && c.sourceId === activeSourceId).map((c) => ({
+              id: c.id,
+              startSec: c.startSec,
+              endSec: c.endSec,
+              name: c.name,
+              selected: c.id === selectedClipId,
+            }))}
+            onSelectClip={setSelectedClipId}
+            onCommitDragRegion={activeSourceId ? (s, e) => setPendingClip({ startSec: s, endSec: e, name: '', sourceId: activeSourceId }) : undefined}
+            emptyStateText={activeSourceId ? 'Loading source…' : 'No audio attached.'}
+          />
           <div className="h-6">
             {chart && duration > 0 ? (
               <SceneTimeline
