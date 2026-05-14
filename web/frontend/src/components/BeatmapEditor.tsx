@@ -8,6 +8,8 @@ import { useParams } from 'react-router-dom'
 import * as THREE from 'three'
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js'
 import { WaveformStrip } from './WaveformStrip'
+import { ImportedSourcesPanel } from './ImportedSourcesPanel'
+import { SourcePickerModal } from './SourcePickerModal'
 
 // .chart parsing ------------------------------------------------------------
 
@@ -2703,6 +2705,7 @@ export default function BeatmapEditor() {
   const sourceCacheRef = useRef<Record<string, SourceChartCache>>({})
   const [sourceCache, setSourceCache] = useState<Record<string, SourceChartCache>>({})
   const [activeSourceId, setActiveSourceId] = useState<string | null>(null)
+  const [pickerOpen, setPickerOpen] = useState(false)
   sourceCacheRef.current = sourceCache
 
   const fetchSourceData = useCallback(async (src: ImportedSource): Promise<SourceChartCache | null> => {
@@ -2759,6 +2762,51 @@ export default function BeatmapEditor() {
     const src = chart.importedSources.find((s) => s.id === activeSourceId)
     if (src) fetchSourceData(src)
   }, [activeSourceId, chart, fetchSourceData])
+
+  const importSource = (id: string, trackId: string, beatmapId: string, name: string) => {
+    if (!chart) return
+    setChart({
+      ...chart,
+      importedSources: [...chart.importedSources, { id, trackId, beatmapId, name }],
+    })
+    setDirty(true)
+    setActiveSourceId(id)
+    setPickerOpen(false)
+  }
+
+  const renameSource = (oldId: string, newId: string) => {
+    if (!chart) return
+    if (!/^[a-z][a-z0-9_]*$/.test(newId)) return
+    if (oldId === newId) return
+    if (chart.importedSources.some((s) => s.id === newId)) return
+    setChart({
+      ...chart,
+      importedSources: chart.importedSources.map((s) => s.id === oldId ? { ...s, id: newId } : s),
+      clips: chart.clips.map((c) => c.sourceId === oldId ? { ...c, sourceId: newId } : c),
+      tutorial: chart.tutorial.map((e) => (e.kind === 'music' && e.source === oldId) ? { ...e, source: newId } : e),
+    })
+    setDirty(true)
+    if (activeSourceId === oldId) setActiveSourceId(newId)
+  }
+
+  const deleteSource = (id: string) => {
+    if (!chart) return
+    const src = chart.importedSources.find((s) => s.id === id)
+    if (!src) return
+    if (!window.confirm(`Remove "${src.name}" and any splices that reference it?`)) return
+    const sectionsToDrop = new Set(chart.clips.filter((c) => c.sourceId === id).map((c) => c.sectionName))
+    const nextSections = { ...chart.musicSections }
+    for (const sn of sectionsToDrop) delete nextSections[sn]
+    setChart({
+      ...chart,
+      importedSources: chart.importedSources.filter((s) => s.id !== id),
+      musicSections: nextSections,
+      clips: chart.clips.filter((c) => c.sourceId !== id),
+      tutorial: chart.tutorial.filter((e) => !(e.kind === 'music' && e.source === id)),
+    })
+    setDirty(true)
+    if (activeSourceId === id) setActiveSourceId(null)
+  }
 
   const [pendingClip, setPendingClip] = useState<{ startSec: number; endSec: number; name: string; sourceId: string } | null>(null)
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null)
@@ -6433,8 +6481,6 @@ export default function BeatmapEditor() {
   )
 
   void elVoicesLoaded
-  // Silence noUnusedLocals for forward-declared symbols (consumed by Tasks 6+)
-  void setActiveSourceId
 
   return (
     <div className="fixed inset-0 bg-black flex flex-col z-[60]">
@@ -8317,6 +8363,22 @@ export default function BeatmapEditor() {
           })()}
 
           {chart && (
+            <ImportedSourcesPanel
+              rows={chart.importedSources.map((s) => ({
+                id: s.id,
+                name: s.name,
+                spliceCount: chart.clips.filter((c) => c.sourceId === s.id).length,
+                selected: s.id === activeSourceId,
+              }))}
+              onSelect={setActiveSourceId}
+              onOpenPicker={() => setPickerOpen(true)}
+              onRename={renameSource}
+              onDelete={deleteSource}
+              Wrapper={CollapsibleSection as any}
+            />
+          )}
+
+          {chart && (
             <CollapsibleSection id="add-at-playhead" title="Add at playhead">
               <div className="grid grid-cols-4 gap-1 mb-1">
                 <div className="relative">
@@ -8901,6 +8963,14 @@ export default function BeatmapEditor() {
         onPause={() => setPlaying(false)}
         onEnded={() => setPlaying(false)}
       />
+
+      {pickerOpen && chart && (
+        <SourcePickerModal
+          existingIds={chart.importedSources.map((s) => s.id)}
+          onCancel={() => setPickerOpen(false)}
+          onPick={importSource}
+        />
+      )}
 
       {studioImportOpen && (
         <div
