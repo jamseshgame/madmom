@@ -9,6 +9,7 @@ import * as THREE from 'three'
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js'
 import { WaveformStrip } from './WaveformStrip'
 import { ImportedSourcesPanel } from './ImportedSourcesPanel'
+import { ClipsLibraryPanel } from './ClipsLibraryPanel'
 import { SourcePickerModal } from './SourcePickerModal'
 
 // .chart parsing ------------------------------------------------------------
@@ -2838,6 +2839,63 @@ export default function BeatmapEditor() {
     setSelectedClipId(id)
     setPendingClip(null)
   }
+
+  const renameClip = (id: string, name: string) => {
+    if (!chart) return
+    setChart({ ...chart, clips: chart.clips.map((c) => c.id === id ? { ...c, name } : c) })
+    setDirty(true)
+  }
+
+  const deleteClip = (id: string) => {
+    if (!chart) return
+    const clip = chart.clips.find((c) => c.id === id)
+    if (!clip) return
+    if (!window.confirm(`Delete "${clip.name}" and any places of it?`)) return
+    const nextSections = { ...chart.musicSections }
+    delete nextSections[clip.sectionName]
+    setChart({
+      ...chart,
+      musicSections: nextSections,
+      clips: chart.clips.filter((c) => c.id !== id),
+      tutorial: chart.tutorial.filter((e) => !(e.kind === 'music' && e.sectionName === clip.sectionName)),
+    })
+    setDirty(true)
+    if (selectedClipId === id) setSelectedClipId(null)
+  }
+
+  const placeClipAtPlayhead = (id: string) => {
+    if (!chart) return
+    const clip = chart.clips.find((c) => c.id === id)
+    if (!clip) return
+    const tick = secToTick(tempoSegments, chart.resolution, currentTime)
+    const ev: TutorialMusicEvent = {
+      kind: 'music',
+      id: `music-${Date.now()}`,
+      tick,
+      file: clip.sourceId ? '' : `segments/${clip.sectionName.replace('MusicSeg_', '')}.ogg`,
+      sectionName: clip.sectionName,
+      bpm: clip.bpm,
+      resolution: chart.resolution,
+      durationSeconds: clip.sourceId ? (clip.endSec - clip.startSec) : 0,
+      notesCount: clip.notesCount,
+      required: Math.min(5, clip.notesCount),
+      timing: 'any',
+      retryVo: '',
+      next: '',
+      ...(clip.sourceId ? {
+        source: clip.sourceId,
+        stem: 'song',
+        startMs: Math.round(clip.startSec * 1000),
+        durationMs: Math.round((clip.endSec - clip.startSec) * 1000),
+      } : {}),
+    }
+    setChart({ ...chart, tutorial: [...chart.tutorial, ev], tutorialEnabled: true })
+    setDirty(true)
+    setSelectedTutorialId(ev.id)
+  }
+
+  // Task 9 will replace this stub with a real implementation.
+  const auditionClip = (_id: string) => undefined
 
   // Resolve the WaveformStrip props from the active source (or own).
   const activePeaks = activeSourceId
@@ -8374,6 +8432,28 @@ export default function BeatmapEditor() {
               onOpenPicker={() => setPickerOpen(true)}
               onRename={renameSource}
               onDelete={deleteSource}
+              Wrapper={CollapsibleSection as any}
+            />
+          )}
+
+          {chart && (
+            <ClipsLibraryPanel
+              clips={chart.clips.map((c) => ({
+                id: c.id,
+                name: c.name,
+                sourceId: c.sourceId,
+                sourceLabel: c.sourceId ?? '(upload)',
+                startSec: c.startSec,
+                endSec: c.endSec,
+                notesCount: c.notesCount,
+                isPlaced: chart.tutorial.some((e): e is TutorialMusicEvent => e.kind === 'music' && e.sectionName === c.sectionName),
+              }))}
+              selectedClipId={selectedClipId}
+              onSelect={setSelectedClipId}
+              onAudition={(id) => auditionClip(id)}
+              onPlaceAtPlayhead={placeClipAtPlayhead}
+              onRename={renameClip}
+              onDelete={deleteClip}
               Wrapper={CollapsibleSection as any}
             />
           )}
