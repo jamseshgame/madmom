@@ -76,9 +76,40 @@ interface TutorialMusicEvent {
   timing: TimingMode
   retryVo: string
   next: string
+  // NEW — present when the event references an imported source. The engine
+  // resolves audio to `sources/<source>/<stem>.ogg`. start_ms/duration_ms
+  // give the slice window (mirrors VO's pattern).
+  source?: string            // ImportedSource.id
+  stem?: string              // default 'song'
+  startMs?: number
+  durationMs?: number
 }
 
 type TutorialEvent = TutorialVoEvent | TutorialStepEvent | TutorialMusicEvent
+
+// A reference to another beatmap that this tutorial splices from.
+// Stored as `[ImportedSources]` chart-section entries; the user-chosen
+// `id` is stable and survives renames.
+interface ImportedSource {
+  id: string                 // local id — `[a-z][a-z0-9_]*`, e.g. 'src_a', 'verse_riff'
+  trackId: string            // Studio-side track id
+  beatmapId: string          // Studio-side beatmap id
+  name: string               // display label (the source's song_name at import time)
+}
+
+// A clip = a saved [MusicSeg_<id>] section. Source-based clips
+// reference an ImportedSource by its local id. Upload-based clips
+// (legacy) have no sourceId.
+interface Clip {
+  id: string                 // matches the section name's id suffix
+  sectionName: string
+  name: string
+  sourceId: string | null    // null = upload-based; else = ImportedSource.id
+  startSec: number           // 0 for upload-based
+  endSec: number             // 0 for upload-based
+  notesCount: number
+  bpm: number
+}
 
 interface ChartState {
   fullText: string
@@ -95,6 +126,8 @@ interface ChartState {
   // are the verbatim inner block (no braces). Round-tripped on save so
   // segment notes survive even though we don't edit them inline.
   musicSections: Record<string, string>
+  importedSources: ImportedSource[]   // NEW
+  clips: Clip[]                       // NEW
   sceneFlags: SceneFlags
   sceneFlagsUnknown: Record<string, string>
   sceneEvents: SceneEvent[]
@@ -585,9 +618,13 @@ function parseTutorialSection(text: string): TutorialEvent[] {
         next: fields.next || '',
       })
     } else if (kind === 'MUSIC') {
-      const file = tokens[1] || ''
+      // Source-based events lead with `source="..."`; legacy upload-based
+      // events lead with a bare quoted file path. Detect by whether
+      // tokens[1] contains `=` to decide where the file slot is.
+      const isSourceBased = (tokens[1] ?? '').includes('=')
+      const file = isSourceBased ? '' : (tokens[1] || '')
       const fields: Record<string, string> = {}
-      for (const t of tokens.slice(2)) {
+      for (const t of tokens.slice(isSourceBased ? 1 : 2)) {
         const ix = t.indexOf('=')
         if (ix > 0) fields[t.slice(0, ix)] = t.slice(ix + 1)
       }
@@ -606,6 +643,10 @@ function parseTutorialSection(text: string): TutorialEvent[] {
         timing,
         retryVo: fields.retry_vo || '',
         next: fields.next || '',
+        source: fields.source || undefined,
+        stem: fields.stem || undefined,
+        startMs: fields.start_ms !== undefined ? Number(fields.start_ms) : undefined,
+        durationMs: fields.duration_ms !== undefined ? Number(fields.duration_ms) : undefined,
       })
     }
   }
@@ -618,6 +659,79 @@ function parseMusicSections(text: string): Record<string, string> {
   let m: RegExpExecArray | null
   while ((m = re.exec(text)) !== null) {
     out[m[1]] = m[2]
+  }
+  return out
+}
+
+function parseImportedSources(text: string): ImportedSource[] {
+  const m = text.match(/\[ImportedSources\]\s*\{([^}]*)\}/)
+  if (!m) return []
+  const body = m[1]
+  const out: ImportedSource[] = []
+  for (const raw of body.split('\n')) {
+    const line = raw.trim()
+    if (!line || line.startsWith(';')) continue
+    // <id> = track="..." beatmap="..." name="..."
+    const idM = line.match(/^([a-z][a-z0-9_]*)\s*=/)
+    if (!idM) continue
+    const id = idM[1]
+    const trackM = line.match(/track="([^"]*)"/)
+    const beatmapM = line.match(/beatmap="([^"]*)"/)
+    const nameM = line.match(/name="((?:[^"\\]|\\.)*)"/)
+    if (!trackM || !beatmapM) continue
+    out.push({
+      id,
+      trackId: trackM[1],
+      beatmapId: beatmapM[1],
+      name: nameM ? nameM[1].replace(/\\"/g, '"') : id,
+    })
+  }
+  return out
+}
+
+function serializeImportedSources(sources: ImportedSource[]): string {
+  if (sources.length === 0) return ''
+  const lines = sources.map((s) =>
+    `  ${s.id} = track="${s.trackId}" beatmap="${s.beatmapId}" name="${s.name.replace(/"/g, '\\"')}"`,
+  )
+  return `[ImportedSources]\n{\n${lines.join('\n')}\n}\n`
+}
+
+function parseClipMetadata(body: string): { name: string; sourceId: string | null; startSec: number; endSec: number } | null {
+  const m = body.match(
+    /;\s*(?:source="([^"]*)"\s+)?start_sec=([\d.]+)\s+end_sec=([\d.]+)\s+name="((?:[^"\\]|\\.)*)"/,
+  )
+  if (!m) return null
+  return {
+    sourceId: m[1] || null,
+    startSec: Number(m[2]),
+    endSec: Number(m[3]),
+    name: m[4].replace(/\\"/g, '"'),
+  }
+}
+
+function deriveClips(
+  musicSections: Record<string, string>,
+  events: TutorialEvent[],
+): Clip[] {
+  const out: Clip[] = []
+  for (const [sectionName, body] of Object.entries(musicSections)) {
+    const meta = parseClipMetadata(body)
+    const ev = events.find(
+      (e): e is TutorialMusicEvent => e.kind === 'music' && e.sectionName === sectionName,
+    )
+    const id = sectionName.replace(/^MusicSeg_/, '')
+    const noteLines = body.split('\n').filter((l) => /^\s*\d+\s*=\s*[NR]\s+/.test(l))
+    out.push({
+      id,
+      sectionName,
+      name: meta?.name ?? (ev?.file?.split('/').pop() ?? sectionName),
+      sourceId: meta?.sourceId ?? ev?.source ?? null,
+      startSec: meta?.startSec ?? 0,
+      endSec: meta?.endSec ?? 0,
+      notesCount: noteLines.length,
+      bpm: ev?.bpm ?? 120,
+    })
   }
   return out
 }
@@ -649,31 +763,53 @@ function serializeTutorialSection(events: TutorialEvent[]): string {
         + (e.next ? ` next="${e.next}"` : '')
       )
     }
-    // music
-    return (
-      `  ${e.tick} = MUSIC "${e.file}" section="${e.sectionName}"`
-      + ` bpm=${e.bpm.toFixed(2)} resolution=${e.resolution}`
-      + ` duration=${e.durationSeconds.toFixed(2)} notes=${e.notesCount}`
-      + ` required=${e.required} timing=${e.timing}`
-      + (e.retryVo ? ` retry_vo="${e.retryVo}"` : '')
-      + (e.next ? ` next="${e.next}"` : '')
-    )
+    if (e.kind === 'music') {
+      // Source-based events use `source="..."` + slice fields; legacy
+      // upload-based events still emit `file="..."`. Both shapes coexist.
+      const head = e.source
+        ? `source="${e.source}" stem="${e.stem || 'song'}"`
+        : `"${e.file}"`
+      return (
+        `  ${e.tick} = MUSIC ${head} section="${e.sectionName}"`
+        + (e.startMs !== undefined ? ` start_ms=${e.startMs}` : '')
+        + (e.durationMs !== undefined ? ` duration_ms=${e.durationMs}` : '')
+        + ` bpm=${e.bpm.toFixed(2)} resolution=${e.resolution}`
+        + ` duration=${e.durationSeconds.toFixed(2)} notes=${e.notesCount}`
+        + ` required=${e.required} timing=${e.timing}`
+        + (e.retryVo ? ` retry_vo="${e.retryVo}"` : '')
+        + (e.next ? ` next="${e.next}"` : '')
+      )
+    }
+    return ''
   })
   return `[TutorialScript]\n{\n${lines.join('\n')}\n}\n`
 }
 
-function serializeMusicSections(sections: Record<string, string>, events: TutorialEvent[]): string {
+function serializeMusicSections(
+  musicSections: Record<string, string>,
+  events: TutorialEvent[],
+  clips: Clip[],
+): string {
   // Only emit sections referenced by an active MUSIC event, so deleting an
   // event also drops its body on save instead of leaving orphans behind.
   const referenced = new Set(
     events.filter((e): e is TutorialMusicEvent => e.kind === 'music').map((e) => e.sectionName),
   )
-  const blocks: string[] = []
-  for (const [name, body] of Object.entries(sections)) {
-    if (!referenced.has(name)) continue
-    blocks.push(`[${name}]\n{${body}}\n`)
+  const out: string[] = []
+  for (const [sectionName, body] of Object.entries(musicSections)) {
+    if (!referenced.has(sectionName)) continue
+    const clip = clips.find((c) => c.sectionName === sectionName)
+    let prefix = ''
+    if (clip && (clip.sourceId || clip.startSec > 0 || clip.endSec > 0 || clip.name !== sectionName)) {
+      const sourceFrag = clip.sourceId ? `source="${clip.sourceId}" ` : ''
+      prefix = `\n  ; ${sourceFrag}start_sec=${clip.startSec.toFixed(3)} end_sec=${clip.endSec.toFixed(3)} name="${clip.name.replace(/"/g, '\\"')}"\n`
+      const stripped = body.replace(/^\n?\s*;\s*(?:source="[^"]*"\s+)?start_sec=[\d.]+\s+end_sec=[\d.]+\s+name="[^"]*"\s*\n?/, '\n')
+      out.push(`[${sectionName}]\n{${prefix.trimEnd()}${stripped}}\n`)
+    } else {
+      out.push(`[${sectionName}]\n{${body}}\n`)
+    }
   }
-  return blocks.join('')
+  return out.join('')
 }
 
 function applyTutorialToFullText(
@@ -681,15 +817,24 @@ function applyTutorialToFullText(
   events: TutorialEvent[],
   enabled: boolean,
   musicSections: Record<string, string>,
+  importedSources: ImportedSource[],
+  clips: Clip[],
 ): string {
-  // Strip both [TutorialScript] and any [MusicSeg_*] sections — we re-emit
-  // them from the in-memory state so they stay in sync.
-  let stripped = fullText.replace(/\[TutorialScript\]\s*\{[^}]*\}\s*/g, '')
+  // Strip [ImportedSources], [TutorialScript] and any [MusicSeg_*] sections —
+  // we re-emit them from in-memory state so they stay in sync.
+  let stripped = fullText.replace(/\[ImportedSources\]\s*\{[^}]*\}\s*/g, '')
+  stripped = stripped.replace(/\[TutorialScript\]\s*\{[^}]*\}\s*/g, '')
   stripped = stripped.replace(/\[MusicSeg_[A-Za-z0-9_-]+\]\s*\{[^}]*\}\s*/g, '')
-  if (!enabled || events.length === 0) return stripped
+  if (!enabled || events.length === 0) {
+    const srcBlock = serializeImportedSources(importedSources)
+    return stripped.trimEnd() + (srcBlock ? '\n' + srcBlock : '') + '\n'
+  }
+  const importedSourcesBlock = serializeImportedSources(importedSources)
   const newSection = serializeTutorialSection(events)
-  const musicBlocks = serializeMusicSections(musicSections, events)
-  return stripped.trimEnd() + '\n' + newSection + (musicBlocks ? musicBlocks : '')
+  const musicBlocks = serializeMusicSections(musicSections, events, clips)
+  // [ImportedSources] comes BEFORE [TutorialScript] so source declarations
+  // appear before the events that reference them.
+  return stripped.trimEnd() + '\n' + (importedSourcesBlock ? importedSourcesBlock : '') + newSection + (musicBlocks ? musicBlocks : '')
 }
 
 // Camera state for the 3D-perspective preview. Stored in localStorage so the
@@ -835,6 +980,8 @@ function parseChart(text: string, prefer?: string, customNames: Set<string> = ne
   const notes = activeName ? parseSectionNotes(text, activeName) : []
   const tutorial = parseTutorialSection(text)
   const musicSections = parseMusicSections(text)
+  const importedSources = parseImportedSources(text)
+  const clips = deriveClips(musicSections, tutorial)
   const scene = parseSceneFlags(text)
   const sceneEventsParsed = parseSceneEvents(text, customNames)
   // Legacy [Scene] flags → tick-based events. Span from tick 0 to the active
@@ -853,7 +1000,7 @@ function parseChart(text: string, prefer?: string, customNames: Set<string> = ne
   return {
     fullText: text, resolution, bpm, bpmRaw, songName,
     availableSections, activeName, notes,
-    tutorialEnabled, tutorial, musicSections,
+    tutorialEnabled, tutorial, musicSections, importedSources, clips,
     sceneFlags: migrated.clearedFlags,
     sceneFlagsUnknown: scene.unknownKeys,
     sceneEvents: mergedSceneEvents,
@@ -5267,7 +5414,7 @@ export default function BeatmapEditor() {
       return
     }
     let newFull = replaceSectionNotes(chart.fullText, chart.activeName, chart.notes)
-    newFull = applyTutorialToFullText(newFull, chart.tutorial, chart.tutorialEnabled, chart.musicSections)
+    newFull = applyTutorialToFullText(newFull, chart.tutorial, chart.tutorialEnabled, chart.musicSections, chart.importedSources, chart.clips)
     newFull = applySyncTrackToFullText(newFull, chart.tempoMarkers, chart.timeSigs, chart.syncOther)
     const passthroughWithSections = [...chart.sceneEventsPassthrough, ...sectionLines(chart.sections)]
     newFull = applySceneToFullText(
@@ -5304,7 +5451,7 @@ export default function BeatmapEditor() {
     setSaveMsg('')
     try {
       let newFull = replaceSectionNotes(chart.fullText, chart.activeName, chart.notes)
-      newFull = applyTutorialToFullText(newFull, chart.tutorial, chart.tutorialEnabled, chart.musicSections)
+      newFull = applyTutorialToFullText(newFull, chart.tutorial, chart.tutorialEnabled, chart.musicSections, chart.importedSources, chart.clips)
       newFull = applySyncTrackToFullText(newFull, chart.tempoMarkers, chart.timeSigs, chart.syncOther)
       // Merge section markers back into passthrough so applySceneToFullText
       // re-emits them as standard `E "section ..."` rows in [Events].
