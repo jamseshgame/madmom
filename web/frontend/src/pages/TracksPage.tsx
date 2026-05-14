@@ -597,6 +597,89 @@ function InlinePublish({ track }: { track: Track }) {
   }
   const [selectedBeatmaps, setSelectedBeatmaps] = useState<Record<string, string>>({})
 
+  // Lightweight preview of bundle outputs that the backend's publish flow will
+  // add on top of song.ogg + song.ini + notes_fixed_slides.chart:
+  //   - vo/tutorial.ogg     — emitted when any selected beatmap carries
+  //                            [TutorialScript] VO entries
+  //   - realnotes/<pack>/<scale>/  — one folder per unique (pack, scale)
+  //                                  combo any selected beatmap's R notes
+  //                                  reference
+  // Computed client-side by fetching each selected beatmap's chart and
+  // mirroring the regex walks the backend uses (see _bundle_realnotes in
+  // routers/tracks.py). Refreshes whenever the user changes the selection.
+  const [publishPreview, setPublishPreview] = useState<{
+    hasTutorialVo: boolean
+    retryVoPaths: string[]
+    realnotesCombos: Array<{ pack: string; scale: string }>
+  }>({ hasTutorialVo: false, retryVoPaths: [], realnotesCombos: [] })
+
+  useEffect(() => {
+    if (!expanded) return
+    if (Object.keys(beatmapsByStem).length === 0) {
+      setPublishPreview({ hasTutorialVo: false, retryVoPaths: [], realnotesCombos: [] })
+      return
+    }
+    let cancelled = false
+    ;(async () => {
+      let hasVo = false
+      const retryPaths = new Set<string>()
+      const combos = new Set<string>()
+      for (const [stem, bms] of Object.entries(beatmapsByStem)) {
+        const bmId = selectedBeatmaps[stem] || bms[0]?.id
+        if (!bmId) continue
+        try {
+          const r = await fetch(`/api/tracks/${track.id}/beatmaps/${bmId}/chart`)
+          if (!r.ok) continue
+          const { chart } = await r.json() as { chart: string }
+          // Tutorial VO check: any "<tick> = VO " line inside [TutorialScript].
+          const tsMatch = chart.match(/\[TutorialScript\]\s*\{([^}]*)\}/)
+          if (tsMatch) {
+            if (/\d+\s*=\s*VO\s/.test(tsMatch[1])) hasVo = true
+            // STEP retry_vo paths — separate ogg files that the publisher
+            // copies alongside tutorial.ogg. Each unique path becomes its
+            // own preview row.
+            for (const m of tsMatch[1].matchAll(/\d+\s*=\s*STEP\s+[^\n]*?retry_vo="([^"]+)"/g)) {
+              retryPaths.add(m[1])
+            }
+          }
+          // Realnote combos: walk each section, track active (pack, scale)
+          // from E events, record the combo when an R note follows.
+          const secRe = /\[[^\]]+\]\s*\{([^}]*)\}/g
+          let sm: RegExpExecArray | null
+          while ((sm = secRe.exec(chart)) !== null) {
+            let activePack: string | null = null
+            let activeScale: string | null = null
+            for (const line of sm[1].split('\n')) {
+              const pp = line.match(/^\s*\d+\s*=\s*E\s+realnotes_pack\s+(\S+)/)
+              if (pp) { activePack = pp[1]; continue }
+              const sp = line.match(/^\s*\d+\s*=\s*E\s+realnotes_scale\s+(\S+)/)
+              if (sp) { activeScale = sp[1]; continue }
+              if (/^\s*\d+\s*=\s*R\s/.test(line) && activePack && activeScale) {
+                combos.add(`${activePack}/${activeScale}`)
+              }
+            }
+          }
+        } catch {
+          // Best-effort — failing to fetch a chart just hides the corresponding
+          // preview line; the actual publish still does the right thing.
+        }
+      }
+      if (cancelled) return
+      setPublishPreview({
+        hasTutorialVo: hasVo,
+        retryVoPaths: [...retryPaths].sort(),
+        realnotesCombos: [...combos].sort().map((s) => {
+          const [pack, scale] = s.split('/')
+          return { pack, scale }
+        }),
+      })
+    })()
+    return () => { cancelled = true }
+    // beatmapsByStem is derived from the track prop every render and is stable
+    // enough; chart-fetching only happens when expanded or selection changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expanded, selectedBeatmaps, track.id])
+
   useEffect(() => {
     if (!expanded) return
     const init: Record<string, string> = {}
@@ -744,7 +827,41 @@ function InlinePublish({ track }: { track: Track }) {
               ⚠ no notes_fixed_slides.chart
             </span>
           )}
+          {publishPreview.hasTutorialVo && (
+            <span title="Collated VO clips referenced by the chart's [TutorialScript] entries. Played by the engine at each VO event's start_ms/duration_ms offset.">
+              + <span className="text-cyan-300">vo/tutorial.ogg</span>
+            </span>
+          )}
+          {publishPreview.retryVoPaths
+            .filter((p) => !(publishPreview.hasTutorialVo && p === 'vo/tutorial.ogg'))
+            .map((p) => (
+              <span key={p} title="Standalone retry clip referenced by STEP retry_vo. The engine plays the whole file when the section's required-hit count isn't met.">
+                + <span className="text-cyan-300/80">{p}</span>
+              </span>
+            ))}
+          {publishPreview.realnotesCombos.length > 0 && (
+            <span
+              title={`Real-note bundles copied verbatim from web/backend/sample_packs_data/. One folder per (pack, scale) combo referenced by R notes:\n${publishPreview.realnotesCombos.map((c) => `  realnotes/${c.pack}/${c.scale}/`).join('\n')}`}
+            >
+              + <span className="text-purple-300">realnotes/</span>
+              <span className="text-gray-600"> ({publishPreview.realnotesCombos.length} {publishPreview.realnotesCombos.length === 1 ? 'combo' : 'combos'})</span>
+            </span>
+          )}
         </div>
+        {publishPreview.realnotesCombos.length > 0 && (
+          <details className="mt-1.5 text-[11px] font-mono text-gray-600">
+            <summary className="cursor-pointer hover:text-gray-400 select-none">
+              realnotes/ folders ({publishPreview.realnotesCombos.length})
+            </summary>
+            <ul className="mt-1 pl-4 space-y-0.5">
+              {publishPreview.realnotesCombos.map((c) => (
+                <li key={`${c.pack}/${c.scale}`} className="text-purple-300/80">
+                  realnotes/{c.pack}/{c.scale}/
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
       </div>
 
       {/* Beatmaps to publish — one per stem. Defaults to latest per stem; user

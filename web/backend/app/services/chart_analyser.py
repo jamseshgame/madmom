@@ -9,7 +9,13 @@ PAIR_NAMES = {(0, 1): '0+1', (1, 2): '1+2', (2, 3): '2+3', (3, 4): '3+4'}
 
 
 def analyse_chart_section(body: str) -> dict:
-    """Parse a chart section body and return detailed note type counts."""
+    """Parse a chart section body and return detailed note type counts.
+
+    N (normal) and R (real-note) lines are counted the same way — they both
+    represent playable notes; the R-vs-N distinction only affects whether the
+    game also plays a pitched sample on hit, which doesn't change the
+    structural stats this returns.
+    """
     note_events = defaultdict(list)
     slide_ticks = defaultdict(set)
 
@@ -17,7 +23,7 @@ def analyse_chart_section(body: str) -> dict:
         line = line.strip()
         if not line:
             continue
-        m = re.match(r'(\d+)\s*=\s*N\s+(\d+)\s+(\d+)', line)
+        m = re.match(r'(\d+)\s*=\s*[NR]\s+(\d+)\s+(\d+)', line)
         if m:
             tick, fret, sustain = int(m.group(1)), int(m.group(2)), int(m.group(3))
             note_events[tick].append((fret, sustain))

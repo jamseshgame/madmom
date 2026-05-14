@@ -12,8 +12,15 @@ import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js'
 
 interface ChartNote {
   tick: number
-  lane: number       // 0-4 colored frets, 5 force-hopo, 6 tap, 7 open, 8 real-note (plays sample on hit)
+  lane: number       // 0-4 colored frets, 5 force-hopo, 6 tap, 7 open
   sustain: number    // sustain length in ticks (0 = single hit)
+  // Real-note: emit as `R` instead of `N`. Pack/scale are propagated from the
+  // most recent E realnotes_pack / realnotes_scale event in the section at
+  // parse time, and re-emitted as E events at serialize time when the active
+  // (pack, scale) changes.
+  type?: 'real'
+  pack?: string
+  scale?: string
 }
 
 // Tutorial-mode events sit in their own [TutorialScript] section in the
@@ -47,7 +54,11 @@ interface TutorialStepEvent {
   stepId: string         // user-facing identifier, e.g. "intro" or "chord_drill"
   required: number       // notes the player must hit to pass; 0 = no gate
   timing: TimingMode     // 'any' counts every hit, 'perfect' only perfects
-  retryVo: string        // optional VO file played on fail
+  retryVo: string        // optional VO file played on fail. Typically points
+                         // at the collated vo/tutorial.ogg so retry variants
+                         // can live alongside section VOs as named slices.
+  retryStartMs?: number  // slice offset within retryVo (when collated)
+  retryDurationMs?: number
   next: string           // step id to jump to on pass; empty = end-of-tutorial
 }
 
@@ -354,7 +365,11 @@ function findNoteSections(text: string): string[] {
   const out: string[] = []
   let m
   while ((m = re.exec(text)) !== null) {
-    if (/^\s*\d+\s*=\s*N\s+/m.test(m[2])) out.push(m[1])
+    // A section counts as a "note section" if it has any playable note —
+    // N (regular) or R (real-note). Real-notes-only sections (e.g. the
+    // realnote acid test) wouldn't otherwise show up in the difficulty
+    // picker.
+    if (/^\s*\d+\s*=\s*[NR]\s+/m.test(m[2])) out.push(m[1])
   }
   return out
 }
@@ -366,12 +381,68 @@ function parseSectionNotes(text: string, name: string): ChartNote[] {
   const close = text.indexOf('}', open)
   if (open === -1 || close === -1) return []
   const inner = text.slice(open + 1, close)
-  const notes: ChartNote[] = []
+  // Walk in tick-stable order, propagating active (pack, scale) state from
+  // E realnotes_pack / E realnotes_scale events into each R note. Lines at
+  // the same tick keep their source order so a declaration written before
+  // its R note applies to it.
+  type RawLine =
+    | { tick: number; kind: 'note' | 'realnote'; lane: number; sustain: number }
+    | { tick: number; kind: 'pack' | 'scale'; value: string }
+  const raws: { i: number; line: RawLine }[] = []
+  let i = 0
   for (const raw of inner.split('\n')) {
-    const m = raw.trim().match(/^(\d+)\s*=\s*N\s+(\d+)\s+(\d+)/)
-    if (m) notes.push({ tick: Number(m[1]), lane: Number(m[2]), sustain: Number(m[3]) })
+    i++
+    const t = raw.trim()
+    if (!t) continue
+    let m = t.match(/^(\d+)\s*=\s*N\s+(\d+)\s+(\d+)/)
+    if (m) { raws.push({ i, line: { tick: Number(m[1]), kind: 'note', lane: Number(m[2]), sustain: Number(m[3]) } }); continue }
+    m = t.match(/^(\d+)\s*=\s*R\s+(\d+)\s+(\d+)/)
+    if (m) { raws.push({ i, line: { tick: Number(m[1]), kind: 'realnote', lane: Number(m[2]), sustain: Number(m[3]) } }); continue }
+    m = t.match(/^(\d+)\s*=\s*E\s+realnotes_pack\s+(\S+)/)
+    if (m) { raws.push({ i, line: { tick: Number(m[1]), kind: 'pack', value: m[2] } }); continue }
+    m = t.match(/^(\d+)\s*=\s*E\s+realnotes_scale\s+(\S+)/)
+    if (m) { raws.push({ i, line: { tick: Number(m[1]), kind: 'scale', value: m[2] } }); continue }
+  }
+  raws.sort((a, b) => a.line.tick - b.line.tick || a.i - b.i)
+  let activePack: string | undefined
+  let activeScale: string | undefined
+  const notes: ChartNote[] = []
+  for (const { line: r } of raws) {
+    if (r.kind === 'pack') activePack = r.value
+    else if (r.kind === 'scale') activeScale = r.value
+    else if (r.kind === 'note') notes.push({ tick: r.tick, lane: r.lane, sustain: r.sustain })
+    else if (r.kind === 'realnote') notes.push({
+      tick: r.tick, lane: r.lane, sustain: r.sustain,
+      type: 'real', pack: activePack, scale: activeScale,
+    })
   }
   return notes
+}
+
+function emitNoteSectionLines(notes: ChartNote[]): string[] {
+  // Sort by tick then lane, walking the active (pack, scale) state. Emit E
+  // events when state changes — they always precede the R note that triggered
+  // the change, so the reader sees the declaration first.
+  const sorted = [...notes].sort((a, b) => a.tick - b.tick || a.lane - b.lane)
+  let activePack: string | undefined
+  let activeScale: string | undefined
+  const out: string[] = []
+  for (const n of sorted) {
+    if (n.type === 'real') {
+      if (n.pack && n.pack !== activePack) {
+        out.push(`  ${n.tick} = E realnotes_pack ${n.pack}`)
+        activePack = n.pack
+      }
+      if (n.scale && n.scale !== activeScale) {
+        out.push(`  ${n.tick} = E realnotes_scale ${n.scale}`)
+        activeScale = n.scale
+      }
+      out.push(`  ${n.tick} = R ${n.lane} ${n.sustain}`)
+    } else {
+      out.push(`  ${n.tick} = N ${n.lane} ${n.sustain}`)
+    }
+  }
+  return out
 }
 
 function replaceSectionNotes(text: string, name: string, notes: ChartNote[]): string {
@@ -381,23 +452,27 @@ function replaceSectionNotes(text: string, name: string, notes: ChartNote[]): st
   // fresh-difficulty edit survives the round-trip.
   if (start === -1) {
     if (notes.length === 0) return text
-    const sorted = [...notes].sort((a, b) => a.tick - b.tick || a.lane - b.lane)
-    const noteLines = sorted.map((n) => `  ${n.tick} = N ${n.lane} ${n.sustain}`)
-    const block = `[${name}]\n{\n${noteLines.join('\n')}\n}\n`
+    const block = `[${name}]\n{\n${emitNoteSectionLines(notes).join('\n')}\n}\n`
     return text.trimEnd() + '\n' + block
   }
   const open = text.indexOf('{', start)
   const close = text.indexOf('}', open)
   if (open === -1 || close === -1) return text
   const inner = text.slice(open + 1, close)
-  // Keep non-note lines (E events, S star power, A anchors) verbatim, replace N lines
+  // Strip everything we re-emit: N + R note lines and E realnotes_* events.
+  // Other E events (slides, etc.), S star power, and A anchors pass through.
   const keptLines = inner
     .split('\n')
     .map((l) => l.replace(/\r$/, ''))
-    .filter((l) => l.trim() && !/^\s*\d+\s*=\s*N\s+/.test(l))
-  const sorted = [...notes].sort((a, b) => a.tick - b.tick || a.lane - b.lane)
-  const noteLines = sorted.map((n) => `  ${n.tick} = N ${n.lane} ${n.sustain}`)
-  const combined = [...keptLines, ...noteLines].sort((a, b) => {
+    .filter((l) => {
+      const t = l.trim()
+      if (!t) return false
+      if (/^\d+\s*=\s*[NR]\s+/.test(t)) return false
+      if (/^\d+\s*=\s*E\s+realnotes_(pack|scale)\b/.test(t)) return false
+      return true
+    })
+  const newLines = emitNoteSectionLines(notes)
+  const combined = [...keptLines, ...newLines].sort((a, b) => {
     const ta = Number(a.match(/^\s*(\d+)/)?.[1] ?? 0)
     const tb = Number(b.match(/^\s*(\d+)/)?.[1] ?? 0)
     return ta - tb
@@ -505,6 +580,8 @@ function parseTutorialSection(text: string): TutorialEvent[] {
         required: Number(fields.required || 0) || 0,
         timing,
         retryVo: fields.retry_vo || '',
+        retryStartMs: fields.retry_start_ms !== undefined ? Number(fields.retry_start_ms) : undefined,
+        retryDurationMs: fields.retry_duration_ms !== undefined ? Number(fields.retry_duration_ms) : undefined,
         next: fields.next || '',
       })
     } else if (kind === 'MUSIC') {
@@ -561,9 +638,14 @@ function serializeTutorialSection(events: TutorialEvent[]): string {
       return `  ${e.tick} = VO "${e.file}"${startMs}${durationMs}${t}${engine}${voice}`
     }
     if (e.kind === 'step') {
+      const retryAttrs = e.retryVo
+        ? ` retry_vo="${e.retryVo}"`
+          + (e.retryStartMs !== undefined ? ` retry_start_ms=${e.retryStartMs}` : '')
+          + (e.retryDurationMs !== undefined ? ` retry_duration_ms=${e.retryDurationMs}` : '')
+        : ''
       return (
         `  ${e.tick} = STEP "${e.stepId}" required=${e.required} timing=${e.timing}`
-        + (e.retryVo ? ` retry_vo="${e.retryVo}"` : '')
+        + retryAttrs
         + (e.next ? ` next="${e.next}"` : '')
       )
     }
@@ -2345,6 +2427,18 @@ export default function BeatmapEditor() {
   // of the audio's full duration, stored in a ref so updates don't re-render
   // (the draw loop reads it on every frame regardless).
   const wavePeaksRef = useRef<Float32Array | null>(null)
+  // Pixel-space hit regions for the runway sidecar pills (VO / STEP / MUSIC /
+  // scene). Populated every draw frame so the click handler can pick the
+  // matching event without re-deriving x/y/w/h itself.
+  const pillRegionsRef = useRef<Array<{
+    x: number; y: number; w: number; h: number
+    id: string; kind: 'tutorial' | 'scene'
+  }>>([])
+  // Tutorial event (VO / STEP / MUSIC) and scene event currently being edited
+  // in the side panel. Lifted up here so the canvas draw closure can
+  // highlight the matching pill and the click handler can set them.
+  const [selectedTutorialId, setSelectedTutorialId] = useState<string | null>(null)
+  const [sceneSelectedId, setSceneSelectedId] = useState<string | null>(null)
   // Bumps to force a re-render when peaks finish decoding so any UI that
   // reflects waveform-ready state can update.
   const [, setWaveLoaded] = useState(false)
@@ -2365,41 +2459,25 @@ export default function BeatmapEditor() {
   const [clickEnabled, setClickEnabled] = useState(false)
   const [clickVolume, setClickVolume] = useState(0.4)
   const clickCtxRef = useRef<AudioContext | null>(null)
-  // Per-beatmap sound packs — unlimited list with stable slot indices.
-  // A real-note's chart marker (`tick = N 8 <slot>`) points at one entry,
-  // so removing a pack tombstones (null) its slot rather than renumbering.
-  // Different lanes/notes can play different packs by carrying different
-  // slot indices.
+  // Sound-pack picker — global catalog plus the user's current "default"
+  // selection. Real-notes carry their own (pack, scale) intrinsically; this
+  // pair just supplies the default that newly-dropped real-notes inherit and
+  // the per-note dropdown's initial value.
   const [packCatalog, setPackCatalog] = useState<Array<{
     pack_id: string; name: string; family: string; description: string
   }>>([])
   const [scaleCatalog, setScaleCatalog] = useState<Array<{
     scale_id: string; name: string; description: string
   }>>([])
-  interface AppliedPack {
-    slot: number
-    pack_id: string
-    scale_id: string
-    slots_present: string[]
-  }
-  const [appliedPacks, setAppliedPacks] = useState<Array<AppliedPack | null>>([])
   const [pickedPackId, setPickedPackId] = useState('')
   const [pickedScaleId, setPickedScaleId] = useState('')
-  // When the user opens "Edit" on an existing pack chip, this captures
-  // which slot they're editing. null = the form is in "add a new pack" mode.
-  const [editingSlot, setEditingSlot] = useState<number | null>(null)
-  // Slot the Real-note tool tags newly-dropped notes with. Defaults to the
-  // first applied pack; falls back to 0 when nothing has been applied yet.
-  const [activeRealSlot, setActiveRealSlot] = useState(0)
-  const [packBusy, setPackBusy] = useState(false)
-  const [packError, setPackError] = useState('')
   const [packPreviewing, setPackPreviewing] = useState(false)
   const packPreviewRef = useRef<HTMLAudioElement | null>(null)
 
-  // Real-notes preview — when this beatmap has a sound pack applied, fire the
-  // matching sample whenever the playhead crosses a real-note tick. Uses
-  // WebAudio with pre-decoded AudioBuffers; the slot resolution is in
-  // _resolveRealNoteSlot below.
+  // Real-notes preview — fires the matching sample whenever the playhead
+  // crosses a real-note tick. Uses WebAudio with pre-decoded AudioBuffers,
+  // keyed on (pack, scale); the per-tick resolution is in _resolveRealNote
+  // below.
   const [realNotesEnabled, setRealNotesEnabled] = useState(true)
 
   // ── Background panel — video behind the highway ───────────────────────────
@@ -2498,6 +2576,22 @@ export default function BeatmapEditor() {
   const [playMode, setPlayMode] = useState<'autohit' | 'live'>(() =>
     (localStorage.getItem('editor.playMode') as 'autohit' | 'live') || 'autohit',
   )
+
+  // Test toggle: in autohit mode, deduct one hit from the first attempt of
+  // every section, forcing it below `required` so the engine plays the
+  // section's retry VO and seeks back. The second attempt counts normally.
+  // Lets you audition retry_vo without switching to live mode and missing
+  // notes on purpose.
+  const [simulateRetryOnce, setSimulateRetryOnce] = useState(false)
+  // Per-step attempt counter — how many times we've crossed INTO each step
+  // boundary. First crossing = attempt 1; the simulation deducts a hit only
+  // when this is 0 (i.e., we haven't entered this section yet). Cleared on
+  // pause so a fresh play pass re-tests the retry path.
+  const sectionAttemptsRef = useRef<Map<string, number>>(new Map())
+  // Index of the step the playhead is currently inside, updated each frame.
+  // Stays in sync with the playhead so a forward boundary cross can be
+  // detected as `idx === lastStepIdxRef.current + 1`.
+  const lastStepIdxRef = useRef<number>(-1)
 
   // Performer mode — hide both sidebars + the top header so the highway
   // fills the window. A small floating toggle lives at the top-right corner
@@ -3029,14 +3123,14 @@ export default function BeatmapEditor() {
   const [realNotesReady, setRealNotesReady] = useState(false)
   const realNotesCtxRef = useRef<AudioContext | null>(null)
   const realNotesGainRef = useRef<GainNode | null>(null)
-  // Nested: pack-slot index → sample-name → AudioBuffer. Each applied pack
-  // (slot 0, slot 1, …) gets its own inner map so a single beatmap can use
-  // multiple packs simultaneously.
-  const realNotesBuffersRef = useRef<Map<number, Map<string, AudioBuffer>> | null>(null)
-  // Pre-computed list of (seconds, pack-slot, sample-name) for every real-
+  // Nested: "pack__scale" key → sample-name → AudioBuffer. A beatmap can use
+  // multiple (pack, scale) combos within different sections, so the outer key
+  // is the combo identifier; the resolver looks up the right one per note.
+  const realNotesBuffersRef = useRef<Map<string, Map<string, AudioBuffer>> | null>(null)
+  // Pre-computed list of (seconds, pack, scale, sample-name) for every real-
   // note in the chart, sorted by seconds. Rebuilt when the chart or tempo
   // map changes.
-  const realNotesEntriesRef = useRef<Array<{ sec: number; packSlot: number; sampleName: string }>>([])
+  const realNotesEntriesRef = useRef<Array<{ sec: number; pack: string; scale: string; sampleName: string }>>([])
   // Last currentTime we processed — used to detect playback range so we don't
   // re-fire samples on every animation frame.
   const realNotesLastTimeRef = useRef<number>(0)
@@ -3430,96 +3524,23 @@ export default function BeatmapEditor() {
     return () => { cancelled = true }
   }, [])
 
-  const refetchBeatmapPack = useCallback(() => {
-    if (!trackId || !beatmapId) return
-    fetch(`/api/tracks/${trackId}/beatmaps/${beatmapId}/sample-pack`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (!data) return
-        const packs = (data.packs || []) as Array<AppliedPack | null>
-        setAppliedPacks(packs)
-        // Default the picker to the first applied pack so re-clicking
-        // "Add pack" doesn't reset the form to the catalog's first entry.
-        const first = packs.find((p): p is AppliedPack => !!p)
-        if (first && !editingSlot) {
-          setPickedPackId((cur) => cur || first.pack_id)
-          setPickedScaleId((cur) => cur || first.scale_id)
-        }
-      })
-      .catch(() => undefined)
-  }, [trackId, beatmapId])  // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { refetchBeatmapPack() }, [refetchBeatmapPack])
-
-  // Keep the Real-tool active slot pointing at the first non-empty slot if
-  // the current target was tombstoned out from under us.
+  // Default the picker to whatever (pack, scale) is most-recently used by an
+  // existing real-note in the current chart, so re-opening a beatmap puts the
+  // user back where they left off. Falls through to the catalog's first entry
+  // when nothing's been authored yet.
   useEffect(() => {
-    const cur = appliedPacks[activeRealSlot]
-    if (cur) return
-    const idx = appliedPacks.findIndex((p) => !!p)
-    if (idx >= 0) setActiveRealSlot(idx)
-  }, [appliedPacks, activeRealSlot])
-
-  const applySoundPack = async () => {
-    if (!pickedPackId || !pickedScaleId) return
-    setPackBusy(true)
-    setPackError('')
-    try {
-      const fd = new FormData()
-      fd.append('pack_id', pickedPackId)
-      fd.append('scale_id', pickedScaleId)
-      if (editingSlot !== null) fd.append('slot', String(editingSlot))
-      const res = await fetch(
-        `/api/tracks/${trackId}/beatmaps/${beatmapId}/sample-pack`,
-        { method: 'POST', body: fd },
-      )
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.detail || `Apply failed (${res.status})`)
+    if (!chart) return
+    let lastPack: string | undefined
+    let lastScale: string | undefined
+    for (const n of chart.notes) {
+      if (n.type === 'real') {
+        if (n.pack) lastPack = n.pack
+        if (n.scale) lastScale = n.scale
       }
-      setEditingSlot(null)
-      await refetchBeatmapPack()
-    } catch (e) {
-      setPackError((e as Error).message)
-    } finally {
-      setPackBusy(false)
     }
-  }
-
-  const deletePackSlot = async (slot: number) => {
-    const entry = appliedPacks[slot]
-    if (!entry) return
-    if (!window.confirm(
-      `Remove "${entry.pack_id}" (slot ${slot}) from this beatmap? Real-notes assigned to this slot will fall back to slot 0.`,
-    )) return
-    setPackBusy(true)
-    setPackError('')
-    try {
-      const res = await fetch(
-        `/api/tracks/${trackId}/beatmaps/${beatmapId}/sample-pack/${slot}`,
-        { method: 'DELETE' },
-      )
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.detail || `Delete failed (${res.status})`)
-      }
-      await refetchBeatmapPack()
-    } catch (e) {
-      setPackError((e as Error).message)
-    } finally {
-      setPackBusy(false)
-    }
-  }
-
-  const startEditSlot = (slot: number) => {
-    const entry = appliedPacks[slot]
-    if (!entry) return
-    setEditingSlot(slot)
-    setPickedPackId(entry.pack_id)
-    setPickedScaleId(entry.scale_id)
-  }
-  const cancelEditSlot = () => {
-    setEditingSlot(null)
-  }
+    if (lastPack) setPickedPackId((cur) => cur || lastPack)
+    if (lastScale) setPickedScaleId((cur) => cur || lastScale)
+  }, [chart])
 
   const playPackPreview = () => {
     if (!pickedPackId || !pickedScaleId) return
@@ -3548,25 +3569,33 @@ export default function BeatmapEditor() {
   }, [pickedPackId, pickedScaleId])
 
   // ── Real-notes sample playback ────────────────────────────────────────────
-  // Resolve which sample slot a real-note at `tick` should play. Mirrors the
+  // Resolve which sample a real-note at `tick` should play. Mirrors the
   // game-side rule:
   //   - lane 7 present → 'open'
   //   - exactly 1 fret lane → 'lane_{N+1}'
   //   - exactly 2 fret lanes → 'chord_{a}{b}' with adjacent-lane fallback
-  //   - 3+ fret lanes (forbidden by R1 but defensive) → first lane's sample
-  const _resolveRealNoteSlot = useCallback((tick: number): { packSlot: number; sampleName: string } | null => {
+  //   - 3+ fret lanes → first lane's sample (defensive fallback)
+  // Pack/scale come from the lowest-lane real-note at the tick — chord
+  // members are expected to share pack/scale, but if they don't the lowest
+  // one wins so the chord_xy lookup matches the lowest+next-lowest lane semantic.
+  const _resolveRealNote = useCallback((tick: number): { pack: string; scale: string; sampleName: string } | null => {
     if (!chart) return null
     const fretLanes: number[] = []
     let hasOpen = false
-    // Pack slot comes from the lane-8 modifier's sustain field. Defaults to
-    // 0 when the marker is absent (legacy charts) or sustain is unset.
-    let packSlot = 0
+    let pack: string | undefined
+    let scale: string | undefined
+    let lowestRealLane = Infinity
     for (const n of chart.notes) {
       if (n.tick !== tick) continue
       if (n.lane === 7) hasOpen = true
       else if (n.lane <= 4) fretLanes.push(n.lane)
-      else if (n.lane === 8) packSlot = Math.max(0, Math.round(n.sustain))
+      if (n.type === 'real' && n.lane <= 7 && n.lane < lowestRealLane) {
+        lowestRealLane = n.lane
+        pack = n.pack
+        scale = n.scale
+      }
     }
+    if (!pack || !scale) return null
     let sampleName: string | null = null
     if (hasOpen) sampleName = 'open'
     else if (fretLanes.length === 1) sampleName = `lane_${fretLanes[0] + 1}`
@@ -3580,23 +3609,27 @@ export default function BeatmapEditor() {
         : `lane_${sorted[0] + 1}`
     }
     if (!sampleName) return null
-    return { packSlot, sampleName }
+    return { pack, scale, sampleName }
   }, [chart])
 
-  // Decode every applied pack's slot OGGs into AudioBuffers. Re-runs when
-  // the pack list changes shape (add / replace / delete) — uses a fingerprint
-  // string of (slot, pack_id, scale_id) tuples to avoid spurious refetches.
-  const appliedPacksFingerprint = appliedPacks
-    .map((p, i) => p ? `${i}:${p.pack_id}/${p.scale_id}` : `${i}:_`)
-    .join('|')
+  // Decode every (pack, scale) combo referenced by the chart's R notes into
+  // AudioBuffers. Re-fetches when the set of combos changes — fingerprint is
+  // the sorted unique pack__scale list so adding/removing notes within an
+  // already-loaded combo doesn't refetch.
+  const usedComboFingerprint = (() => {
+    if (!chart) return ''
+    const set = new Set<string>()
+    for (const n of chart.notes) {
+      if (n.type === 'real' && n.pack && n.scale) set.add(`${n.pack}__${n.scale}`)
+    }
+    return [...set].sort().join('|')
+  })()
   useEffect(() => {
     let cancelled = false
     setRealNotesReady(false)
     realNotesBuffersRef.current = null
-    if (!trackId || !beatmapId) return
-    const liveSlots: number[] = []
-    appliedPacks.forEach((p, i) => { if (p) liveSlots.push(i) })
-    if (liveSlots.length === 0) return
+    if (!usedComboFingerprint) return
+    const combos = usedComboFingerprint.split('|').filter(Boolean)
     const SLOTS = ['lane_1', 'lane_2', 'lane_3', 'lane_4', 'lane_5',
                    'chord_12', 'chord_23', 'chord_34', 'chord_45', 'open']
     ;(async () => {
@@ -3614,12 +3647,16 @@ export default function BeatmapEditor() {
         realNotesGainRef.current = gain
       }
       const ctx = realNotesCtxRef.current
-      const outer = new Map<number, Map<string, AudioBuffer>>()
-      for (const packSlot of liveSlots) {
+      const outer = new Map<string, Map<string, AudioBuffer>>()
+      for (const key of combos) {
+        const [pack, scale] = key.split('__')
+        if (!pack || !scale) continue
         const inner = new Map<string, AudioBuffer>()
         for (const sampleName of SLOTS) {
           try {
-            const r = await fetch(`/api/tracks/${trackId}/beatmaps/${beatmapId}/sample/${packSlot}/${sampleName}`)
+            const r = await fetch(
+              `/api/sample-packs/${encodeURIComponent(pack)}/${encodeURIComponent(scale)}/${sampleName}.ogg`,
+            )
             if (!r.ok) continue
             const ab = await r.arrayBuffer()
             const decoded = await ctx.decodeAudioData(ab)
@@ -3629,7 +3666,7 @@ export default function BeatmapEditor() {
             // Per-sample failure isn't fatal — others may still play.
           }
         }
-        if (inner.size > 0) outer.set(packSlot, inner)
+        if (inner.size > 0) outer.set(key, inner)
       }
       if (cancelled) return
       if (outer.size === 0) return
@@ -3637,7 +3674,7 @@ export default function BeatmapEditor() {
       setRealNotesReady(true)
     })()
     return () => { cancelled = true }
-  }, [trackId, beatmapId, appliedPacksFingerprint])  // eslint-disable-line react-hooks/exhaustive-deps
+  }, [usedComboFingerprint])  // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep the master gain in sync with the volume slider without restarting
   // any in-flight buffer sources.
@@ -3647,7 +3684,7 @@ export default function BeatmapEditor() {
     }
   }, [realNotesVolume])
 
-  // Rebuild the (sec, packSlot, sampleName) entry list whenever the chart
+  // Rebuild the (sec, pack, scale, sampleName) entry list whenever the chart
   // or tempo map changes. Pre-sorted by sec so the fire-on-cross effect can
   // scan a bounded window in O(crossings).
   useEffect(() => {
@@ -3656,20 +3693,21 @@ export default function BeatmapEditor() {
       return
     }
     const realTicks = new Set<number>()
-    for (const n of chart.notes) if (n.lane === 8) realTicks.add(n.tick)
-    const entries: Array<{ sec: number; packSlot: number; sampleName: string }> = []
+    for (const n of chart.notes) if (n.type === 'real') realTicks.add(n.tick)
+    const entries: Array<{ sec: number; pack: string; scale: string; sampleName: string }> = []
     for (const tick of realTicks) {
-      const resolved = _resolveRealNoteSlot(tick)
+      const resolved = _resolveRealNote(tick)
       if (!resolved) continue
       entries.push({
         sec: tickToSec(tempoSegments, chart.resolution, tick),
-        packSlot: resolved.packSlot,
+        pack: resolved.pack,
+        scale: resolved.scale,
         sampleName: resolved.sampleName,
       })
     }
     entries.sort((a, b) => a.sec - b.sec)
     realNotesEntriesRef.current = entries
-  }, [chart, tempoSegments, _resolveRealNoteSlot])
+  }, [chart, tempoSegments, _resolveRealNote])
 
   // Helper — fire a single decoded sample now via the AudioContext. Used by
   // both the autohit-mode cross effect and the live-mode strum handler.
@@ -3677,14 +3715,13 @@ export default function BeatmapEditor() {
   // for the lowest hardware-buffered latency. Autohit batches fire on the
   // same rAF tick anyway, so they remain phase-locked without the old
   // 5 ms look-ahead.
-  const fireSampleNow = useCallback((packSlot: number, sampleName: string) => {
+  const fireSampleNow = useCallback((pack: string, scale: string, sampleName: string) => {
     const ctx = realNotesCtxRef.current
     const gain = realNotesGainRef.current
     const buffers = realNotesBuffersRef.current
     if (!ctx || !gain || !buffers) return
     if (ctx.state === 'suspended') ctx.resume().catch(() => undefined)
-    let inner = buffers.get(packSlot)
-    if (!inner || !inner.has(sampleName)) inner = buffers.get(0)
+    const inner = buffers.get(`${pack}__${scale}`)
     const buf = inner?.get(sampleName)
     if (!buf) return
     const src = ctx.createBufferSource()
@@ -3714,7 +3751,7 @@ export default function BeatmapEditor() {
     for (const e of entries) {
       if (e.sec <= prev) continue
       if (e.sec > currentTime) break
-      if (e.sampleName) fireSampleNow(e.packSlot, e.sampleName)
+      if (e.sampleName) fireSampleNow(e.pack, e.scale, e.sampleName)
       // Spawn explosions on the lanes the note covers. Look up the fret set
       // from the live-entry index (same set, same sec) so we don't have to
       // walk chart.notes here.
@@ -3730,9 +3767,11 @@ export default function BeatmapEditor() {
   // ── Live play hit detection ───────────────────────────────────────────────
   // Per-tick fret requirement, computed once from the chart so the strum
   // handler can match held frets to the nearest real-note without walking
-  // chart.notes every press. Each entry: { sec, packSlot, sampleName, frets:
-  // Set<lane>|null }. `frets === null` means open note (no frets held).
-  const liveEntriesRef = useRef<Array<{ sec: number; packSlot: number; sampleName: string; frets: Set<number> | null }>>([])
+  // chart.notes every press. Each entry: { sec, pack, scale, sampleName,
+  // frets: Set<lane>|null }. `frets === null` means open note (no frets held).
+  // pack/scale are empty strings on ticks with no real-note (the hit still
+  // registers silently for scoring).
+  const liveEntriesRef = useRef<Array<{ sec: number; pack: string; scale: string; sampleName: string; frets: Set<number> | null }>>([])
   // Set of (real-note tick × seconds) already hit this play pass so a single
   // strum can't double-fire the same note. Cleared on seek/pause.
   const liveHitTicksRef = useRef<Set<number>>(new Set())
@@ -3746,7 +3785,7 @@ export default function BeatmapEditor() {
     // otherwise the hit just registers silently.
     const tickGroups = new Map<number, { frets: Set<number>; open: boolean }>()
     for (const n of chart.notes) {
-      if (n.lane > 4 && n.lane !== 7) continue   // skip mod-lanes 5/6/8
+      if (n.lane > 4 && n.lane !== 7) continue   // skip mod-lanes 5/6
       const g = tickGroups.get(n.tick) ?? { frets: new Set<number>(), open: false }
       if (n.lane === 7) g.open = true
       else g.frets.add(n.lane)
@@ -3754,17 +3793,18 @@ export default function BeatmapEditor() {
     }
     const out: typeof liveEntriesRef.current = []
     for (const [tick, g] of tickGroups) {
-      const resolved = _resolveRealNoteSlot(tick)
+      const resolved = _resolveRealNote(tick)
       out.push({
         sec: tickToSec(tempoSegments, chart.resolution, tick),
-        packSlot: resolved?.packSlot ?? 0,
+        pack: resolved?.pack ?? '',
+        scale: resolved?.scale ?? '',
         sampleName: resolved?.sampleName ?? '',
         frets: g.open ? null : g.frets,
       })
     }
     out.sort((a, b) => a.sec - b.sec)
     liveEntriesRef.current = out
-  }, [chart, tempoSegments, _resolveRealNoteSlot])
+  }, [chart, tempoSegments, _resolveRealNote])
 
   // Reset the per-pass hit set on seek / pause so notes can be re-attempted.
   useEffect(() => {
@@ -3825,10 +3865,10 @@ export default function BeatmapEditor() {
         else tier = delta >= 0 ? 'veryEarly' : 'veryLate'
 
         // Award points — non-realtime path so React state batches per tick.
-        // Sample only fires when this tick has a real-note flag (lane 8) and
+        // Sample only fires when this tick is a real-note (R type) and
         // playback is enabled; regular gems hit silently with score only.
-        if (realNotesEnabled && realNotesReady && best.sampleName) {
-          fireSampleNow(best.packSlot, best.sampleName)
+        if (realNotesEnabled && realNotesReady && best.sampleName && best.pack && best.scale) {
+          fireSampleNow(best.pack, best.scale, best.sampleName)
         }
         const earned = Math.round(pointsPerPerfectHit * scoringSettings.multipliers[tier])
         setScore((s) => s + earned)
@@ -3894,7 +3934,7 @@ export default function BeatmapEditor() {
   }, [])
 
   // Resolve the slot name a real-note SHOULD play given a held-frets set —
-  // mirrors _resolveRealNoteSlot but driven by the player's input rather than
+  // mirrors _resolveRealNote but driven by the player's input rather than
   // the chart. Used for free-play preview.
   const resolveSlotForHeldFrets = useCallback((held: Set<number>): string | null => {
     if (held.size === 0) return 'open'
@@ -3910,18 +3950,19 @@ export default function BeatmapEditor() {
 
   // Free-play preview: when the song isn't playing and the user has the
   // "Preview with guitar" toggle on, strums fire the matching sample from the
-  // currently-active applied sound pack so the user can audition the patches.
+  // currently-selected pack/scale so the user can audition the patches.
   const [guitarPreview, setGuitarPreview] = useState(false)
   useEffect(() => {
     // Only wire when not playing — once playback starts, the live-mode strum
     // handler (installed elsewhere) takes precedence.
     if (playing || !guitarPreview || !realNotesReady) return
+    if (!pickedPackId || !pickedScaleId) return
     onStrumRef.current = () => {
       const slotName = resolveSlotForHeldFrets(heldFretsRef.current)
-      if (slotName) fireSampleNow(activeRealSlot, slotName)
+      if (slotName) fireSampleNow(pickedPackId, pickedScaleId, slotName)
     }
     return () => { onStrumRef.current = null }
-  }, [playing, guitarPreview, realNotesReady, activeRealSlot, fireSampleNow, resolveSlotForHeldFrets])
+  }, [playing, guitarPreview, realNotesReady, pickedPackId, pickedScaleId, fireSampleNow, resolveSlotForHeldFrets])
 
   // Decode song.ogg → peaks for waveform overlay. Bucket size of 20ms gives
   // ~50 peaks/second, enough resolution to read transients on the runway
@@ -4169,6 +4210,8 @@ export default function BeatmapEditor() {
       fill: string
       border: string
       text: string
+      id: string
+      kind: 'tutorial' | 'scene'
     }
 
     // Local ticks/sec at the current playhead — only used for visual minimums
@@ -4188,25 +4231,52 @@ export default function BeatmapEditor() {
     const voPills: Pill[] = []
     const evPills: Pill[] = []
 
+    // STEP blocks span from this STEP's tick to the next STEP's tick — that's
+    // the window the player has to meet the `required` count. Sorted once so
+    // each STEP can binary-walk it without re-scanning.
+    const stepTicks: number[] = []
+    if (chart.tutorialEnabled) {
+      for (const ev of chart.tutorial) {
+        if (ev.kind === 'step') stepTicks.push(ev.tick)
+      }
+      stepTicks.sort((a, b) => a - b)
+    }
+
     if (chart.tutorialEnabled) {
       for (const ev of chart.tutorial) {
         if (ev.kind === 'vo') {
+          // Duration on the highway = the clip's actual length so the pill
+          // visually covers the audio window. Fall back to MIN_TICK_DUR for
+          // VOs without an embedded durationMs (legacy, or pre-collation).
+          const voDurTicks = (ev.durationMs && ev.durationMs > 0)
+            ? Math.max(MIN_TICK_DUR, Math.round(tickFromSec(ev.durationMs / 1000)))
+            : MIN_TICK_DUR
           voPills.push({
             tickStart: ev.tick,
-            tickEnd: ev.tick + MIN_TICK_DUR,
+            tickEnd: ev.tick + voDurTicks,
             label: ev.text ? `▶ ${ev.text.slice(0, 60)}` : '▶ VO',
             fill: 'rgba(56, 189, 248, 0.22)',
             border: 'rgba(56, 189, 248, 0.7)',
             text: '#7dd3fc',
+            id: ev.id,
+            kind: 'tutorial',
           })
         } else if (ev.kind === 'step') {
+          // Step span = until the next STEP. Last step gets a minimum-height
+          // pill since "until end of song" would dominate the runway.
+          const nextStep = stepTicks.find((t) => t > ev.tick)
+          const stepDurTicks = nextStep !== undefined
+            ? Math.max(MIN_TICK_DUR, nextStep - ev.tick)
+            : MIN_TICK_DUR
           evPills.push({
             tickStart: ev.tick,
-            tickEnd: ev.tick + MIN_TICK_DUR,
+            tickEnd: ev.tick + stepDurTicks,
             label: `▌STEP ${ev.stepId || '?'}\n${ev.required || 0} ${ev.timing}`,
             fill: 'rgba(168, 85, 247, 0.22)',
             border: 'rgba(168, 85, 247, 0.7)',
             text: '#c4b5fd',
+            id: ev.id,
+            kind: 'tutorial',
           })
         } else if (ev.kind === 'music') {
           const durTicks = Math.max(MIN_TICK_DUR, Math.round(tickFromSec(ev.durationSeconds)))
@@ -4218,6 +4288,8 @@ export default function BeatmapEditor() {
             fill: 'rgba(249, 115, 22, 0.20)',
             border: 'rgba(249, 115, 22, 0.7)',
             text: '#fdba74',
+            id: ev.id,
+            kind: 'tutorial',
           })
         }
       }
@@ -4233,6 +4305,8 @@ export default function BeatmapEditor() {
         fill: 'rgba(16, 185, 129, 0.22)',
         border: 'rgba(16, 185, 129, 0.7)',
         text: '#6ee7b7',
+        id: ev.id,
+        kind: 'scene',
       })
     }
 
@@ -4259,6 +4333,9 @@ export default function BeatmapEditor() {
       })
     }
 
+    // Reset hit-test regions; drawPills repopulates them as it goes.
+    pillRegionsRef.current = []
+
     const drawPills = (pills: Array<Pill & { lane: 0 | 1 }>, baseLaneIndex: number) => {
       ctx.font = '10px sans-serif'
       ctx.textAlign = 'left'
@@ -4272,8 +4349,10 @@ export default function BeatmapEditor() {
         const w = SIDECAR_W - 4
         ctx.fillStyle = p.fill
         ctx.fillRect(x, yTop, w, h)
-        ctx.strokeStyle = p.border
-        ctx.lineWidth = 1
+        const isSelected = (p.kind === 'tutorial' && p.id === selectedTutorialId)
+          || (p.kind === 'scene' && p.id === sceneSelectedId)
+        ctx.strokeStyle = isSelected ? '#ffffff' : p.border
+        ctx.lineWidth = isSelected ? 2 : 1
         ctx.strokeRect(x + 0.5, yTop + 0.5, w - 1, h - 1)
         ctx.fillStyle = p.text
         // Label fits inside the pill, top-anchored. Truncate per line.
@@ -4283,6 +4362,7 @@ export default function BeatmapEditor() {
           if (ly > yBottom - 2) break
           ctx.fillText(lines[i].slice(0, Math.max(2, Math.floor(w / 5))), x + 3, ly)
         }
+        pillRegionsRef.current.push({ x, y: yTop, w, h, id: p.id, kind: p.kind })
       }
     }
 
@@ -4375,23 +4455,27 @@ export default function BeatmapEditor() {
     }
 
     // Index modifiers by tick so each rendered note can pick up its HOPO/tap
-    // companion (lane 5 / 6) without an O(n²) inner loop. Open notes (lane 7)
-    // are stored separately because they render as a runway-wide bar, not a
-    // single gem.
+    // companion (lane 5 / 6) without an O(n²) inner loop. Real-note status
+    // is now intrinsic (n.type === 'real') so it goes into the same map for
+    // a single-pass lookup. Open notes (lane 7) render as a runway-wide bar.
     const modByTick = new Map<number, { hopo: boolean; tap: boolean; real: boolean }>()
     const openIdsByTick = new Map<number, number[]>()
     for (let i = 0; i < chart.notes.length; i++) {
       const n = chart.notes[i]
-      if (n.lane === 5 || n.lane === 6 || n.lane === 8) {
+      if (n.lane === 5 || n.lane === 6) {
         const cur = modByTick.get(n.tick) || { hopo: false, tap: false, real: false }
         if (n.lane === 5) cur.hopo = true
-        else if (n.lane === 6) cur.tap = true
-        else cur.real = true
+        else cur.tap = true
         modByTick.set(n.tick, cur)
       } else if (n.lane === 7) {
         const arr = openIdsByTick.get(n.tick) || []
         arr.push(i)
         openIdsByTick.set(n.tick, arr)
+      }
+      if (n.type === 'real') {
+        const cur = modByTick.get(n.tick) || { hopo: false, tap: false, real: false }
+        cur.real = true
+        modByTick.set(n.tick, cur)
       }
     }
 
@@ -4525,10 +4609,10 @@ export default function BeatmapEditor() {
         const laneName = sel.lane === 7 ? 'OPEN'
           : sel.lane === 5 ? 'HOPO mod'
           : sel.lane === 6 ? 'Tap mod'
-          : sel.lane === 8 ? 'Real-note mod'
           : laneLabels[sel.lane] ?? '?'
+        const realTag = sel.type === 'real' ? ' · real-note' : ''
         ctx.fillText(
-          `selected: ${laneName} · tick ${sel.tick} · sustain ${sel.sustain}`,
+          `selected: ${laneName} · tick ${sel.tick} · sustain ${sel.sustain}${realTag}`,
           12,
           42,
         )
@@ -4543,7 +4627,7 @@ export default function BeatmapEditor() {
       ctx.fillStyle = '#67e8f9'
       ctx.fillText('Real note · click drops a gem with the real-note flag (cyan dot)', 12, 62)
     }
-  }, [chart, currentTime, scrollSpeed, selectedIds, snapDivisor, isDrums, laneLabels, tool, waveformOnHighway, view3d.enabled, view3d.meshName])
+  }, [chart, currentTime, scrollSpeed, selectedIds, snapDivisor, isDrums, laneLabels, tool, waveformOnHighway, view3d.enabled, view3d.meshName, selectedTutorialId, sceneSelectedId])
 
   // Resize canvas backing store on container size change
   useEffect(() => {
@@ -4647,6 +4731,26 @@ export default function BeatmapEditor() {
       }
     }
 
+    // Click on a sidecar pill (VO / STEP / MUSIC / scene): select the
+    // corresponding event so its editor opens in the side panel.
+    {
+      const regions = pillRegionsRef.current
+      // Search top-down so the most-recently-drawn pill wins on overlap.
+      for (let i = regions.length - 1; i >= 0; i--) {
+        const r = regions[i]
+        if (cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h) {
+          if (r.kind === 'tutorial') {
+            setSelectedTutorialId(r.id)
+            setSceneSelectedId(null)
+          } else {
+            setSceneSelectedId(r.id)
+            setSelectedTutorialId(null)
+          }
+          return
+        }
+      }
+    }
+
     const id = findNoteAt(cx, cy)
 
     // Click on existing note: select / shift-toggle, then start a group drag.
@@ -4684,8 +4788,8 @@ export default function BeatmapEditor() {
     // inferred from the x-position (gem area is split into five equal
     // lanes) and tick from the y-position snapped to the current grid.
     // Shift+click drops an Open note (lane 7) instead — full-width strum.
-    // The Real-note tool additionally writes a lane-8 modifier at the same
-    // tick so the game plays the matching pitched sample on hit.
+    // The Real-note tool emits R-typed notes carrying the sidebar-picked
+    // (pack, scale) so the game fires the matching pitched sample on hit.
     // Clicks outside the gem area (sidecar) are ignored.
     if (tool === 'note' || tool === 'real') {
       const canvas = canvasRef.current!
@@ -4701,15 +4805,10 @@ export default function BeatmapEditor() {
       const targetTickRaw = secToTick(tempoSegments, chart.resolution, Math.max(0, targetSec))
       const snapTicks = Math.max(1, Math.round(chart.resolution / snapDivisor))
       const newTick = Math.round(targetTickRaw / snapTicks) * snapTicks
-      const newNote: ChartNote = { tick: newTick, lane, sustain: 0 }
+      const newNote: ChartNote = tool === 'real' && pickedPackId && pickedScaleId
+        ? { tick: newTick, lane, sustain: 0, type: 'real', pack: pickedPackId, scale: pickedScaleId }
+        : { tick: newTick, lane, sustain: 0 }
       const placed = [...chart.notes, newNote]
-      // Real-note tool: also write a lane-8 modifier at the same tick if
-      // there isn't one already (re-clicking the same tick shouldn't
-      // duplicate the marker). The sustain field encodes which pack slot
-      // this real-note plays — driven by the sidebar's active slot.
-      if (tool === 'real' && !placed.some((n) => n.tick === newTick && n.lane === 8)) {
-        placed.push({ tick: newTick, lane: 8, sustain: Math.max(0, activeRealSlot) })
-      }
       const next = placed.sort((a, b) => a.tick - b.tick || a.lane - b.lane)
       const newIdx = next.findIndex((n) => n === newNote)
       commitNotes(next)
@@ -5029,29 +5128,24 @@ export default function BeatmapEditor() {
         return
       }
 
-      // F / T / R toggle HOPO / Tap / Real-note modifier on each unique tick
-      // covered by the selection. A modifier (lane 5 / 6 / 8) lives at the
-      // same tick as the affected gem note(s) — toggle = remove if present,
-      // add otherwise.
+      // F / T toggle HOPO / Tap modifier on each unique tick covered by the
+      // selection. The modifier (lane 5 / 6) lives at the same tick as the
+      // affected gem note(s) — toggle = remove if present, add otherwise.
       //   F → lane 5 (force-HOPO)
       //   T → lane 6 (tap)
-      //   R → lane 8 (real-note — game plays a pitched sample on hit)
+      // R toggles real-note status on every selected fret/open note in place
+      // (flips n.type between 'real' and undefined). Newly-flagged notes
+      // pick up the sidebar's current (pack, scale) selection.
       if (
         !isCtrl &&
-        (e.key === 'f' || e.key === 'F' || e.key === 't' || e.key === 'T' || e.key === 'r' || e.key === 'R')
+        (e.key === 'f' || e.key === 'F' || e.key === 't' || e.key === 'T')
       ) {
         e.preventDefault()
-        const modLane = (e.key === 'f' || e.key === 'F') ? 5
-          : (e.key === 't' || e.key === 'T') ? 6
-          : 8
+        const modLane = (e.key === 'f' || e.key === 'F') ? 5 : 6
         const ticks = new Set<number>()
         selectedIds.forEach((idx) => {
           const n = chart.notes[idx]
-          // Fret notes (0-4) and open notes (7) can carry real-note flags;
-          // HOPO/Tap only apply to fret notes.
-          if (!n) return
-          if (modLane === 8 && (n.lane <= 4 || n.lane === 7)) ticks.add(n.tick)
-          else if (modLane !== 8 && n.lane <= 4) ticks.add(n.tick)
+          if (n && n.lane <= 4) ticks.add(n.tick)
         })
         if (ticks.size === 0) return
         const next = chart.notes.slice()
@@ -5062,6 +5156,34 @@ export default function BeatmapEditor() {
         })
         next.sort((a, b) => a.tick - b.tick || a.lane - b.lane)
         commitNotes(next)
+        return
+      }
+      if (!isCtrl && (e.key === 'r' || e.key === 'R')) {
+        e.preventDefault()
+        // Decide direction (toggle on/off) from whether ANY selected playable
+        // note currently lacks the real flag — if so, turn them all on; else
+        // strip them all. Mirrors how F/T toggles feel.
+        let anyMissing = false
+        selectedIds.forEach((idx) => {
+          const n = chart.notes[idx]
+          if (n && (n.lane <= 4 || n.lane === 7) && n.type !== 'real') anyMissing = true
+        })
+        const next = chart.notes.slice()
+        let changed = false
+        selectedIds.forEach((idx) => {
+          const n = next[idx]
+          if (!n || (n.lane > 4 && n.lane !== 7)) return
+          if (anyMissing) {
+            if (!pickedPackId || !pickedScaleId) return
+            next[idx] = { ...n, type: 'real', pack: pickedPackId, scale: pickedScaleId }
+          } else {
+            const { type, pack, scale, ...rest } = n
+            void type; void pack; void scale
+            next[idx] = rest
+          }
+          changed = true
+        })
+        if (changed) commitNotes(next)
         return
       }
 
@@ -5264,8 +5386,9 @@ export default function BeatmapEditor() {
 
   // Tutorial events render as a single editor panel — pick one from the
   // dropdown to edit it. Null means "nothing selected"; we auto-pick the
-  // first event after add/delete so the panel doesn't go blank.
-  const [selectedTutorialId, setSelectedTutorialId] = useState<string | null>(null)
+  // first event after add/delete so the panel doesn't go blank. Declared
+  // up-top via lift so the canvas draw closure (above) can read them for
+  // pill highlighting + click-to-select.
 
   // ── VO library — one modal with three paths:
   //   (a) Paste an ElevenLabs Studio URL; backend pulls the chapter's latest
@@ -5555,7 +5678,6 @@ export default function BeatmapEditor() {
     updateTutorial(next)
   }
 
-  const [sceneSelectedId, setSceneSelectedId] = useState<string | null>(null)
   const [scenePickerOpen, setScenePickerOpen] = useState(false)
   // User-registered scene event types fetched from the backend. Merged with
   // SCENE_EVENT_CATALOG via `mergedSceneCatalog` so picker / parser /
@@ -5755,30 +5877,36 @@ export default function BeatmapEditor() {
     for (const ev of chart.tutorial) {
       if (ev.kind !== 'vo' || !ev.file) continue
       const voSec = tickToSec(tempoSegments, chart.resolution, ev.tick)
-      if (currentTime >= voSec && !firedVosRef.current.has(ev.id)) {
-        const a = voAudiosRef.current.get(ev.id)
-        if (a) {
-          // Collated-file VOs: seek into the slice the chart says this VO
-          // occupies. If the playhead is already past voSec by some delta,
-          // start that much further into the slice so a scrub-resume picks
-          // up where it would have been.
-          const startSec = (ev.startMs ?? 0) / 1000
-          a.currentTime = startSec + Math.max(0, currentTime - voSec)
-          a.play().catch(() => { /* autoplay blocked; user must interact again */ })
-          firedVosRef.current.add(ev.id)
-          // Auto-stop at the end of the slice so we don't bleed into the
-          // next VO that lives further down the same collated file.
-          if (ev.durationMs && ev.durationMs > 0) {
-            const endSec = startSec + ev.durationMs / 1000
-            const onTick = () => {
-              if (a.currentTime >= endSec - 0.01) {
-                a.pause()
-                a.removeEventListener('timeupdate', onTick)
-              }
+      if (currentTime < voSec) continue
+      const a = voAudiosRef.current.get(ev.id)
+      if (!a) continue
+      const startSec = (ev.startMs ?? 0) / 1000
+      const endSec = ev.durationMs && ev.durationMs > 0
+        ? startSec + ev.durationMs / 1000
+        : Infinity
+      if (!firedVosRef.current.has(ev.id)) {
+        // Collated-file VOs: seek into the slice the chart says this VO
+        // occupies. If the playhead is already past voSec by some delta,
+        // start that much further into the slice so a scrub-resume picks
+        // up where it would have been.
+        a.currentTime = startSec + Math.max(0, currentTime - voSec)
+        a.play().catch(() => { /* autoplay blocked; user must interact again */ })
+        firedVosRef.current.add(ev.id)
+        // Auto-stop at the end of the slice so we don't bleed into the
+        // next VO that lives further down the same collated file.
+        if (Number.isFinite(endSec)) {
+          const onTick = () => {
+            if (a.currentTime >= endSec - 0.01) {
+              a.pause()
+              a.removeEventListener('timeupdate', onTick)
             }
-            a.addEventListener('timeupdate', onTick)
           }
+          a.addEventListener('timeupdate', onTick)
         }
+      } else if (a.paused && a.currentTime >= startSec && a.currentTime < endSec - 0.05) {
+        // Already fired but the user paused mid-clip — resume from where the
+        // audio element was paused (don't re-seek; that would stutter).
+        a.play().catch(() => undefined)
       }
     }
   }, [currentTime, playing, chart])
@@ -5791,7 +5919,98 @@ export default function BeatmapEditor() {
     for (const a of voAudiosRef.current.values()) {
       if (!a.paused) a.pause()
     }
+    // Attempt counters are NOT cleared on pause — doing so re-arms the
+    // first-attempt failure for every section ahead of the playhead, which
+    // causes a fresh retry loop after every pause/play. To re-test the
+    // retry path, toggle the "Fail first attempt" checkbox off+on (clears
+    // attempts below) or reload the editor.
+    lastStepIdxRef.current = -1
   }, [playing])
+
+  // Clear attempt counters whenever the simulation tickbox toggles — turning
+  // it OFF wipes stale state, and turning it back ON gives every section a
+  // fresh first attempt to fail.
+  useEffect(() => {
+    sectionAttemptsRef.current = new Map()
+  }, [simulateRetryOnce])
+
+  // STEP boundary pass/fail emulation — only meaningful in autohit + when
+  // the chart carries STEPs with required>0 and a retry_vo path. Each frame
+  // we track which step the playhead is inside; when it crosses forward by
+  // exactly one step, we evaluate the section that just ended. If credited
+  // hits fall short of required, fire retry VO and seek back to the section
+  // start. Autohit normally hits every note, so the only way we fall short
+  // is if the simulation tickbox is on AND this is the section's first
+  // attempt; then we deduct one credit.
+  useEffect(() => {
+    if (!chart || !chart.tutorialEnabled || !playing || playMode !== 'autohit') return
+    const steps = chart.tutorial
+      .filter((e): e is TutorialStepEvent => e.kind === 'step')
+      .sort((a, b) => a.tick - b.tick)
+    if (steps.length < 2) return
+    const curTick = secToTick(tempoSegments, chart.resolution, currentTime)
+    let idx = -1
+    for (let i = 0; i < steps.length; i++) {
+      if (steps[i].tick <= curTick) idx = i
+      else break
+    }
+    const prevIdx = lastStepIdxRef.current
+    if (idx === prevIdx + 1 && prevIdx >= 0) {
+      const ending = steps[prevIdx]
+      const next = steps[idx]
+      if (ending.required > 0 && ending.retryVo) {
+        // Count unique note ticks (chord = one note) in [ending.tick, next.tick).
+        const noteTicks = new Set<number>()
+        for (const n of chart.notes) {
+          if (n.type !== 'real') continue
+          if (n.lane > 4 && n.lane !== 7) continue
+          if (n.tick >= ending.tick && n.tick < next.tick) noteTicks.add(n.tick)
+        }
+        const noteCount = noteTicks.size
+        const attempts = sectionAttemptsRef.current.get(ending.id) || 0
+        const credited = (simulateRetryOnce && attempts === 0)
+          ? Math.max(0, noteCount - 1)
+          : noteCount
+        sectionAttemptsRef.current.set(ending.id, attempts + 1)
+        if (credited < ending.required) {
+          // FAIL — play retry clip and seek back to the section start.
+          // retry_vo typically points at the collated vo/tutorial.ogg with
+          // retry_start_ms / retry_duration_ms slice offsets so variants
+          // can live alongside section VOs in the same file. Falls back to
+          // whole-file playback when slice offsets aren't set.
+          const url = `/api/tutorial/${trackId}/beatmaps/${beatmapId}/${ending.retryVo}`
+          const a = new Audio(url)
+          const startSec = (ending.retryStartMs ?? 0) / 1000
+          const endSec = ending.retryDurationMs && ending.retryDurationMs > 0
+            ? startSec + ending.retryDurationMs / 1000
+            : Infinity
+          const startPlayback = () => {
+            if (startSec > 0) a.currentTime = startSec
+            a.play().catch(() => undefined)
+            if (Number.isFinite(endSec)) {
+              const onTick = () => {
+                if (a.currentTime >= endSec - 0.01) {
+                  a.pause()
+                  a.removeEventListener('timeupdate', onTick)
+                }
+              }
+              a.addEventListener('timeupdate', onTick)
+            }
+          }
+          // Need readyState >= HAVE_METADATA before seeking; if it isn't
+          // there yet (cold network fetch), wait for loadedmetadata once.
+          if (a.readyState >= 1) startPlayback()
+          else a.addEventListener('loadedmetadata', startPlayback, { once: true })
+          const seekSec = tickToSec(tempoSegments, chart.resolution, ending.tick)
+          if (audioRef.current) audioRef.current.currentTime = seekSec
+          setCurrentTime(seekSec)
+          lastStepIdxRef.current = prevIdx  // we're back inside the failed step
+          return
+        }
+      }
+    }
+    lastStepIdxRef.current = idx
+  }, [currentTime, playing, playMode, chart, tempoSegments, simulateRetryOnce, trackId, beatmapId])
   useEffect(() => {
     const audios = voAudiosRef.current
     return () => { for (const a of audios.values()) a.pause() }
@@ -6198,6 +6417,28 @@ export default function BeatmapEditor() {
                 </button>
               ))}
             </div>
+            {/* Retry-cue test: in autohit, drop one credited hit per section
+                on its first attempt so the engine fires the retry VO and
+                seeks back. Lets the user audition retry_vo without dropping
+                to live mode and missing notes manually. */}
+            <label className="mt-1 flex items-center gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={simulateRetryOnce}
+                onChange={(e) => setSimulateRetryOnce(e.target.checked)}
+                disabled={playMode !== 'autohit'}
+                className="h-3.5 w-3.5 rounded border-gray-600 bg-gray-900 accent-cyan-500 cursor-pointer disabled:cursor-not-allowed"
+              />
+              <span className={`text-[11px] ${playMode === 'autohit' ? 'text-gray-300' : 'text-gray-600'}`}>
+                Fail first attempt
+              </span>
+              <span
+                className="text-[10px] text-gray-500 ml-auto"
+                title="Autohit otherwise hits every note. This makes each section short by 1 on its first pass so retry_vo plays and the playhead seeks back. Second pass counts normally."
+              >
+                {playMode === 'autohit' ? (simulateRetryOnce ? 'on' : 'off') : 'autohit only'}
+              </span>
+            </label>
             <div className="mt-1 flex items-center gap-2">
               <span className="text-[11px] text-gray-500 shrink-0">Real vol</span>
               <input
@@ -6383,68 +6624,63 @@ export default function BeatmapEditor() {
               )
             })()}
             {chart && selectedIds.size >= 1 && (() => {
-              // Per-note pack dropdown. Visible when at least one selected
-              // note carries a lane-8 modifier (real-note). The dropdown
-              // changes the modifier's sustain field — that's where the
-              // pack-slot index lives in the chart format.
-              const ids = Array.from(selectedIds)
-              const selectedTicks = new Set<number>()
-              for (const idx of ids) {
+              // Per-note pack/scale dropdowns. Visible when the selection
+              // includes at least one real-note (R). Each dropdown rewrites
+              // the chosen field on every selected R note in place — chord
+              // members at the same tick should share (pack, scale), so the
+              // tick-grouped real-notes get the same value too.
+              const realIds = Array.from(selectedIds).filter((idx) => {
                 const n = chart.notes[idx]
-                if (!n) continue
-                if (n.lane <= 4 || n.lane === 7 || n.lane === 8) selectedTicks.add(n.tick)
-              }
-              const realTicks: number[] = []
-              for (const t of selectedTicks) {
-                if (chart.notes.some((n) => n.tick === t && n.lane === 8)) realTicks.push(t)
-              }
-              if (realTicks.length === 0) return null
-              // Representative slot = the first selected real-note's slot.
-              const firstSlot = (() => {
-                const t = realTicks[0]
-                const mod = chart.notes.find((n) => n.tick === t && n.lane === 8)
-                return mod ? Math.max(0, Math.round(mod.sustain)) : 0
-              })()
-              const setPackSlot = (slot: number) => {
+                return !!n && n.type === 'real'
+              })
+              if (realIds.length === 0) return null
+              const realTicks = new Set<number>()
+              for (const idx of realIds) realTicks.add(chart.notes[idx].tick)
+              // Representative pack/scale = the first selected real-note's.
+              const first = chart.notes[realIds[0]]
+              const firstPack = first.pack || ''
+              const firstScale = first.scale || ''
+              const setField = (field: 'pack' | 'scale', value: string) => {
                 const next = chart.notes.slice()
                 let changed = false
                 for (let i = 0; i < next.length; i++) {
                   const n = next[i]
-                  if (n.lane === 8 && realTicks.includes(n.tick) && n.sustain !== slot) {
-                    next[i] = { ...n, sustain: slot }
-                    changed = true
-                  }
+                  if (n.type !== 'real' || !realTicks.has(n.tick)) continue
+                  if ((field === 'pack' ? n.pack : n.scale) === value) continue
+                  next[i] = field === 'pack' ? { ...n, pack: value } : { ...n, scale: value }
+                  changed = true
                 }
                 if (changed) commitNotes(next)
               }
               return (
-                <div className="mt-2 pt-2 border-t border-gray-800">
-                  <div className="flex items-center justify-between mb-1">
+                <div className="mt-2 pt-2 border-t border-gray-800 space-y-2">
+                  <div className="flex items-center justify-between">
                     <span className="text-[11px] text-cyan-300 font-medium">
-                      Real-note pack {realTicks.length > 1 ? `(${realTicks.length})` : ''}
+                      Real-note pack {realTicks.size > 1 ? `(${realTicks.size} ticks)` : ''}
                     </span>
-                    <span className="text-[10px] text-gray-600 font-mono">slot {firstSlot}</span>
                   </div>
                   <select
-                    value={firstSlot}
-                    onChange={(e) => setPackSlot(Number(e.target.value))}
+                    value={firstPack}
+                    onChange={(e) => setField('pack', e.target.value)}
                     className="w-full bg-gray-800 border border-gray-700 rounded px-1.5 py-1 text-[11px] text-gray-200 focus:outline-none focus:border-cyan-500"
                   >
-                    {appliedPacks.map((p, i) => {
-                      if (!p) return null
-                      const packName = packCatalog.find((c) => c.pack_id === p.pack_id)?.name || p.pack_id
-                      return (
-                        <option key={i} value={i}>slot {i} — {packName}</option>
-                      )
-                    })}
-                    {/* Always allow slot 0 as a fallback even when no pack is
-                        applied yet — keeps existing legacy notes valid. */}
-                    {appliedPacks.every((p) => !p) && (
-                      <option value={0}>slot 0 — (no pack applied)</option>
-                    )}
+                    {!firstPack && <option value="">— pick a pack —</option>}
+                    {packCatalog.map((p) => (
+                      <option key={p.pack_id} value={p.pack_id}>{p.name} — {p.family}</option>
+                    ))}
                   </select>
-                  <p className="text-[10px] text-gray-600 mt-1 leading-snug">
-                    Stored as the sustain field of the lane-8 marker. Slot 0 is the default; notes pointing at a deleted slot fall back to slot 0 on playback.
+                  <select
+                    value={firstScale}
+                    onChange={(e) => setField('scale', e.target.value)}
+                    className="w-full bg-gray-800 border border-gray-700 rounded px-1.5 py-1 text-[11px] text-gray-200 focus:outline-none focus:border-cyan-500"
+                  >
+                    {!firstScale && <option value="">— pick a scale —</option>}
+                    {scaleCatalog.map((s) => (
+                      <option key={s.scale_id} value={s.scale_id}>{s.name}</option>
+                    ))}
+                  </select>
+                  <p className="text-[10px] text-gray-600 leading-snug">
+                    Stored on each R note. The published chart coalesces runs of same-(pack,scale) notes into one E-event declaration per change.
                   </p>
                 </div>
               )
@@ -7625,27 +7861,31 @@ export default function BeatmapEditor() {
           </CollapsibleSection>
 
           {chart && (() => {
-            // Active applied packs (skip tombstones in the list).
-            const livePacks = appliedPacks
-              .map((p, i) => ({ p, i }))
-              .filter((x): x is { p: AppliedPack; i: number } => !!x.p)
-            const isEditing = editingSlot !== null
-            const isPickerOpenForNew = !isEditing && livePacks.length === 0
+            // Pack/scale picker — drives the default for newly-dropped real-
+            // notes (Real-note tool, R keyboard shortcut). Per-note overrides
+            // live in the selected-note dropdown above.
+            // Tally how many distinct (pack, scale) combos the chart actually
+            // uses, just so the user can see the scope of what'll ship in the
+            // published realnotes/ folder.
+            const usedCombos = new Set<string>()
+            for (const n of chart.notes) {
+              if (n.type === 'real' && n.pack && n.scale) usedCombos.add(`${n.pack}/${n.scale}`)
+            }
             return (
               <CollapsibleSection
                 id="sound-packs"
-                title="Sound packs"
-                right={livePacks.length > 0 ? (
+                title="Sound pack"
+                right={usedCombos.size > 0 ? (
                   <span className="text-[10px] text-cyan-300 font-mono">
-                    {livePacks.length} pack{livePacks.length === 1 ? '' : 's'}
+                    {usedCombos.size} combo{usedCombos.size === 1 ? '' : 's'} in chart
                   </span>
                 ) : undefined}
               >
                 <p className="text-[10px] text-gray-600 mb-2 leading-snug">
-                  Add as many packs as you want; each Real-note can point at any one of them. Per-note pack assignment lives below in the selected-note editor.
+                  New real-notes (Real-note tool, R key) inherit this pack/scale. Change per-note via the selected-note dropdown above.
                 </p>
                 {/* Guitar preview — strum the connected gamepad while the song
-                    is paused to audition the active pack's samples. Held frets
+                    is paused to audition the picker's pack/scale. Held frets
                     resolve to single-lane / chord / open samples the same way
                     the chart does on real-notes. */}
                 <label className="flex items-center gap-2 mb-2 cursor-pointer select-none">
@@ -7659,130 +7899,49 @@ export default function BeatmapEditor() {
                   <span className={`text-[11px] ${realNotesReady && gamepadId ? 'text-gray-300' : 'text-gray-600'}`}>
                     Preview with guitar
                   </span>
-                  <span className="text-[10px] text-gray-500 ml-auto" title="Strum the connected gamepad while the song is paused to audition the active pack's patches. Held frets pick the slot.">
-                    {!gamepadId ? 'no device' : !realNotesReady ? 'no pack' : guitarPreview ? 'on' : 'off'}
+                  <span className="text-[10px] text-gray-500 ml-auto" title="Strum the connected gamepad while the song is paused to audition the picker's pack. Held frets pick the slot.">
+                    {!gamepadId ? 'no device' : !realNotesReady ? 'no notes' : guitarPreview ? 'on' : 'off'}
                   </span>
                 </label>
 
-                {/* Applied pack list */}
-                {livePacks.length > 0 && (
-                  <ul className="space-y-1 mb-2">
-                    {livePacks.map(({ p, i }) => {
-                      const packName = packCatalog.find((c) => c.pack_id === p.pack_id)?.name || p.pack_id
-                      const scaleName = scaleCatalog.find((c) => c.scale_id === p.scale_id)?.name || p.scale_id
-                      const isActive = i === activeRealSlot
-                      return (
-                        <li
-                          key={i}
-                          className={`flex items-center gap-1 px-2 py-1 rounded border ${
-                            isActive ? 'border-cyan-600 bg-cyan-900/15' : 'border-gray-800 bg-gray-900/40'
-                          }`}
-                        >
-                          <button
-                            onClick={() => setActiveRealSlot(i)}
-                            className={`shrink-0 w-5 h-5 rounded text-[10px] font-mono ${
-                              isActive ? 'bg-cyan-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
-                            }`}
-                            title={`Slot ${i} — Real-note tool drops will tag notes with this slot when active`}
-                          >
-                            {i}
-                          </button>
-                          <div className="flex-1 min-w-0">
-                            <div className="text-[11px] text-gray-200 truncate" title={packName}>{packName}</div>
-                            <div className="text-[10px] text-gray-500 truncate" title={scaleName}>{scaleName}</div>
-                          </div>
-                          <button
-                            onClick={() => startEditSlot(i)}
-                            disabled={packBusy}
-                            className="text-[10px] px-1.5 py-0.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-30 text-gray-300 rounded"
-                            title="Replace this slot's pack/scale"
-                          >
-                            edit
-                          </button>
-                          <button
-                            onClick={() => deletePackSlot(i)}
-                            disabled={packBusy}
-                            className="text-[10px] px-1.5 py-0.5 bg-red-900/30 hover:bg-red-800/60 disabled:opacity-30 border border-red-800/40 text-red-300 rounded"
-                            title="Remove this slot. Notes referencing it fall back to slot 0."
-                          >
-                            ×
-                          </button>
-                        </li>
-                      )
-                    })}
-                  </ul>
-                )}
-
-                {/* Add / Edit form */}
-                {(isEditing || isPickerOpenForNew) ? (
-                  <div className="space-y-2 p-2 bg-gray-900/50 rounded border border-gray-800">
-                    <div className="text-[10px] text-cyan-300 uppercase tracking-wider">
-                      {isEditing ? `Editing slot ${editingSlot}` : 'Add a sound pack'}
-                    </div>
-                    <div>
-                      <label className="block text-[10px] text-gray-500 mb-1 uppercase tracking-wider">Pack</label>
-                      <select
-                        value={pickedPackId}
-                        onChange={(e) => setPickedPackId(e.target.value)}
-                        disabled={packBusy || packCatalog.length === 0}
-                        className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-200 focus:outline-none focus:border-cyan-500 disabled:opacity-50"
-                      >
-                        {packCatalog.map((p) => (
-                          <option key={p.pack_id} value={p.pack_id}>{p.name} — {p.family}</option>
-                        ))}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-[10px] text-gray-500 mb-1 uppercase tracking-wider">Chord progression (scale)</label>
-                      <select
-                        value={pickedScaleId}
-                        onChange={(e) => setPickedScaleId(e.target.value)}
-                        disabled={packBusy || scaleCatalog.length === 0}
-                        className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-200 focus:outline-none focus:border-cyan-500 disabled:opacity-50"
-                      >
-                        {scaleCatalog.map((s) => (
-                          <option key={s.scale_id} value={s.scale_id}>{s.name}</option>
-                        ))}
-                      </select>
-                    </div>
-                    {packError && <p className="text-[11px] text-red-400 break-words">{packError}</p>}
-                    <div className="flex gap-1">
-                      <button
-                        onClick={playPackPreview}
-                        disabled={!pickedPackId || !pickedScaleId}
-                        className="shrink-0 px-2 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-gray-200 rounded text-[11px]"
-                        title="Audition the scale root (lane_1)"
-                      >
-                        {packPreviewing ? '❚❚' : '▶'}
-                      </button>
-                      <button
-                        onClick={applySoundPack}
-                        disabled={packBusy || !pickedPackId || !pickedScaleId}
-                        className="flex-1 px-2 py-1 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 text-white rounded text-[11px] font-medium"
-                      >
-                        {packBusy ? 'Rendering…' : (isEditing ? 'Replace pack' : 'Add pack')}
-                      </button>
-                      {isEditing && (
-                        <button
-                          onClick={cancelEditSlot}
-                          disabled={packBusy}
-                          className="shrink-0 px-2 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-gray-300 rounded text-[11px]"
-                        >
-                          cancel
-                        </button>
-                      )}
-                    </div>
+                <div className="space-y-2 p-2 bg-gray-900/50 rounded border border-gray-800">
+                  <div>
+                    <label className="block text-[10px] text-gray-500 mb-1 uppercase tracking-wider">Pack</label>
+                    <select
+                      value={pickedPackId}
+                      onChange={(e) => setPickedPackId(e.target.value)}
+                      disabled={packCatalog.length === 0}
+                      className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-200 focus:outline-none focus:border-cyan-500 disabled:opacity-50"
+                    >
+                      {packCatalog.map((p) => (
+                        <option key={p.pack_id} value={p.pack_id}>{p.name} — {p.family}</option>
+                      ))}
+                    </select>
                   </div>
-                ) : (
-                  <button
-                    onClick={() => { setEditingSlot(null); setPackError('') }}
-                    disabled={packBusy}
-                    className="w-full px-2 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-gray-300 rounded text-[11px] font-medium"
-                    title="Add another sound pack to this beatmap"
-                  >
-                    + Add sound pack
-                  </button>
-                )}
+                  <div>
+                    <label className="block text-[10px] text-gray-500 mb-1 uppercase tracking-wider">Chord progression (scale)</label>
+                    <select
+                      value={pickedScaleId}
+                      onChange={(e) => setPickedScaleId(e.target.value)}
+                      disabled={scaleCatalog.length === 0}
+                      className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-200 focus:outline-none focus:border-cyan-500 disabled:opacity-50"
+                    >
+                      {scaleCatalog.map((s) => (
+                        <option key={s.scale_id} value={s.scale_id}>{s.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="flex gap-1">
+                    <button
+                      onClick={playPackPreview}
+                      disabled={!pickedPackId || !pickedScaleId}
+                      className="shrink-0 px-2 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-gray-200 rounded text-[11px]"
+                      title="Audition the scale root (lane_1)"
+                    >
+                      {packPreviewing ? '❚❚' : '▶'} Audition
+                    </button>
+                  </div>
+                </div>
               </CollapsibleSection>
             )
           })()}

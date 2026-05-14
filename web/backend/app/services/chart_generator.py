@@ -62,6 +62,9 @@ STEM_TO_SECTION_SUFFIX: dict[str, str] = {
     'bass': 'DoubleBass',
     'rhythm': 'DoubleBass',
     'piano': 'Keyboard',
+    # Unsplit single-stem tracks (e.g. the Realnote Test bench) treat the
+    # whole mix as the lead instrument and publish into [ExpertSingle].
+    'song': 'Single',
 }
 
 

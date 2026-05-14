@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import shutil
 import tempfile
 import uuid
@@ -19,6 +20,7 @@ from ..services.game_songs import _parse_song_ini
 from ..services.github_publisher import publish_song_folder
 from ..services.jobs import JobKind, JobStatus, create_job, get_job
 from ..services import lyrics as lyrics_service
+from ..services import sample_packs
 from ..services.stems import DEMUCS_TO_GAME, _convert_to_ogg, write_song_ini
 from ..services.tracks import (
     add_beatmap_record,
@@ -1010,9 +1012,9 @@ async def publish_track_to_game(
                 'included': True,
             }
 
-        # ── Tutorial mode: copy instrument samples, VO clips, and append a
-        # [TutorialScript] section to notes_fixed_slides.chart if the picked
-        # beatmaps carry tutorial events. The Unity dev parses these.
+        # ── Tutorial mode: bundle VO clips and splice [TutorialScript] into
+        # notes_fixed_slides.chart if the picked beatmaps carry tutorial
+        # events. Real-notes are handled separately by _bundle_realnotes below.
         tutorial_status = _bundle_tutorial_assets(
             track,
             charts_to_merge if track.beatmaps else [],
@@ -1021,7 +1023,11 @@ async def publish_track_to_game(
             ini_fields,
         )
 
-        # Write song.ini (after tutorial fields may have been spliced in)
+        # Real-notes: copy the (pack, scale) bundles referenced by R notes in
+        # the merged chart into realnotes/<pack>/<scale>/ and stamp song.ini.
+        realnotes_status = _bundle_realnotes(chart_path, tmp_dir, ini_fields)
+
+        # Write song.ini (after tutorial / realnotes fields may have been added)
         write_song_ini(tmp_dir, ini_fields)
 
         # Publish to GitHub
@@ -1031,6 +1037,7 @@ async def publish_track_to_game(
             'folder': f'{settings.github_inbox_prefix}/{folder_name}',
             'chart': chart_status,
             'tutorial': tutorial_status,
+            'realnotes': realnotes_status,
             'lyrics': lyrics_summary,
             'vocals': vocals_summary,
         }
@@ -1073,17 +1080,16 @@ def _bundle_tutorial_assets(
     tmp_dir,
     ini_fields: dict,
 ) -> dict:
-    """If any selected beatmap declares tutorial content, copy the track's
-    tutorial samples + the beatmap's VO clips into the publish folder, append
-    a [TutorialScript] section to notes_fixed_slides.chart, and stamp tutorial
-    metadata into ini_fields so song.ini carries the sample paths.
+    """If any selected beatmap declares a [TutorialScript], bundle its VO
+    clips, splice the script into notes_fixed_slides.chart, and mark song.ini
+    as an onboarding tutorial.
 
-    Returns a status dict the publish endpoint includes in its response.
+    Real-notes sample packs are handled separately in
+    ``_bundle_realnotes`` — keep them out of this function so non-tutorial
+    songs that use real-notes don't get flagged as tutorials.
     """
-    import subprocess
     from pathlib import Path as _Path
 
-    # Aggregate any [TutorialScript] sections from the selected charts.
     tutorial_blocks: list[tuple[str, str]] = []  # (stem, body)
     for chart_path, stem in charts_to_merge:
         try:
@@ -1094,60 +1100,11 @@ def _bundle_tutorial_assets(
         if body:
             tutorial_blocks.append((stem, body))
 
-    if not tutorial_blocks and not (track.dir / 'tutorial_samples').exists():
+    if not tutorial_blocks:
         return {'enabled': False}
 
-    # Mark song.ini as an onboarding tutorial and stamp the sample paths
     ini_fields['onboarding'] = 'True'
-    samples_src = track.dir / 'tutorial_samples'
-    samples_dst = tmp_dir / 'tutorial_samples'
-    bundled_samples: list[str] = []
-    if samples_src.exists():
-        samples_dst.mkdir(parents=True, exist_ok=True)
-        for slot in _TUTORIAL_SAMPLE_SLOTS:
-            for ext in ('.ogg', '.wav', '.mp3', '.flac'):
-                p = samples_src / f'{slot}{ext}'
-                if p.exists():
-                    dst = samples_dst / f'{slot}.ogg'
-                    if ext == '.ogg':
-                        shutil.copy2(p, dst)
-                    else:
-                        # Re-encode anything non-ogg into ogg
-                        subprocess.run(
-                            ['ffmpeg', '-y', '-i', str(p), '-vn', '-c:a', 'libvorbis', '-q:a', '6', str(dst)],
-                            capture_output=True,
-                        )
-                    if dst.exists():
-                        bundled_samples.append(slot)
-                        ini_fields[f'sample_{slot}'] = f'tutorial_samples/{slot}.ogg'
-                        # Also synthesise a simple slide_up / slide_down pitch
-                        # variant per base sample. Single ffmpeg pass with
-                        # asetrate (cheap pitch shift; a touch unnatural but
-                        # matches what a slide effect needs).
-                        for direction, shift in (
-                            ('slide_up', _SLIDE_SHIFT),
-                            ('slide_down', -_SLIDE_SHIFT),
-                        ):
-                            slide_dst = samples_dst / f'{slot}_{direction}.ogg'
-                            ratio = 2 ** (shift / 12.0)
-                            subprocess.run(
-                                [
-                                    'ffmpeg', '-y', '-i', str(dst),
-                                    '-af',
-                                    # asetrate scales sample rate (changes pitch
-                                    # AND tempo); aresample brings sr back to
-                                    # 44100 leaving only pitch shifted.
-                                    f'asetrate=44100*{ratio:.6f},aresample=44100',
-                                    '-c:a', 'libvorbis', '-q:a', '6',
-                                    str(slide_dst),
-                                ],
-                                capture_output=True,
-                            )
-                            if slide_dst.exists():
-                                ini_fields[f'sample_{slot}_{direction}'] = f'tutorial_samples/{slot}_{direction}.ogg'
-                    break
 
-    # Bundle VO clips from each selected beatmap
     bundled_vo: dict[str, list[str]] = {}
     for stem, bm_id in beatmap_selection.items():
         vo_src = track.beatmaps_dir / bm_id / 'vo'
@@ -1162,9 +1119,8 @@ def _bundle_tutorial_assets(
         if names:
             bundled_vo[stem] = names
 
-    # Append [TutorialScript] block to notes_fixed_slides.chart
     chart_path = tmp_dir / 'notes_fixed_slides.chart'
-    if tutorial_blocks and chart_path.exists():
+    if chart_path.exists():
         merged_lines: list[str] = []
         for stem, body in tutorial_blocks:
             merged_lines.append(f'  ; from {stem}')
@@ -1184,9 +1140,79 @@ def _bundle_tutorial_assets(
 
     return {
         'enabled': True,
-        'samples': bundled_samples,
         'vo': bundled_vo,
         'script_blocks': len(tutorial_blocks),
+    }
+
+
+_REALNOTES_PACK_RE = re.compile(r'^\s*\d+\s*=\s*E\s+realnotes_pack\s+(\S+)', re.MULTILINE)
+_REALNOTES_SCALE_RE = re.compile(r'^\s*\d+\s*=\s*E\s+realnotes_scale\s+(\S+)', re.MULTILINE)
+_R_NOTE_RE = re.compile(r'^\s*\d+\s*=\s*R\s+\d+\s+\d+', re.MULTILINE)
+
+
+def _bundle_realnotes(chart_path: Path, tmp_dir: Path, ini_fields: dict) -> dict:
+    """Copy the (pack, scale) bundles referenced by the merged chart into
+    ``<song_folder>/realnotes/<pack>/<scale>/``.
+
+    Walks the published chart looking for R notes paired with their nearest
+    preceding ``E realnotes_pack`` / ``E realnotes_scale`` declarations,
+    collects the unique combos, and copies each one's pre-rendered bundle
+    from ``web/backend/sample_packs_data/<pack>/<scale>/``. Anything not
+    pre-rendered is reported in the ``missing`` list and skipped — production
+    builds ship every catalog combo, so this should only happen if a chart
+    references a pack/scale that's been removed.
+
+    Sets ``ini_fields['realnotes'] = 'True'`` iff at least one bundle was
+    copied — that flag is the Unity-side cheap "do I need the realnotes
+    subsystem?" check.
+    """
+    if not chart_path.exists():
+        return {'enabled': False, 'bundled': [], 'missing': []}
+    text = chart_path.read_text(encoding='utf-8', errors='replace')
+    used: set[tuple[str, str]] = set()
+    # Walk per section so an `E realnotes_pack` in [ExpertBass] doesn't bleed
+    # into [ExpertSingle]. State resets at each `[Section] { ... }` block.
+    section_re = re.compile(r'\[(?P<name>[^\]]+)\]\s*\{(?P<body>[^}]*)\}', re.DOTALL)
+    for match in section_re.finditer(text):
+        body = match.group('body')
+        # Walk lines in tick + source order, tracking active (pack, scale).
+        active_pack: str | None = None
+        active_scale: str | None = None
+        for raw in body.splitlines():
+            t = raw.strip()
+            if not t:
+                continue
+            m = _REALNOTES_PACK_RE.match(raw)
+            if m:
+                active_pack = m.group(1)
+                continue
+            m = _REALNOTES_SCALE_RE.match(raw)
+            if m:
+                active_scale = m.group(1)
+                continue
+            if _R_NOTE_RE.match(raw) and active_pack and active_scale:
+                used.add((active_pack, active_scale))
+
+    bundled: list[dict] = []
+    missing: list[dict] = []
+    for pack_id, scale_id in sorted(used):
+        src = sample_packs.prerendered_path(pack_id, scale_id)
+        if src is None:
+            missing.append({'pack': pack_id, 'scale': scale_id})
+            continue
+        dst = tmp_dir / 'realnotes' / pack_id / scale_id
+        dst.mkdir(parents=True, exist_ok=True)
+        for slot_name in sample_packs.SLOT_ORDER:
+            shutil.copy2(src / f'{slot_name}.ogg', dst / f'{slot_name}.ogg')
+        bundled.append({'pack': pack_id, 'scale': scale_id})
+
+    if bundled:
+        ini_fields['realnotes'] = 'True'
+
+    return {
+        'enabled': bool(bundled),
+        'bundled': bundled,
+        'missing': missing,
     }
 
 
