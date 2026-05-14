@@ -1,11 +1,20 @@
 """Publish a song folder to GitHub via the Git Data API (atomic commit)."""
 
+import asyncio
 import base64
 from pathlib import Path
 
 import httpx
 
 from ..config import settings
+
+
+# Cap on simultaneous /git/blobs POSTs. GitHub's authenticated rate limit is
+# 5000/hour and the abuse-detection limit kicks in around 10 concurrent
+# requests against the same endpoint; 8 leaves headroom while still cutting
+# wall time on multi-file pushes (e.g. the realnotes/ subtree with 32 packs
+# × 10 oggs) by ~8x.
+_BLOB_CONCURRENCY = 8
 
 API = 'https://api.github.com'
 
@@ -45,39 +54,44 @@ async def publish_song_folder(folder_path: Path, folder_name: str) -> str:
         commit_resp.raise_for_status()
         base_tree_sha = commit_resp.json()['tree']['sha']
 
-        # 2. Create blobs for each file. rglob walks subdirectories so
-        # tutorial bundles (vo/*.ogg, tutorial_samples/*.ogg) ride along
-        # with the top-level chart + song.ini + song.ogg. Files whose name
-        # starts with `_` are treated as scratch artefacts and skipped at
-        # any depth.
-        tree_entries = []
-        for file_path in sorted(folder_path.rglob('*')):
-            if not file_path.is_file():
+        # 2. Create blobs for each file in parallel. rglob walks subdirectories
+        # so tutorial bundles (vo/*.ogg) and realnotes packs ride along with
+        # the top-level chart + song.ini + song.ogg. Files whose name starts
+        # with `_` are treated as scratch artefacts and skipped at any depth.
+        files: list[Path] = []
+        for fp in sorted(folder_path.rglob('*')):
+            if not fp.is_file():
                 continue
-            rel = file_path.relative_to(folder_path)
+            rel = fp.relative_to(folder_path)
             if any(part.startswith('_') for part in rel.parts):
                 continue
-            content_bytes = file_path.read_bytes()
-            blob_resp = await client.post(
-                _api('/git/blobs'),
-                headers=_headers(),
-                json={
-                    'content': base64.b64encode(content_bytes).decode(),
-                    'encoding': 'base64',
-                },
-            )
-            blob_resp.raise_for_status()
-            blob_sha = blob_resp.json()['sha']
+            files.append(fp)
 
-            # Preserve the subdir structure under SongInbox/<folder>/. POSIX
+        sem = asyncio.Semaphore(_BLOB_CONCURRENCY)
+
+        async def upload_blob(fp: Path) -> dict:
+            rel = fp.relative_to(folder_path)
+            content_bytes = fp.read_bytes()
+            async with sem:
+                blob_resp = await client.post(
+                    _api('/git/blobs'),
+                    headers=_headers(),
+                    json={
+                        'content': base64.b64encode(content_bytes).decode(),
+                        'encoding': 'base64',
+                    },
+                )
+            blob_resp.raise_for_status()
+            # Preserve subdir structure under SongInbox/<folder>/. POSIX
             # path is mandatory — Git's API rejects backslashes on Windows.
-            rel_path = f'{settings.github_inbox_prefix}/{folder_name}/{rel.as_posix()}'
-            tree_entries.append({
-                'path': rel_path,
+            return {
+                'path': f'{settings.github_inbox_prefix}/{folder_name}/{rel.as_posix()}',
                 'mode': '100644',
                 'type': 'blob',
-                'sha': blob_sha,
-            })
+                'sha': blob_resp.json()['sha'],
+            }
+
+        tree_entries = await asyncio.gather(*[upload_blob(fp) for fp in files])
 
         # 3. Create tree
         tree_resp = await client.post(
