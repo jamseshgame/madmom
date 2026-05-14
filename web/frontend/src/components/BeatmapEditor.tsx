@@ -2566,6 +2566,7 @@ export default function BeatmapEditor() {
   // which ones have already been triggered in the current play pass — reset
   // on any meaningful seek so a VO can replay if you scrub back over it.
   const voAudiosRef = useRef<Map<string, HTMLAudioElement>>(new Map())
+  const sliceAudioRef = useRef<HTMLAudioElement | null>(null)
   const firedVosRef = useRef<Set<string>>(new Set())
   const lastSampleTimeRef = useRef(0)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -2894,8 +2895,41 @@ export default function BeatmapEditor() {
     setSelectedTutorialId(ev.id)
   }
 
-  // Task 9 will replace this stub with a real implementation.
-  const auditionClip = (_id: string) => undefined
+  const auditionClip = (id: string) => {
+    if (!chart) return
+    const clip = chart.clips.find((c) => c.id === id)
+    if (!clip) return
+    if (sliceAudioRef.current) { sliceAudioRef.current.pause(); sliceAudioRef.current = null }
+    let url: string
+    let start = 0
+    let end: number = Infinity
+    if (clip.sourceId) {
+      const src = chart.importedSources.find((s) => s.id === clip.sourceId)
+      if (!src) return
+      url = `/api/tracks/${src.trackId}/beatmaps/${src.beatmapId}/download/song.ogg`
+      start = clip.startSec
+      end = clip.endSec
+    } else {
+      url = `/api/tutorial/${trackId}/beatmaps/${beatmapId}/segments/${clip.sectionName.replace('MusicSeg_', '')}.ogg`
+    }
+    const a = new Audio(url)
+    sliceAudioRef.current = a
+    const startPlayback = () => {
+      if (start > 0) a.currentTime = start
+      a.play().catch(() => undefined)
+      if (Number.isFinite(end)) {
+        const onTick = () => {
+          if (a.currentTime >= end - 0.01) {
+            a.pause()
+            a.removeEventListener('timeupdate', onTick)
+          }
+        }
+        a.addEventListener('timeupdate', onTick)
+      }
+    }
+    if (a.readyState >= 1) startPlayback()
+    else a.addEventListener('loadedmetadata', startPlayback, { once: true })
+  }
 
   // Resolve the WaveformStrip props from the active source (or own).
   const activePeaks = activeSourceId
