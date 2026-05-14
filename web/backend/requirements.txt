@@ -5,9 +5,16 @@ pydantic-settings>=2.1
 httpx>=0.27
 packaging>=23.0
 Pillow>=10.0
-numpy
+# numpy/torch/torchaudio pinned in lockstep — torch wheels bind to a specific
+# numpy ABI, and bumping any of them in isolation breaks demucs at runtime.
+# Bump together after verifying the trio still resolves on PyPI for both
+# Linux (droplet) and Windows (dev). Cython .so files compiled against an
+# older numpy ABI must be rebuilt after a numpy major bump — deploy reruns
+# `setup.py build_ext --inplace`.
+numpy==2.4.4
 demucs>=4.0
-torch>=2.0
+torch==2.12.0
+torchaudio==2.11.0
 # torchaudio >= 2.5 dispatches save()/load() through torchcodec instead of the
 # built-in soundfile/sox backends. demucs 4.x still calls torchaudio.save(),
 # so torchcodec must be present or every separation crashes at the final
