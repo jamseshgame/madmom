@@ -24,60 +24,55 @@ Create `web/backend/tests/test_song_peaks.py`:
 """Tests for the audio-peaks helper used by the WaveformStrip endpoint."""
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import numpy as np
 import pytest
+import scipy.io.wavfile as wav
 
 from app.services.audio import compute_audio_peaks
 
 
-def _silent_ogg(path: Path, seconds: float = 1.0) -> None:
-    subprocess.run(
-        ['ffmpeg', '-y', '-loglevel', 'error',
-         '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=mono',
-         '-t', f'{seconds}', '-c:a', 'libvorbis', '-q:a', '3', str(path)],
-        check=True, capture_output=True,
-    )
+def _write_wav(path: Path, samples: np.ndarray, sample_rate: int = 44100) -> None:
+    """Write a mono int16 wav. Samples are float32 in [-1, 1]; we scale
+    to int16 for a lossless round-trip through madmom's loader."""
+    int16 = np.clip(samples, -1.0, 1.0)
+    int16 = (int16 * 32767.0).astype(np.int16)
+    wav.write(str(path), sample_rate, int16)
 
 
-def _tone_ogg(path: Path, seconds: float = 1.0, freq: int = 1000, volume: float = 0.5) -> None:
-    subprocess.run(
-        ['ffmpeg', '-y', '-loglevel', 'error',
-         '-f', 'lavfi',
-         '-i', f'sine=frequency={freq}:duration={seconds}:sample_rate=44100',
-         '-filter:a', f'volume={volume}',
-         '-c:a', 'libvorbis', '-q:a', '5', str(path)],
-        check=True, capture_output=True,
-    )
-
-
-def test_silent_audio_peaks_are_near_zero(tmp_path):
-    """1 s of silence → ~50 buckets at 20 ms each, all values near zero."""
-    audio = tmp_path / 'silent.ogg'
-    _silent_ogg(audio, seconds=1.0)
+def test_silent_audio_peaks_are_zero(tmp_path):
+    """1 s of literal silence → ~50 buckets at 20 ms each, all zero."""
+    audio = tmp_path / 'silent.wav'
+    _write_wav(audio, np.zeros(44100, dtype=np.float32))
     blob = compute_audio_peaks(audio, bucket_ms=20)
     peaks = np.frombuffer(blob, dtype=np.float32)
     assert 49 <= len(peaks) <= 51
-    assert peaks.max() < 0.01
+    assert peaks.max() == 0.0
 
 
-def test_tone_audio_peaks_track_volume(tmp_path):
-    """A 1 kHz sine at 0.5 amplitude should produce per-bucket peaks
-    averaging in the same ballpark. Vorbis is lossy so peaks scatter;
-    use a wide tolerance."""
-    audio = tmp_path / 'tone.ogg'
-    _tone_ogg(audio, seconds=1.0, volume=0.5)
+def test_peaks_track_amplitude(tmp_path):
+    """A pure 1 kHz sine at peak amplitude 0.5 should produce per-bucket
+    peaks at ~0.5. Lossless wav → peaks land within int16 quantization
+    tolerance of the input level."""
+    sr = 44100
+    t = np.arange(sr) / sr
+    sine = (0.5 * np.sin(2 * np.pi * 1000 * t)).astype(np.float32)
+    audio = tmp_path / 'tone.wav'
+    _write_wav(audio, sine, sample_rate=sr)
     blob = compute_audio_peaks(audio, bucket_ms=20)
     peaks = np.frombuffer(blob, dtype=np.float32)
     assert 49 <= len(peaks) <= 51
-    assert 0.3 <= peaks.mean() <= 0.7
+    # 1 kHz period (1 ms) << 20 ms bucket → every bucket contains many
+    # full cycles, so peak per bucket = sine peak. Tolerance covers
+    # int16 quantization (~3e-5 absolute error).
+    assert 0.495 <= peaks.mean() <= 0.505
+    assert 0.495 <= peaks.min() <= peaks.max() <= 0.505
 
 
 def test_compute_raises_on_missing_file(tmp_path):
-    with pytest.raises(RuntimeError):
-        compute_audio_peaks(tmp_path / 'does-not-exist.ogg', bucket_ms=20)
+    with pytest.raises(Exception):
+        compute_audio_peaks(tmp_path / 'does-not-exist.wav', bucket_ms=20)
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -88,45 +83,48 @@ venv/Scripts/python.exe -m pytest tests/test_song_peaks.py -v
 ```
 Expected: 3 errors / failures (`compute_audio_peaks` import doesn't resolve).
 
-- [ ] **Step 3: Implement the helper**
+- [ ] **Step 3: Implement the helper using madmom**
 
 Append to `web/backend/app/services/audio.py`:
 
 ```python
-import subprocess
 from pathlib import Path
 
 import numpy as np
 
 
 def compute_audio_peaks(audio_path: Path, bucket_ms: int = 20) -> bytes:
-    """Decode `audio_path` to mono 44.1 kHz PCM via ffmpeg, then collapse
-    each `bucket_ms` window into its absolute-peak amplitude in [0, 1].
+    """Load `audio_path` via madmom's Signal and collapse each `bucket_ms`
+    window into its absolute-peak amplitude in [0, 1].
 
     Returns the binary representation of a Float32 array — small enough
     to ship over the wire as application/octet-stream and `Float32Array`
-    -decode directly in the browser.
+    -decode directly in the browser. madmom handles decoding (delegating
+    to ffmpeg internally for non-wav formats) and gives us a numpy array
+    + sample-rate in one call, which keeps this helper tiny.
     """
-    proc = subprocess.run(
-        ['ffmpeg', '-y', '-loglevel', 'error',
-         '-i', str(audio_path),
-         '-f', 's16le', '-ac', '1', '-ar', '44100', '-'],
-        capture_output=True,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f'ffmpeg decode failed: {proc.stderr.decode("utf-8", errors="replace")[-200:]}'
-        )
-    samples = np.frombuffer(proc.stdout, dtype='<i2')
+    from madmom.audio.signal import Signal
+
+    sig = Signal(str(audio_path), num_channels=1)
+    samples = np.asarray(sig)
     if samples.size == 0:
         return b''
-    spb = max(1, int(44100 * bucket_ms / 1000))
+    # madmom returns int16 for integer source formats and float for
+    # everything else. Normalize both to float32 in [-1, 1].
+    if np.issubdtype(samples.dtype, np.integer):
+        info = np.iinfo(samples.dtype)
+        samples = samples.astype(np.float32) / max(abs(info.min), info.max)
+    else:
+        samples = samples.astype(np.float32, copy=False)
+
+    sr = int(sig.sample_rate)
+    spb = max(1, int(sr * bucket_ms / 1000))
     n_buckets = (samples.size + spb - 1) // spb
     pad = n_buckets * spb - samples.size
     if pad > 0:
         samples = np.pad(samples, (0, pad))
     reshaped = samples.reshape(n_buckets, spb)
-    peaks = np.abs(reshaped).max(axis=1).astype(np.float32) / 32768.0
+    peaks = np.abs(reshaped).max(axis=1).astype(np.float32)
     return peaks.tobytes()
 ```
 
@@ -745,27 +743,41 @@ export function WaveformStrip({
 In `web/frontend/src/components/BeatmapEditor.tsx`, near the other useState declarations (search for `const [waveformOnHighway, setWaveformOnHighway]`), add:
 
 ```ts
+// Which stem the WaveformStrip is showing. 'song' = full mix (default,
+// always available). The other option is the active beatmap's own stem
+// (drums / guitar / bass / etc.) — visually shows the onsets that match
+// the chart's notes. Audio playback for placed MUSIC clips always uses
+// the full mix; only the visual changes.
+const [waveformStem, setWaveformStem] = useState<'song' | 'active'>('song')
 const [songPeaks, setSongPeaks] = useState<Float32Array | null>(null)
 const [peaksBucketSec] = useState(0.020) // matches backend default of 20 ms
+
+// Resolve which stem name the endpoint should serve.
+const activeBeatmapStem = chart && (() => {
+  const bm = (track?.beatmaps ?? []).find((b) => b.id === beatmapId)
+  return bm?.stem ?? 'song'
+})()
+const peaksStemParam = waveformStem === 'song' ? 'song' : (activeBeatmapStem || 'song')
 ```
 
 Near the other useEffect blocks that fetch initial state (search for `fetch('/api/sample-packs')` or similar), add:
 
 ```ts
 useEffect(() => {
-  if (!trackId) return
+  if (!trackId || !peaksStemParam) return
   let cancelled = false
-  fetch(`/api/tracks/${trackId}/song-peaks`)
+  setSongPeaks(null)  // clear stale peaks while the new stem fetches
+  fetch(`/api/tracks/${trackId}/song-peaks?stem=${encodeURIComponent(peaksStemParam)}`)
     .then((r) => (r.ok ? r.arrayBuffer() : null))
     .then((buf) => {
       if (!cancelled && buf) setSongPeaks(new Float32Array(buf))
     })
     .catch(() => undefined)
   return () => { cancelled = true }
-}, [trackId])
+}, [trackId, peaksStemParam])
 ```
 
-- [ ] **Step 3: Slot the strip into the editor's top header**
+- [ ] **Step 3: Slot the strip + stem toggle into the editor's top header**
 
 Find the existing `<TutorialTimeline ... />` usage in the JSX (search for `TutorialTimeline`). Immediately below it, add:
 
@@ -790,6 +802,28 @@ Find the existing `<TutorialTimeline ... />` usage in the JSX (search for `Tutor
   }))}
   onSelectClip={setSelectedClipId}
 />
+{/* Tiny toggle below the strip to swap full-mix waveform for the
+    active beatmap's own stem — useful when marking clip boundaries
+    against the actual instrument's onsets. Audio playback is unaffected. */}
+{songPeaks && activeBeatmapStem && activeBeatmapStem !== 'song' && (
+  <div className="px-3 py-1 bg-gray-950 border-b border-gray-800 flex items-center gap-2">
+    <span className="text-[10px] text-gray-500 uppercase tracking-wider">Waveform</span>
+    {(['song', 'active'] as const).map((s) => (
+      <button
+        key={s}
+        onClick={() => setWaveformStem(s)}
+        className={`text-[10px] px-2 py-0.5 rounded ${
+          waveformStem === s
+            ? 'bg-cyan-700/70 text-white'
+            : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+        }`}
+        title={s === 'song' ? 'Show the full mix (song.ogg)' : `Show the beatmap's stem (${activeBeatmapStem})`}
+      >
+        {s === 'song' ? 'full mix' : activeBeatmapStem}
+      </button>
+    ))}
+  </div>
+)}
 ```
 
 You'll need to:
