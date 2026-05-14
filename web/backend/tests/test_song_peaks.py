@@ -6,7 +6,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 import scipy.io.wavfile as wav
+from fastapi.testclient import TestClient
 
+from app.main import app
+from app.services import tracks as tracks_service
 from app.services.audio import compute_audio_peaks
 
 
@@ -50,3 +53,88 @@ def test_peaks_track_amplitude(tmp_path):
 def test_compute_raises_on_missing_file(tmp_path):
     with pytest.raises(Exception):
         compute_audio_peaks(tmp_path / 'does-not-exist.wav', bucket_ms=20)
+
+
+@pytest.fixture
+def authed_client():
+    c = TestClient(app)
+    r = c.post('/api/auth/login', data={'username': 'admin', 'password': 'SlayTheStage'})
+    assert r.status_code == 200
+    return c
+
+
+def test_beatmap_song_peaks_endpoint_returns_binary(tmp_path, monkeypatch, authed_client):
+    """Per-beatmap endpoint serves the registered beatmap's song.ogg peaks."""
+    monkeypatch.setattr(tracks_service, 'TRACKS_DIR', tmp_path / '_tracks')
+    audio = tmp_path / 'src.wav'
+    _write_wav(audio, np.zeros(44100, dtype=np.float32))
+    track = tracks_service.create_track(
+        name='per-bm-peaks', stems={'song': 'song.ogg'},
+        source_stems_dir=tmp_path, model='manual', output_format='ogg',
+    )
+    bm_id = 'beatmap_x'
+    bm_src = tmp_path / 'bm_src'
+    bm_src.mkdir()
+    (bm_src / 'song.ogg').write_bytes(audio.read_bytes())
+    tracks_service.add_beatmap_record(
+        track_id=track.id, beatmap_id=bm_id, stem='song',
+        folder_name='X', song_name='X', source_dir=bm_src,
+    )
+
+    r = authed_client.get(f'/api/tracks/{track.id}/beatmaps/{bm_id}/song-peaks')
+    assert r.status_code == 200
+    assert r.headers['content-type'] == 'application/octet-stream'
+    peaks = np.frombuffer(r.content, dtype=np.float32)
+    assert 49 <= len(peaks) <= 51
+    cache = (track.beatmaps_dir / bm_id) / 'song.peaks.f32'
+    assert cache.exists()
+    assert cache.read_bytes() == r.content
+
+
+def test_beatmap_song_peaks_404_for_missing_audio(tmp_path, monkeypatch, authed_client):
+    monkeypatch.setattr(tracks_service, 'TRACKS_DIR', tmp_path / '_tracks')
+    track = tracks_service.create_track(
+        name='no-audio', stems={'song': 'song.ogg'},
+        source_stems_dir=tmp_path, model='manual', output_format='ogg',
+    )
+    r = authed_client.get(f'/api/tracks/{track.id}/beatmaps/missing/song-peaks')
+    assert r.status_code == 404
+
+
+def test_beatmap_song_peaks_recomputes_when_audio_newer(tmp_path, monkeypatch, authed_client):
+    """Cache is invalidated when song.ogg mtime is newer than the .peaks.f32 cache."""
+    import os
+    monkeypatch.setattr(tracks_service, 'TRACKS_DIR', tmp_path / '_tracks')
+    audio = tmp_path / 'src.wav'
+    _write_wav(audio, np.zeros(44100, dtype=np.float32))
+    track = tracks_service.create_track(
+        name='cache-bm', stems={'song': 'song.ogg'},
+        source_stems_dir=tmp_path, model='manual', output_format='ogg',
+    )
+    bm_id = 'bm1'
+    bm_src = tmp_path / 'bm_src'
+    bm_src.mkdir()
+    (bm_src / 'song.ogg').write_bytes(audio.read_bytes())
+    tracks_service.add_beatmap_record(
+        track_id=track.id, beatmap_id=bm_id, stem='song',
+        folder_name='X', song_name='X', source_dir=bm_src,
+    )
+
+    # Prime the cache with a known-bad-content sentinel by overwriting
+    # after first request.
+    r1 = authed_client.get(f'/api/tracks/{track.id}/beatmaps/{bm_id}/song-peaks')
+    assert r1.status_code == 200
+    cache_path = track.beatmaps_dir / bm_id / 'song.peaks.f32'
+    audio_path = track.beatmaps_dir / bm_id / 'song.ogg'
+
+    # Stamp audio newer than cache, then write garbage to cache so we can
+    # detect whether the endpoint served the cache (would return garbage)
+    # or recomputed (would return real peaks).
+    cache_path.write_bytes(b'\x00' * 16)
+    new_mtime = cache_path.stat().st_mtime + 5
+    os.utime(audio_path, (new_mtime, new_mtime))
+
+    r2 = authed_client.get(f'/api/tracks/{track.id}/beatmaps/{bm_id}/song-peaks')
+    assert r2.status_code == 200
+    # Recomputed → not the 16-byte garbage we wrote
+    assert len(r2.content) > 16

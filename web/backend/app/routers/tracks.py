@@ -11,10 +11,10 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from ..config import settings
-from ..services.audio import resize_to_square_png
+from ..services.audio import compute_audio_peaks, resize_to_square_png
 from ..services.chart_generator import generate_full_chart
 from ..services.game_songs import _parse_song_ini
 from ..services.github_publisher import publish_song_folder
@@ -497,6 +497,30 @@ async def download_beatmap_file(track_id: str, beatmap_id: str, filename: str):
     if not fp.exists() or not fp.is_file():
         raise HTTPException(404, 'File not found')
     return FileResponse(str(fp), filename=filename)
+
+
+@router.get('/{track_id}/beatmaps/{beatmap_id}/song-peaks')
+async def get_beatmap_song_peaks(track_id: str, beatmap_id: str, bucket_ms: int = 20):
+    """Per-bucket peak amplitudes for a beatmap's song.ogg, as a Float32
+    binary blob. The editor's WaveformStrip reads this directly into a
+    Float32Array. Cached on disk per beatmap; re-extracted when the
+    source audio is newer than the cache.
+    """
+    bm_dir = get_beatmap_dir(track_id, beatmap_id)
+    if bm_dir is None:
+        raise HTTPException(404, 'Beatmap not found')
+    audio_path = bm_dir / 'song.ogg'
+    if not audio_path.exists():
+        raise HTTPException(404, 'song.ogg missing for this beatmap')
+    cache_path = bm_dir / 'song.peaks.f32'
+    if cache_path.exists() and cache_path.stat().st_mtime >= audio_path.stat().st_mtime:
+        return Response(content=cache_path.read_bytes(), media_type='application/octet-stream')
+    try:
+        blob = compute_audio_peaks(audio_path, bucket_ms=bucket_ms)
+    except RuntimeError as e:
+        raise HTTPException(500, f'Peak extraction failed: {e}')
+    cache_path.write_bytes(blob)
+    return Response(content=blob, media_type='application/octet-stream')
 
 
 @router.get('/{track_id}/beatmaps/{beatmap_id}/chart')
