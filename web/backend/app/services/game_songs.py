@@ -98,7 +98,16 @@ def clone_game_song_to_studio_track(folder: str) -> tuple[str, str]:
 
     existing = _find_track_by_source_game_song(folder)
     if existing and existing.beatmaps:
-        return existing.id, existing.beatmaps[0]['id']
+        # Re-pull may have brought down subdirectories (vo/, realnotes/) that
+        # weren't present last time. Refresh the symlinks so the editor can
+        # see them without forcing the user to delete the shim first.
+        bm_id = existing.beatmaps[0]['id']
+        bm_dir = existing.beatmaps_dir / bm_id
+        for subdir in ('vo', 'realnotes'):
+            sub = src / subdir
+            if sub.is_dir() and not (bm_dir / subdir).exists():
+                _link_or_copy_dir(sub, bm_dir / subdir)
+        return existing.id, bm_id
 
     ini_path = src / 'song.ini'
     ini = _parse_song_ini(ini_path.read_text(encoding='utf-8', errors='replace')) if ini_path.exists() else {}
@@ -227,7 +236,13 @@ async def list_game_songs() -> list[dict]:
 
 
 async def pull_game_song(folder: str) -> Path:
-    """Download every file in SongInbox/{folder}/ into {UPLOAD_DIR}/_game-songs/{folder}/."""
+    """Recursively download SongInbox/{folder}/ into _game-songs/{folder}/.
+
+    Uses the tree API with `recursive=1` so subdirectories like `vo/`,
+    `vo/clips/`, and `realnotes/<pack>/<scale>/` all come down — the older
+    `/contents/<path>` walk only covered the top level and silently dropped
+    any nested asset.
+    """
     _ensure_token()
     inbox = settings.github_inbox_prefix
     dest = _local_path(folder)
@@ -235,21 +250,41 @@ async def pull_game_song(folder: str) -> Path:
         shutil.rmtree(dest)
     dest.mkdir(parents=True)
 
+    prefix = f'{inbox}/{folder}/'
     async with httpx.AsyncClient(timeout=60) as client:
-        contents = await client.get(
-            _api(f'/contents/{inbox}/{folder}'),
+        tree_resp = await client.get(
+            _api(f'/git/trees/{settings.github_branch}'),
             headers=_headers(),
-            params={'ref': settings.github_branch},
+            params={'recursive': '1'},
         )
-        contents.raise_for_status()
-        items = contents.json()
+        tree_resp.raise_for_status()
+        tree = tree_resp.json()
+        if tree.get('truncated'):
+            # GitHub truncates trees above ~100k entries / 7 MB. Songs with
+            # large realnotes/ subtrees can push the repo over the limit;
+            # we'd need a per-subdir fallback to handle that. Flag it
+            # loudly so the operator notices.
+            raise RuntimeError(
+                f'GitHub tree response was truncated; cannot reliably pull {folder}'
+            )
+        # Filter to blobs under our folder, preserving the relative path.
+        targets: list[tuple[str, str]] = []
+        for entry in tree.get('tree', []):
+            if entry.get('type') != 'blob':
+                continue
+            path = entry.get('path', '')
+            if not path.startswith(prefix):
+                continue
+            rel = path[len(prefix):]
+            if not rel:
+                continue
+            targets.append((rel, entry.get('sha', '')))
 
-        async def _download(item):
-            if item.get('type') != 'file':
-                return
-            sha = item.get('sha')
-            name = item.get('name')
-            r = await client.get(_api(f'/git/blobs/{sha}'), headers=_headers())
+        sem = asyncio.Semaphore(8)
+
+        async def _download(rel: str, sha: str):
+            async with sem:
+                r = await client.get(_api(f'/git/blobs/{sha}'), headers=_headers())
             r.raise_for_status()
             blob = r.json()
             data = (
@@ -257,9 +292,11 @@ async def pull_game_song(folder: str) -> Path:
                 if blob.get('encoding') == 'base64'
                 else blob.get('content', '').encode('utf-8')
             )
-            (dest / name).write_bytes(data)
+            out_path = dest / rel
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_bytes(data)
 
-        await asyncio.gather(*[_download(item) for item in items])
+        await asyncio.gather(*[_download(rel, sha) for rel, sha in targets])
 
     return dest
 

@@ -390,8 +390,17 @@ async def synth_collated_vo(
 
     print(f'  - collated {len(clip_paths)} clips → tutorial.ogg ({out_path.stat().st_size} bytes, {cursor_ms/1000:.1f}s)')
 
-    for clip in clip_paths:
-        clip.unlink(missing_ok=True)
+    # Preserve the individual clips under vo/clips/<slug>.ogg so the
+    # editor can re-edit per-VO after a round-trip through the game repo.
+    # Unity clients consume tutorial.ogg + chart slice offsets and ignore
+    # this directory entirely (see REALNOTES_SPEC.md).
+    clips_dir = vo_dir / 'clips'
+    clips_dir.mkdir(exist_ok=True)
+    for (slug, _text), clip in zip(all_pairs, clip_paths):
+        dest = clips_dir / f'{slug}.ogg'
+        if dest.exists():
+            dest.unlink()
+        clip.rename(dest)
     silence.unlink(missing_ok=True)
     concat_list.unlink(missing_ok=True)
 

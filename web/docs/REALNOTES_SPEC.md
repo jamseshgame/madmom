@@ -37,7 +37,18 @@ realnotes/                        ; instrument-sample bundles (NEW)
     ...
 vo/                               ; tutorial / retry narration (only if tutorial too)
   tutorial.ogg                    ; collated VO bundle; STEP retry_vo points here
+  clips/                          ; editor-only — individual per-slug clips
+    tut_intro.ogg
+    sec_0.ogg sec_1.ogg ...
+    retry.ogg
 ```
+
+The `vo/clips/` subdirectory exists only so Studio can round-trip a
+published song back into the editor and re-author individual VO clips
+without losing the source audio. **The Unity client should ignore
+`vo/clips/` entirely** — it duplicates content that's already inside
+`tutorial.ogg` at the slice offsets the chart references. Treat it like
+a `.psd` next to a flattened `.png`.
 
 `realnotes/<pack>/<scale>/` holds 10 pre-rendered OGGs per combo. The
 chart references combos by pack-id + scale-id strings; you load and cache
