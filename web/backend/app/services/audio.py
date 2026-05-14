@@ -145,3 +145,39 @@ def resize_to_square_png(image_bytes: bytes, size: int = 512) -> bytes:
     out = io.BytesIO()
     canvas.save(out, format='PNG', optimize=True)
     return out.getvalue()
+
+
+def compute_audio_peaks(audio_path: 'Path | str', bucket_ms: int = 20) -> bytes:
+    """Load `audio_path` via madmom's Signal and collapse each `bucket_ms`
+    window into its absolute-peak amplitude in [0, 1].
+
+    Returns the binary representation of a Float32 array — small enough
+    to ship over the wire as application/octet-stream and `Float32Array`
+    -decode directly in the browser. madmom handles decoding (delegating
+    to ffmpeg internally for non-wav formats) and gives us a numpy array
+    + sample-rate in one call, which keeps this helper tiny.
+    """
+    import numpy as np
+    from madmom.audio.signal import Signal
+
+    sig = Signal(str(audio_path), num_channels=1)
+    samples = np.asarray(sig)
+    if samples.size == 0:
+        return b''
+    # madmom returns int16 for integer source formats and float for
+    # everything else. Normalize both to float32 in [-1, 1].
+    if np.issubdtype(samples.dtype, np.integer):
+        info = np.iinfo(samples.dtype)
+        samples = samples.astype(np.float32) / max(abs(info.min), info.max)
+    else:
+        samples = samples.astype(np.float32, copy=False)
+
+    sr = int(sig.sample_rate)
+    spb = max(1, int(sr * bucket_ms / 1000))
+    n_buckets = (samples.size + spb - 1) // spb
+    pad = n_buckets * spb - samples.size
+    if pad > 0:
+        samples = np.pad(samples, (0, pad))
+    reshaped = samples.reshape(n_buckets, spb)
+    peaks = np.abs(reshaped).max(axis=1).astype(np.float32)
+    return peaks.tobytes()
