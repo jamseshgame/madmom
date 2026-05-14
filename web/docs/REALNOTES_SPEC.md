@@ -337,3 +337,47 @@ Implementation acceptance:
       pass/fail logic on top (§6).
 - [ ] Use the Realnote Test v1 song as a regression bench whenever the
       sample-playback path changes.
+
+---
+
+## 9. Imported sources + slice-mode MUSIC events
+
+A tutorial chart can import other beatmaps as **sources** to splice
+sections from. The published folder layout grows:
+
+```
+song.ini
+song.ogg                            ; tutorial's own backing
+notes_fixed_slides.chart            ; the tutorial chart
+sources/                            ; one folder per imported source
+  src_a/
+    song.ogg                        ; copy of src_a's song.ogg
+  src_b/
+    song.ogg
+realnotes/                          ; (existing — pack/scale bundles)
+vo/                                 ; (existing — collated VO)
+```
+
+The chart's `MUSIC` events in `[TutorialScript]` reference splices via
+the new shape:
+
+```
+<tick> = MUSIC source="src_a" stem="song"
+         start_ms=18300 duration_ms=24000
+         section="MusicSeg_<id>"
+         bpm=... resolution=... duration=... notes=...
+         required=... timing=...
+```
+
+When `source="..."` is present, the engine plays
+`sources/<source>/<stem>.ogg` from `start_ms` for `duration_ms`. The
+referenced `[MusicSeg_<id>]` section holds the trimmed slice notes
+(ticks renormalised to start at 0).
+
+The legacy `MUSIC "<file>"` shape (standalone segment ogg) keeps
+working for upload-based events. Distinguish by which fields are
+present.
+
+The `[ImportedSources]` section the tutorial editor writes to track
+studio-side ids is **stripped at publish time** — the runtime only
+needs the `source=` local ids that resolve to `sources/<id>/`.
