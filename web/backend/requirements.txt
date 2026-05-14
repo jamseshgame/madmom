@@ -24,10 +24,10 @@ torchcodec
 # the system ffmpeg for the mp3 extraction post-processor, which we already
 # install at the OS level.
 yt-dlp>=2024.3
-# Chatterbox TTS (Resemble AI, MIT) — voice-cloning text-to-speech for tutorial
-# VO generation. Lazy-loaded on first /api/tts/synth call. ~3 GB model
-# download + ~3 GB RSS while loaded.
-chatterbox-tts
+# Chatterbox TTS lives in requirements-extras.txt — it pins torch==2.6.0 and
+# numpy<2.0.0 in its metadata, which would block the resolver from
+# installing the trio above. We install it separately with --no-deps so the
+# pins are ignored; runtime works fine on torch 2.12 / numpy 2.
 # Whisper transcription (CTranslate2-backed, CPU-friendly, MIT). Lazy-loaded
 # on first /api/lyrics/whisper call. Default model "medium" is ~1.5 GB and
 # downloads on first use.

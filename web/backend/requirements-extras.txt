@@ -1,0 +1,12 @@
+# Packages whose declared metadata constraints we need to bypass via
+# `pip install --no-deps -r requirements-extras.txt`. Install these AFTER
+# the main requirements.txt so the actual torch/numpy already on disk
+# remain untouched.
+#
+# Why each entry needs the bypass:
+#
+# - chatterbox-tts 0.1.7: declares torch==2.6.0 and numpy<2.0.0, which
+#   conflicts with the lockstep trio in requirements.txt (torch 2.12 +
+#   numpy 2). Runtime works fine on the newer trio — Resemble's pin is
+#   defensive. Lazy-loaded on first /api/tts/synth call.
+chatterbox-tts==0.1.7

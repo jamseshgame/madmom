@@ -36,6 +36,9 @@ source "$BACKEND_DIR/venv/bin/activate"
 pip install --upgrade pip
 pip install -e "$REPO_DIR"  # install madmom in dev mode
 pip install -r "$BACKEND_DIR/requirements.txt"
+# Extras carry packages with conflicting metadata pins; --no-deps installs
+# them as-is. See requirements-extras.txt for the rationale.
+pip install --no-deps -r "$BACKEND_DIR/requirements-extras.txt"
 
 # Build Cython extensions
 cd "$REPO_DIR"

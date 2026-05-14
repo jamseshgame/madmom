@@ -152,6 +152,10 @@ def install_backend() -> None:
     _run([str(VENV_PY), '-m', 'pip', 'install', 'cython>=0.25'])
     _run([str(VENV_PY), '-m', 'pip', 'install', '-e', str(REPO)])
     _run([str(VENV_PY), '-m', 'pip', 'install', '-r', str(BACKEND / 'requirements.txt')])
+    # requirements-extras.txt is for packages whose metadata pins block the
+    # main resolver. --no-deps installs them as-is; their actual deps are
+    # already satisfied by the main requirements above.
+    _run([str(VENV_PY), '-m', 'pip', 'install', '--no-deps', '-r', str(BACKEND / 'requirements-extras.txt')])
 
 
 def build_cython() -> None:
