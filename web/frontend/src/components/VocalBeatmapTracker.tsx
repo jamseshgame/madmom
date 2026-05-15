@@ -4,10 +4,12 @@ export default function VocalBeatmapTracker({
   beatmapJobId,
   onCancelled,
   onDone,
+  onError,
 }: {
   beatmapJobId: string
   onCancelled?: () => void
   onDone?: () => void
+  onError?: () => void
 }) {
   const [progress, setProgress] = useState(0)
   const [message, setMessage] = useState('Starting...')
@@ -27,6 +29,7 @@ export default function VocalBeatmapTracker({
       } else if (data.step === 'error') {
         es.close()
         setError(data.message || 'Failed')
+        onError?.()
       } else if (data.step === 'cancelled') {
         es.close()
         onCancelled?.()
@@ -38,10 +41,11 @@ export default function VocalBeatmapTracker({
       // EventSource in CONNECTING — let the browser auto-reconnect.
       if (es.readyState === EventSource.CLOSED) {
         setError('Connection lost')
+        onError?.()
       }
     }
     return () => es.close()
-  }, [beatmapJobId, onCancelled, onDone])
+  }, [beatmapJobId, onCancelled, onDone, onError])
 
   if (done) return <div className="text-xs text-emerald-400 mt-1">Done — {Math.max(progress, 100)}%</div>
   if (error) return <div className="text-xs text-red-400 mt-1">{error}</div>

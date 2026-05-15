@@ -199,9 +199,17 @@ def add_beatmap_record(
     folder_name: str,
     song_name: str,
     source_dir: Path,
+    *,
+    model: str | None = None,
+    model_version: str | None = None,
 ) -> Track | None:
     """Copy a freshly generated beatmap folder into the track's beatmaps_dir
-    and append a record to the track. Returns the updated track."""
+    and append a record to the track. Returns the updated track.
+
+    `model` / `model_version` capture provenance the same way lyrics_versions
+    and vocal_notes_versions do, so the picker UI can badge each row with
+    `MADMOM 0.17.dev0` / `MANUAL` / `IMPORTED` and flag stale versions when
+    the installed package moves on."""
     track = Track.load(track_id)
     if not track:
         return None
@@ -218,6 +226,8 @@ def add_beatmap_record(
         'folder_name': folder_name,
         'song_name': song_name,
         'active': True,
+        'model': model,
+        'model_version': model_version,
     }
     # Replace any prior record with the same id (shouldn't happen, but keeps it tidy)
     track.beatmaps = [b for b in track.beatmaps if b.get('id') != beatmap_id]
@@ -284,6 +294,8 @@ def clone_beatmap_record(track_id: str, beatmap_id: str) -> dict | None:
         'folder_name': src_record.get('folder_name', ''),
         'song_name': new_song_name,
         'active': True,
+        'model': src_record.get('model'),
+        'model_version': src_record.get('model_version'),
     }
     for b in track.beatmaps:
         if b.get('stem') == record['stem']:

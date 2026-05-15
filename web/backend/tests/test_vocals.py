@@ -156,7 +156,8 @@ def test_build_vocal_notes_orchestrates_syllabify_and_pitch_alignment(monkeypatc
     fake_audio = tmp_path / "vocals.wav"
     fake_audio.write_bytes(b"")  # not actually read since we stub detect_pitches
 
-    # Fake CREPE output: 200 frames at 10 ms hop = 2.0 seconds, all A4 (440 Hz)
+    # Fake CREPE output: 200 frames at the current frame hop (covers the
+    # lyric span comfortably regardless of hop tweaks), all A4 (440 Hz).
     n_frames = 200
     fake_f0 = [440.0] * n_frames
     fake_conf = [0.9] * n_frames
@@ -192,7 +193,8 @@ def test_build_vocal_notes_orchestrates_syllabify_and_pitch_alignment(monkeypatc
     assert notes["pitch_model"] == "torchcrepe-full"
     assert notes["syllabified_from"] == "lrclib"
     assert notes["syllabifier"] == "ssp-en"
-    assert notes["frame_hop_s"] == 0.010
+    from app.services.vocals import _FRAME_HOP_S
+    assert notes["frame_hop_s"] == _FRAME_HOP_S
     assert "lyrics_etag" in notes
 
 

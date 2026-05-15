@@ -256,6 +256,11 @@ async def create_beatmap_from_stem(
                 if track_id:
                     try:
                         from ..services.tracks import add_beatmap_record
+                        try:
+                            from importlib.metadata import version as _pkg_version
+                            _madmom_version = _pkg_version('madmom')
+                        except Exception:
+                            _madmom_version = None
                         add_beatmap_record(
                             track_id=track_id,
                             beatmap_id=job.id,
@@ -263,6 +268,8 @@ async def create_beatmap_from_stem(
                             folder_name=folder_name,
                             song_name=song_name,
                             source_dir=output_dir,
+                            model='madmom',
+                            model_version=_madmom_version,
                         )
                         job.metadata['track_id'] = track_id
                     except Exception as be:

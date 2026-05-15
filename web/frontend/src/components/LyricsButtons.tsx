@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { useExclusiveTask } from './useExclusiveTask'
 
 export type LyricsScope = { jobId: string } | { trackId: string }
 
@@ -72,6 +73,7 @@ export default function LyricsButtons({ scope, hasVocals, meta, onLyricsChange }
   const [previewVersion, setPreviewVersion] = useState<{ meta: LyricsVersion; lyrics: Lyrics } | null>(null)
   const [loadingPreview, setLoadingPreview] = useState(false)
   const [whisperPkgVersion, setWhisperPkgVersion] = useState<string | null>(null)
+  const lock = useExclusiveTask()
 
   // Pull the currently-installed faster-whisper version from /api/versions
   // so the Transcribe button can show "Transcribe with Whisper 1.2.1" and
@@ -115,6 +117,7 @@ export default function LyricsButtons({ scope, hasVocals, meta, onLyricsChange }
   }, [JSON.stringify(scope)])
 
   const fetchLrclib = async () => {
+    if (!lock.acquire('lrclib')) return
     setError({ kind: 'none' })
     setLrclib({ kind: 'loading' })
     try {
@@ -138,6 +141,8 @@ export default function LyricsButtons({ scope, hasVocals, meta, onLyricsChange }
     } catch (e) {
       setLrclib({ kind: 'idle' })
       setError({ kind: 'error', message: (e as Error).message })
+    } finally {
+      lock.release()
     }
   }
 
@@ -150,6 +155,7 @@ export default function LyricsButtons({ scope, hasVocals, meta, onLyricsChange }
         throw new Error(err.detail || `HTTP ${res.status}`)
       }
       const { job_id } = await res.json()
+      lock.acquire('whisper')
       setWhisper({ kind: 'running', jobId: job_id, progress: 0, message: 'Starting…' })
 
       const es = new EventSource(`/api/jobs/${job_id}/events`)
@@ -163,6 +169,7 @@ export default function LyricsButtons({ scope, hasVocals, meta, onLyricsChange }
         if (d.step === 'done') {
           es.close()
           setWhisper({ kind: 'idle' })
+          lock.release()
           // Reload active lyrics + versions
           const got = await fetch(`/api/lyrics?${scopeQuery(scope)}`)
           if (got.ok) {
@@ -173,6 +180,7 @@ export default function LyricsButtons({ scope, hasVocals, meta, onLyricsChange }
         } else if (d.step === 'error' || d.step === 'cancelled') {
           es.close()
           setWhisper({ kind: 'idle' })
+          lock.release()
           setError({ kind: 'error', message: d.message || 'Whisper failed' })
         }
       }
@@ -180,10 +188,12 @@ export default function LyricsButtons({ scope, hasVocals, meta, onLyricsChange }
         if (es.readyState === EventSource.CLOSED) {
           setError({ kind: 'error', message: 'SSE connection lost' })
           setWhisper({ kind: 'idle' })
+          lock.release()
         }
       }
     } catch (e) {
       setWhisper({ kind: 'idle' })
+      lock.release()
       setError({ kind: 'error', message: (e as Error).message })
     }
   }
@@ -223,8 +233,10 @@ export default function LyricsButtons({ scope, hasVocals, meta, onLyricsChange }
   }
 
   const deleteVersion = async (v: LyricsVersion) => {
-    if (v.active) return
-    if (!window.confirm(`Delete this ${v.source.toUpperCase()} snapshot? The active version is unaffected.`)) return
+    const msg = v.active
+      ? `Delete the ACTIVE ${v.source.toUpperCase()} snapshot? This also clears lyrics.json — the editor and Publish-to-Game will have no lyrics until you generate or activate another.`
+      : `Delete this ${v.source.toUpperCase()} snapshot? The active version is unaffected.`
+    if (!window.confirm(msg)) return
     try {
       const r = await fetch(`/api/lyrics/versions/${encodeURIComponent(v.file)}?${scopeQuery(scope)}`, {
         method: 'DELETE',
@@ -233,20 +245,23 @@ export default function LyricsButtons({ scope, hasVocals, meta, onLyricsChange }
         const e = await r.json().catch(() => ({}))
         throw new Error(e.detail || `HTTP ${r.status}`)
       }
+      const result = await r.json().catch(() => ({}))
+      if (result.was_active) onLyricsChange?.(null)
       refreshVersions()
     } catch (e) {
       setError({ kind: 'error', message: (e as Error).message })
     }
   }
 
-  const lrclibBusy = lrclib.kind === 'loading' || whisper.kind === 'running'
-  const whisperBusy = whisper.kind === 'running' || lrclib.kind === 'loading'
+  const lrclibBusy = lrclib.kind === 'loading' || whisper.kind === 'running' || lock.lockedByOther('lrclib')
+  const whisperBusy = whisper.kind === 'running' || lrclib.kind === 'loading' || lock.lockedByOther('whisper')
 
   return (
     <div className="space-y-1.5 w-full">
       <button
         onClick={fetchLrclib}
         disabled={lrclibBusy}
+        title={lock.lockedByOther('lrclib') ? 'Another task is running' : undefined}
         className="px-3 py-1.5 bg-purple-700/60 hover:bg-purple-600/70 disabled:opacity-50 text-purple-100 rounded text-xs font-medium transition-colors w-full"
       >
         {lrclib.kind === 'loading'
@@ -260,7 +275,7 @@ export default function LyricsButtons({ scope, hasVocals, meta, onLyricsChange }
           onClick={startWhisper}
           disabled={whisperBusy}
           className="px-3 py-1.5 bg-sky-700/60 hover:bg-sky-600/70 disabled:opacity-50 text-sky-100 rounded text-xs font-medium transition-colors w-full"
-          title="Local Whisper transcription. ~2 min on CPU; first run downloads ~1.5 GB."
+          title={lock.lockedByOther('whisper') ? 'Another task is running' : 'Local Whisper transcription. ~2 min on CPU; first run downloads ~1.5 GB.'}
         >
           {whisper.kind === 'running'
             ? `Transcribing… ${whisper.progress}%`
@@ -323,9 +338,8 @@ export default function LyricsButtons({ scope, hasVocals, meta, onLyricsChange }
               </button>
               <button
                 onClick={() => deleteVersion(v)}
-                disabled={v.active}
-                className="shrink-0 px-1 py-0.5 bg-red-900/30 hover:bg-red-800/50 disabled:opacity-30 disabled:cursor-not-allowed text-red-300 rounded text-[10px]"
-                title={v.active ? 'Cannot delete the active version. Activate another first.' : 'Delete this snapshot'}
+                className="shrink-0 px-1 py-0.5 bg-red-900/30 hover:bg-red-800/50 text-red-300 rounded text-[10px]"
+                title={v.active ? 'Delete the active snapshot (also wipes lyrics.json)' : 'Delete this snapshot'}
                 aria-label="Delete version"
               >
                 ×

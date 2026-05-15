@@ -200,17 +200,20 @@ async def delete_version(
     job_id: str | None = Query(default=None),
     track_id: str | None = Query(default=None),
 ):
-    """Delete a single lyrics snapshot. Refuses to delete the active version
-    (the one whose fetched_at matches the live lyrics.json) — caller must
-    activate another version first, or use DELETE /api/lyrics to wipe the
-    active file altogether."""
+    """Delete a single lyrics snapshot. If the snapshot happens to be the
+    active one (its fetched_at matches lyrics.json), the live lyrics.json is
+    wiped in the same call so consumers don't end up with a dangling active
+    reference. Returns `was_active` so the caller can refresh derived UI."""
     target = _resolve_dir(job_id=job_id, track_id=track_id)
     snap = lyrics_service.load_lyrics_version(target, filename)
     if snap is None:
         raise HTTPException(404, 'Version not found')
     active = lyrics_service.load_lyrics(target) or {}
-    if active.get('fetched_at') and snap.get('fetched_at') == active['fetched_at']:
-        raise HTTPException(409, 'Cannot delete the active version. Activate another first.')
+    was_active = bool(active.get('fetched_at')) and snap.get('fetched_at') == active['fetched_at']
+    if was_active:
+        active_path = target / 'lyrics.json'
+        if active_path.exists():
+            active_path.unlink()
     if not lyrics_service.delete_lyrics_version(target, filename):
         raise HTTPException(404, 'Version not found')
-    return {'ok': True}
+    return {'ok': True, 'was_active': was_active}

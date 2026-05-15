@@ -48,7 +48,7 @@ def _load_generator():
 DIFFICULTIES = [
     ('ExpertSingle', 0.3, 0.55, 16, 0.0),
     ('HardSingle', 0.4, 0.75, 8, 0.20),
-    ('MediumSingle', 0.5, 1.0, 8, 0.35),
+    ('MediumSingle', 0.5, 1.0, 8, 0.50),
     ('EasySingle', 0.6, 1.0, 4, 0.55),
 ]
 

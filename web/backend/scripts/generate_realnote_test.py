@@ -486,6 +486,12 @@ async def main() -> None:
             'preview_start_time = 0',
             'delay = 0',
             'loading_phrase = Realnote acid test',
+            # Gate flag for the runtime's realnote subsystem. REALNOTES_SPEC.md
+            # §2: without this the entire subsystem is skipped — even though
+            # the chart paired with this ini emits R notes + realnotes_pack /
+            # realnotes_scale events. Missing this line was the bug that made
+            # the bench appear inert to the game.
+            'realnotes = True',
             '',
             '[onboarding]',
             'onboarding = True',

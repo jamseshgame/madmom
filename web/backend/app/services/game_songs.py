@@ -164,6 +164,8 @@ def clone_game_song_to_studio_track(folder: str) -> tuple[str, str]:
         'folder_name': folder,
         'song_name': ini.get('name', folder),
         'active': True,
+        'model': 'imported',
+        'model_version': None,
     })
     track.save()
     return track.id, beatmap_id

@@ -133,18 +133,31 @@ def syllabify(words: list[dict], language: str = "en") -> list[dict]:
     return out
 
 
-_CREPE_LOADED = False
+# Frame hop used by CREPE AND mirrored into vocal_notes.json as `frame_hop_s`.
+# Downstream slicing converts times -> frame indices using this value, so the
+# two must agree. 20ms vs the 10ms default trades ~2x speed for slightly
+# coarser per-frame pitch resolution; typical sung notes are 50-1000ms so it
+# doesn't move syllable boundaries materially.
+_FRAME_HOP_S = 0.020
+
+
+def _crepe_device() -> str:
+    """Pick CUDA when available, else CPU. CREPE 'full' on GPU is ~10-30x
+    faster than CPU. Falls back silently if torch import fails."""
+    try:
+        import torch
+        return 'cuda' if torch.cuda.is_available() else 'cpu'
+    except Exception:
+        return 'cpu'
 
 
 def _load_crepe_model():
-    """Lazy-load the CREPE 'full' model. Returns the torchcrepe module so
-    callers can use its predict() function. Idempotent."""
-    global _CREPE_LOADED
+    """Import torchcrepe and resolve the inference device. The model weights
+    are lazy-loaded by torchcrepe.predict() on first call and cached for the
+    rest of the process, so no preload is needed here.
+    Returns (torchcrepe module, device string)."""
     import torchcrepe
-    if not _CREPE_LOADED:
-        torchcrepe.load.model(device='cpu', capacity='full')
-        _CREPE_LOADED = True
-    return torchcrepe
+    return torchcrepe, _crepe_device()
 
 
 def detect_pitches(
@@ -159,7 +172,7 @@ def detect_pitches(
 
     Returns (f0_hz, confidence). Frames where the model is unsure
     (periodicity < `periodicity_threshold`) have f0_hz set to NaN.
-    10 ms hop. Loads the model on first call.
+    Hop is `_FRAME_HOP_S` seconds. Model is lazy-loaded on first call.
 
     Tunables exposed to the UI:
       model_size               'full' (default, accurate, slow) or 'tiny'
@@ -190,8 +203,8 @@ def detect_pitches(
         audio = torchaudio.functional.resample(audio, sr, target_sr)
         sr = target_sr
 
-    hop_samples = round(sr * 0.010)
-    torchcrepe = _load_crepe_model()
+    hop_samples = round(sr * _FRAME_HOP_S)
+    torchcrepe, device = _load_crepe_model()
 
     safe_model = model_size if model_size in ('full', 'tiny') else 'full'
     pitch, periodicity = torchcrepe.predict(
@@ -202,13 +215,14 @@ def detect_pitches(
         fmax=float(fmax),
         model=safe_model,
         batch_size=128,
-        device='cpu',
+        device=device,
         decoder=torchcrepe.decode.viterbi,
         return_periodicity=True,
     )
 
-    f0 = pitch.squeeze(0).numpy().astype(float)
-    conf = periodicity.squeeze(0).numpy().astype(float)
+    # .cpu() so .numpy() works whether predict ran on CUDA or CPU (no-op on CPU tensors).
+    f0 = pitch.squeeze(0).cpu().numpy().astype(float)
+    conf = periodicity.squeeze(0).cpu().numpy().astype(float)
     f0_masked = np.where(conf < float(periodicity_threshold), np.nan, f0)
     return f0_masked.tolist(), conf.tolist()
 
@@ -277,7 +291,7 @@ def build_vocal_notes(
         fmax=fmax,
         periodicity_threshold=periodicity_threshold,
     )
-    hop_s = 0.010
+    hop_s = _FRAME_HOP_S
 
     if progress_callback:
         progress_callback('syllabify', 60, 'Splitting into syllables...')

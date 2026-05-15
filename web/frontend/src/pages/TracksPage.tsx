@@ -5,6 +5,7 @@ import StemPlayer from '../components/StemPlayer.tsx'
 import BeatmapStatsModal, { BeatmapRecord as BeatmapStatsRecord } from '../components/BeatmapStatsModal.tsx'
 import VocalmapButtons from '../components/VocalmapButtons'
 import useInstalledVersion from '../components/useInstalledVersion'
+import { BusyProvider, useExclusiveTask } from '../components/useExclusiveTask'
 
 type BeatmapRecord = BeatmapStatsRecord
 
@@ -49,6 +50,15 @@ const STEM_LABELS: Record<string, string> = {
   piano: 'Piano',
   other: 'Other',
   song: 'Master Mix',
+}
+
+// Mirrors LyricsButtons / VocalmapButtons SOURCE_BADGE: short uppercase badge
+// matching the model that produced the beatmap. Legacy records (no model
+// field) fall through to the neutral gray badge.
+const BEATMAP_MODEL_BADGE: Record<string, string> = {
+  madmom: 'bg-green-700/40 text-green-200 border-green-700/60',
+  manual: 'bg-gray-700/40 text-gray-200 border-gray-700/60',
+  imported: 'bg-blue-700/40 text-blue-200 border-blue-700/60',
 }
 
 // Group song.ini fields for the form
@@ -1010,10 +1020,12 @@ function InlineBeatmapProgress({
   jobId,
   onDone,
   onCancelled,
+  onError,
 }: {
   jobId: string
   onDone?: () => void
   onCancelled?: () => void
+  onError?: () => void
 }) {
   const [progress, setProgress] = useState(0)
   const [message, setMessage] = useState('Starting…')
@@ -1033,14 +1045,20 @@ function InlineBeatmapProgress({
       } else if (d.step === 'error') {
         es.close()
         setError(d.message)
+        if (onError) onError()
       } else if (d.step === 'cancelled') {
         es.close()
         if (onCancelled) onCancelled()
       }
     }
-    es.onerror = () => es.close()
+    es.onerror = () => {
+      es.close()
+      // Browser stopped reconnecting — caller needs to release any lock it
+      // was holding for this job.
+      if (onError) onError()
+    }
     return () => es.close()
-  }, [jobId, onDone, onCancelled])
+  }, [jobId, onDone, onCancelled, onError])
 
   if (done) return <div className="text-[11px] text-emerald-400 mt-1">Generated ✓</div>
   if (error) return <div className="text-[11px] text-red-400 mt-1 truncate" title={error}>{error}</div>
@@ -1072,12 +1090,24 @@ function InlineBeatmapProgress({
 }
 
 export default function TracksPage() {
+  // BusyProvider scopes the one-task-at-a-time lock to this page so vocals
+  // tasks (LRClib / Whisper / Vocalmap) and inline per-stem beatmap jobs
+  // can't overlap.
+  return (
+    <BusyProvider>
+      <TracksPageInner />
+    </BusyProvider>
+  )
+}
+
+function TracksPageInner() {
   const [tracks, setTracks] = useState<Track[]>([])
   const [jobs, setJobs] = useState<JobRow[]>([])
   const [loading, setLoading] = useState(true)
   const [beatmapPanel, setBeatmapPanel] = useState<{ track: Track; stem: string } | null>(null)
   const [searchParams, setSearchParams] = useSearchParams()
   const navigate = useNavigate()
+  const lock = useExclusiveTask()
   const selectedId = searchParams.get('id')
   const setSelectedId = useCallback(
     (id: string | null) => {
@@ -1280,6 +1310,8 @@ export default function TracksPage() {
     async (stem: string): Promise<string | null> => {
       const track = tracks.find((t) => t.id === selectedId)
       if (!track) return null
+      const lockId = stem === 'vocals' ? 'vocalmap' : `beatmap:${stem}`
+      if (!lock.acquire(lockId)) return null
       try {
         if (stem === 'vocals') {
           const meta = {
@@ -1322,11 +1354,12 @@ export default function TracksPage() {
         setInlineBmJobs((prev) => ({ ...prev, [stem]: job_id }))
         return job_id
       } catch (e) {
+        lock.release()
         setBatchError((e as Error).message)
         return null
       }
     },
-    [tracks, selectedId, songIni],
+    [tracks, selectedId, songIni, lock],
   )
 
   const generateSelected = useCallback(async () => {
@@ -1473,17 +1506,17 @@ export default function TracksPage() {
                         <>
                           <button
                             onClick={() => startQuickBeatmap(stem)}
-                            disabled={!!inlineBmJobs[stem]}
+                            disabled={!!inlineBmJobs[stem] || lock.lockedByOther(`beatmap:${stem}`)}
                             className="flex-1 px-3 py-1.5 bg-green-700/60 hover:bg-green-600/70 disabled:opacity-50 text-green-100 rounded text-xs font-medium transition-colors"
-                            title="Generate beatmap with the installed madmom model"
+                            title={lock.lockedByOther(`beatmap:${stem}`) ? 'Another task is running' : 'Generate beatmap with the installed madmom model'}
                           >
                             {beatmapBtnLabel}
                           </button>
                           <button
                             onClick={() => setBeatmapPanel({ track: selectedTrack, stem })}
-                            disabled={!!inlineBmJobs[stem]}
+                            disabled={!!inlineBmJobs[stem] || lock.lockedByOther(`beatmap:${stem}`)}
                             className="px-2 py-1.5 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-gray-200 rounded text-xs font-medium transition-colors"
-                            title="Advanced settings & download stem"
+                            title={lock.lockedByOther(`beatmap:${stem}`) ? 'Another task is running' : 'Advanced settings & download stem'}
                             aria-label="Advanced settings & download stem"
                           >
                             ⚙
@@ -1532,6 +1565,7 @@ export default function TracksPage() {
                           delete next[stem]
                           return next
                         })
+                        lock.release()
                         loadTracks()
                       }}
                       onCancelled={() => {
@@ -1540,7 +1574,9 @@ export default function TracksPage() {
                           delete next[stem]
                           return next
                         })
+                        lock.release()
                       }}
+                      onError={() => { lock.release() }}
                     />
                   )}
                   {/* Vocals uses VocalmapButtons → vocal_notes.json, not the
@@ -1557,7 +1593,11 @@ export default function TracksPage() {
                       // until the user gives them a real custom name.
                       const baseName = liveName.replace(/(\s*\(copy\))+$/i, '')
                       const isCustom = !!liveName && baseName !== defaultName
-                      const displayLabel = isCustom ? liveName : dateStr
+                      const model = (bm.model || 'madmom').toLowerCase()
+                      const modelVer = (bm.model_version || '').trim()
+                      const modelLabel = modelVer ? `${model.toUpperCase()} ${modelVer}` : model.toUpperCase()
+                      const modelBadgeCls = BEATMAP_MODEL_BADGE[model] || BEATMAP_MODEL_BADGE.manual
+                      const isOlder = model === 'madmom' && !!modelVer && !!installedMadmom && modelVer !== installedMadmom
                       const activate = async () => {
                         if (isActive) return
                         try {
@@ -1584,12 +1624,21 @@ export default function TracksPage() {
                           className="shrink-0 h-3.5 w-3.5 accent-jam-500 cursor-pointer"
                           title={isActive ? 'Active beatmap (used when publishing)' : 'Use this beatmap'}
                         />
+                        <span className={`shrink-0 inline-block px-1 py-0.5 rounded border text-[9px] font-semibold uppercase ${modelBadgeCls}`}>
+                          {modelLabel}
+                        </span>
                         <button
                           onClick={() => setStatsBeatmap(bm)}
-                          className="flex-1 min-w-0 text-left text-[11px] text-gray-300 hover:text-gray-100 truncate transition-colors"
+                          className="flex-1 min-w-0 text-left text-[10px] text-gray-400 hover:text-gray-200 truncate transition-colors"
                           title={liveName ? `${liveName} · ${dateStr}` : 'View beatmap details'}
                         >
-                          {displayLabel}
+                          {dateStr}
+                          {isCustom && <span className="ml-1 text-gray-200">· {liveName}</span>}
+                          {isOlder && (
+                            <span className="ml-1 text-amber-400" title={`Re-generating would use madmom ${installedMadmom}`}>
+                              (older)
+                            </span>
+                          )}
                         </button>
                         <button
                           onClick={() => navigate(`/edit/${selectedTrack.id}/${bm.id}`)}
@@ -1597,6 +1646,29 @@ export default function TracksPage() {
                           title="Edit beatmap"
                         >
                           Edit
+                        </button>
+                        <button
+                          onClick={async () => {
+                            const msg = isActive
+                              ? `Delete the ACTIVE ${STEM_LABELS[stem] || stem} beatmap? No beatmap will be active for this stem until you pick another or generate a fresh one.`
+                              : 'Delete this beatmap? The active version is unaffected.'
+                            if (!window.confirm(msg)) return
+                            try {
+                              const r = await fetch(`/api/tracks/${selectedTrack.id}/beatmaps/${bm.id}`, { method: 'DELETE' })
+                              if (!r.ok) {
+                                const e = await r.json().catch(() => ({}))
+                                throw new Error(e.detail || `HTTP ${r.status}`)
+                              }
+                              await loadTracks()
+                            } catch (e) {
+                              setBatchError((e as Error).message)
+                            }
+                          }}
+                          className="shrink-0 px-1 py-0.5 bg-red-900/30 hover:bg-red-800/50 text-red-300 rounded text-[10px]"
+                          title={isActive ? 'Delete the active beatmap' : 'Delete this beatmap'}
+                          aria-label="Delete beatmap"
+                        >
+                          ×
                         </button>
                       </div>
                       )
@@ -1617,7 +1689,8 @@ export default function TracksPage() {
               {batchError && <span className="text-xs text-red-400">{batchError}</span>}
               <button
                 onClick={generateSelected}
-                disabled={selectedStems.size === 0}
+                disabled={selectedStems.size === 0 || !!lock.owner}
+                title={lock.owner ? 'Another task is running' : undefined}
                 className="px-3 py-1.5 bg-jam-600 hover:bg-jam-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-md text-xs font-medium transition-colors"
               >
                 Generate beatmap for {selectedStems.size || 'selected'} stem{selectedStems.size === 1 ? '' : 's'}

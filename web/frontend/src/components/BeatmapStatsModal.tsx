@@ -7,6 +7,12 @@ export interface BeatmapRecord {
   folder_name: string
   song_name: string
   active?: boolean
+  // Provenance captured at generation time. 'madmom' for the onset-detector
+  // pipeline, 'manual' for empty-editor beatmaps, 'imported' for game-song
+  // clones. Legacy records (created before this field was added) are nullish
+  // and the picker falls back to a neutral badge.
+  model?: string | null
+  model_version?: string | null
 }
 
 const STEM_COLORS: Record<string, string> = {

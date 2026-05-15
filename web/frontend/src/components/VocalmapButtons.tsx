@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import VocalBeatmapTracker from './VocalBeatmapTracker'
+import { useExclusiveTask } from './useExclusiveTask'
 
 export type VocalmapScope = { jobId: string } | { trackId: string }
 
@@ -26,7 +27,7 @@ interface VocalmapVersion {
 }
 
 const DEFAULT_PARAMS: VocalmapParams = {
-  model_size: 'full',
+  model_size: 'tiny',
   fmin: 50,
   fmax: 1000,
   periodicity_threshold: 0.21,
@@ -115,6 +116,7 @@ export default function VocalmapButtons({ scope, meta, hasActive, onActiveChange
   const [installedTorchcrepe, setInstalledTorchcrepe] = useState<string | null>(null)
   const [params, setParams] = useState<VocalmapParams>(() => loadStoredParams())
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const lock = useExclusiveTask()
 
   const refetchVersions = useCallback(async () => {
     try {
@@ -141,6 +143,7 @@ export default function VocalmapButtons({ scope, meta, hasActive, onActiveChange
   }, [])
 
   const startGenerate = async (overrideParams?: VocalmapParams) => {
+    if (!lock.acquire('vocalmap')) return
     setError('')
     setBusyStart(true)
     try {
@@ -166,6 +169,7 @@ export default function VocalmapButtons({ scope, meta, hasActive, onActiveChange
       // Persist for next time
       try { localStorage.setItem(PARAMS_STORAGE_KEY, JSON.stringify(used)) } catch { /* quota */ }
     } catch (e) {
+      lock.release()
       setError((e as Error).message)
     } finally {
       setBusyStart(false)
@@ -202,14 +206,18 @@ export default function VocalmapButtons({ scope, meta, hasActive, onActiveChange
   }
 
   const deleteVersion = async (v: VocalmapVersion) => {
-    if (v.active) return
-    if (!window.confirm('Delete this vocalmap snapshot? The active version is unaffected.')) return
+    const msg = v.active
+      ? 'Delete the ACTIVE vocalmap snapshot? This also clears vocal_notes.json — the editor and Publish-to-Game will have no vocalmap until you generate or activate another.'
+      : 'Delete this vocalmap snapshot? The active version is unaffected.'
+    if (!window.confirm(msg)) return
     try {
       const r = await fetch(`/api/vocals/versions/${encodeURIComponent(v.file)}?${scopeQuery(scope)}`, { method: 'DELETE' })
       if (!r.ok) {
         const e = await r.json().catch(() => ({}))
         throw new Error(e.detail || `HTTP ${r.status}`)
       }
+      const result = await r.json().catch(() => ({}))
+      if (result.was_active) onActiveChange()
       await refetchVersions()
     } catch (e) {
       setError((e as Error).message)
@@ -229,17 +237,17 @@ export default function VocalmapButtons({ scope, meta, hasActive, onActiveChange
       <div className="flex items-stretch gap-1">
         <button
           onClick={() => startGenerate()}
-          disabled={busyStart || !!jobId}
+          disabled={busyStart || !!jobId || lock.lockedByOther('vocalmap')}
           className="flex-1 px-3 py-1.5 bg-green-700/60 hover:bg-green-600/70 disabled:opacity-50 text-green-100 rounded text-xs font-medium transition-colors"
-          title="Detect pitch with torchcrepe and align lyrics into per-syllable notes"
+          title={lock.lockedByOther('vocalmap') ? 'Another task is running' : 'Detect pitch with torchcrepe and align lyrics into per-syllable notes'}
         >
           {busyStart ? 'Starting…' : jobId ? 'Generating…' : genLabel}
         </button>
         <button
           onClick={() => setSettingsOpen(true)}
-          disabled={busyStart || !!jobId}
+          disabled={busyStart || !!jobId || lock.lockedByOther('vocalmap')}
           className="px-2 py-1.5 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-gray-200 rounded text-xs font-medium transition-colors"
-          title="Vocalmap settings (model size, pitch range, threshold, transpose)"
+          title={lock.lockedByOther('vocalmap') ? 'Another task is running' : 'Vocalmap settings (model size, pitch range, threshold, transpose)'}
           aria-label="Vocalmap settings"
         >
           ⚙
@@ -251,10 +259,12 @@ export default function VocalmapButtons({ scope, meta, hasActive, onActiveChange
           beatmapJobId={jobId}
           onDone={async () => {
             setJobId(null)
+            lock.release()
             await refetchVersions()
             onActiveChange()
           }}
-          onCancelled={() => { setJobId(null) }}
+          onCancelled={() => { setJobId(null); lock.release() }}
+          onError={() => { lock.release() }}
         />
       )}
 
@@ -305,9 +315,8 @@ export default function VocalmapButtons({ scope, meta, hasActive, onActiveChange
               </button>
               <button
                 onClick={() => deleteVersion(v)}
-                disabled={v.active}
-                className="shrink-0 px-1 py-0.5 bg-red-900/30 hover:bg-red-800/50 disabled:opacity-30 disabled:cursor-not-allowed text-red-300 rounded text-[10px]"
-                title={v.active ? 'Cannot delete the active version. Activate another first.' : 'Delete this snapshot'}
+                className="shrink-0 px-1 py-0.5 bg-red-900/30 hover:bg-red-800/50 text-red-300 rounded text-[10px]"
+                title={v.active ? 'Delete the active snapshot (also wipes vocal_notes.json)' : 'Delete this snapshot'}
                 aria-label="Delete vocalmap version"
               >
                 ×

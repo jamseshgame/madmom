@@ -5,6 +5,7 @@ import BeatmapStatsModal, { BeatmapRecord } from './BeatmapStatsModal.tsx'
 import LyricsButtons from './LyricsButtons'
 import VocalmapButtons from './VocalmapButtons'
 import useInstalledVersion from './useInstalledVersion'
+import { useExclusiveTask } from './useExclusiveTask'
 
 interface StemResultProps {
   jobId: string
@@ -50,6 +51,15 @@ const STEM_LABELS: Record<string, string> = {
 // Keys that historically appeared in the stems map but aren't actual audio
 const NON_AUDIO_KEYS = new Set(['song_ini', 'album_png'])
 
+// Mirrors LyricsButtons / VocalmapButtons SOURCE_BADGE: short uppercase badge
+// for the model that produced the beatmap. Legacy records (no model field)
+// fall through to the neutral gray badge.
+const BEATMAP_MODEL_BADGE: Record<string, string> = {
+  madmom: 'bg-green-700/40 text-green-200 border-green-700/60',
+  manual: 'bg-gray-700/40 text-gray-200 border-gray-700/60',
+  imported: 'bg-blue-700/40 text-blue-200 border-blue-700/60',
+}
+
 type BeatmapState = 'idle' | 'generating' | 'done' | 'error'
 
 function StemBeatmapTracker({
@@ -57,11 +67,13 @@ function StemBeatmapTracker({
   onDone,
   onView,
   onCancelled,
+  onError,
 }: {
   beatmapJobId: string
   onDone?: (jobId: string) => void
   onView?: (jobId: string) => void
   onCancelled?: () => void
+  onError?: () => void
 }) {
   const [progress, setProgress] = useState(0)
   const [message, setMessage] = useState('Starting...')
@@ -84,6 +96,7 @@ function StemBeatmapTracker({
       } else if (data.step === 'error') {
         evtSource.close()
         setError(data.message)
+        if (onError) onError()
       } else if (data.step === 'cancelled') {
         evtSource.close()
         setCancelled(true)
@@ -94,10 +107,11 @@ function StemBeatmapTracker({
     evtSource.onerror = () => {
       evtSource.close()
       setError('Connection lost')
+      if (onError) onError()
     }
 
     return () => evtSource.close()
-  }, [beatmapJobId, onDone, onCancelled])
+  }, [beatmapJobId, onDone, onCancelled, onError])
 
   if (cancelled) {
     return <div className="text-xs text-gray-500 mt-1">Cancelled</div>
@@ -202,6 +216,7 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
   const [batchError, setBatchError] = useState('')
   const [existingBeatmaps, setExistingBeatmaps] = useState<BeatmapRecord[]>([])
   const installedMadmom = useInstalledVersion('madmom')
+  const lock = useExclusiveTask()
   const beatmapBtnLabel = installedMadmom
     ? `Generate Beatmap with madmom ${installedMadmom}`
     : 'Generate Beatmap'
@@ -398,6 +413,7 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
   }
 
   const generateBeatmap = async (stem: string) => {
+    if (!lock.acquire(`beatmap:${stem}`)) return
     const label = STEM_LABELS[stem] || stem
     setBeatmaps((prev) => ({ ...prev, [stem]: { jobId: '', state: 'generating' } }))
 
@@ -415,6 +431,7 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
       const { job_id } = await res.json()
       setBeatmaps((prev) => ({ ...prev, [stem]: { jobId: job_id, state: 'generating' } }))
     } catch (e) {
+      lock.release()
       setBeatmaps((prev) => ({ ...prev, [stem]: { jobId: '', state: 'error' } }))
     }
   }
@@ -535,8 +552,9 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                         !bm && (
                           <button
                             onClick={() => generateBeatmap(stem)}
-                            className="flex-1 px-3 py-1.5 bg-green-700/60 hover:bg-green-600/70 text-green-100 rounded text-xs font-medium transition-colors"
-                            title="Generate beatmap with the installed madmom model"
+                            disabled={lock.lockedByOther(`beatmap:${stem}`)}
+                            className="flex-1 px-3 py-1.5 bg-green-700/60 hover:bg-green-600/70 disabled:opacity-50 disabled:cursor-not-allowed text-green-100 rounded text-xs font-medium transition-colors"
+                            title={lock.lockedByOther(`beatmap:${stem}`) ? 'Another task is running' : 'Generate beatmap with the installed madmom model'}
                           >
                             {beatmapBtnLabel}
                           </button>
@@ -583,19 +601,24 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                   {bm?.state === 'generating' && bm.jobId && stem !== 'vocals' && (
                     <StemBeatmapTracker
                       beatmapJobId={bm.jobId}
-                      onCancelled={() => setBeatmaps((prev) => {
-                        const next = { ...prev }
-                        delete next[stem]
-                        return next
-                      })}
+                      onCancelled={() => {
+                        setBeatmaps((prev) => {
+                          const next = { ...prev }
+                          delete next[stem]
+                          return next
+                        })
+                        lock.release()
+                      }}
                       onDone={() => {
                         setBeatmaps((prev) => {
                           const next = { ...prev }
                           delete next[stem]
                           return next
                         })
+                        lock.release()
                         refetchBeatmaps()
                       }}
+                      onError={() => { lock.release() }}
                       onView={
                         trackId
                           ? (id) =>
@@ -631,7 +654,11 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                       // generated-at date rather than redundant track-name noise.
                       const baseName = liveName.replace(/(\s*\(copy\))+$/i, '')
                       const isCustom = !!liveName && baseName !== defaultName
-                      const displayLabel = isCustom ? liveName : dateStr
+                      const model = (b.model || 'madmom').toLowerCase()
+                      const modelVer = (b.model_version || '').trim()
+                      const modelLabel = modelVer ? `${model.toUpperCase()} ${modelVer}` : model.toUpperCase()
+                      const modelBadgeCls = BEATMAP_MODEL_BADGE[model] || BEATMAP_MODEL_BADGE.manual
+                      const isOlder = model === 'madmom' && !!modelVer && !!installedMadmom && modelVer !== installedMadmom
                       const activate = async () => {
                         if (isActive) return
                         try {
@@ -658,12 +685,21 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                             className="shrink-0 h-3.5 w-3.5 accent-jam-500 cursor-pointer"
                             title={isActive ? 'Active beatmap (used when publishing)' : 'Use this beatmap'}
                           />
+                          <span className={`shrink-0 inline-block px-1 py-0.5 rounded border text-[9px] font-semibold uppercase ${modelBadgeCls}`}>
+                            {modelLabel}
+                          </span>
                           <button
                             onClick={() => setStatsBeatmap(b)}
-                            className="flex-1 min-w-0 text-left text-[11px] text-gray-300 hover:text-gray-100 truncate transition-colors"
+                            className="flex-1 min-w-0 text-left text-[10px] text-gray-400 hover:text-gray-200 truncate transition-colors"
                             title={liveName ? `${liveName} · ${dateStr}` : 'View beatmap details'}
                           >
-                            {displayLabel}
+                            {dateStr}
+                            {isCustom && <span className="ml-1 text-gray-200">· {liveName}</span>}
+                            {isOlder && (
+                              <span className="ml-1 text-amber-400" title={`Re-generating would use madmom ${installedMadmom}`}>
+                                (older)
+                              </span>
+                            )}
                           </button>
                           <button
                             onClick={() => navigate(`/edit/${trackId}/${b.id}`)}
@@ -671,6 +707,29 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                             title="Edit beatmap"
                           >
                             Edit
+                          </button>
+                          <button
+                            onClick={async () => {
+                              const msg = isActive
+                                ? `Delete the ACTIVE ${label} beatmap? No beatmap will be active for this stem until you pick another or generate a fresh one.`
+                                : 'Delete this beatmap? The active version is unaffected.'
+                              if (!window.confirm(msg)) return
+                              try {
+                                const r = await fetch(`/api/tracks/${trackId}/beatmaps/${b.id}`, { method: 'DELETE' })
+                                if (!r.ok) {
+                                  const e = await r.json().catch(() => ({}))
+                                  throw new Error(e.detail || `HTTP ${r.status}`)
+                                }
+                                await refetchBeatmaps()
+                              } catch (e) {
+                                setBatchError((e as Error).message)
+                              }
+                            }}
+                            className="shrink-0 px-1 py-0.5 bg-red-900/30 hover:bg-red-800/50 text-red-300 rounded text-[10px]"
+                            title={isActive ? 'Delete the active beatmap' : 'Delete this beatmap'}
+                            aria-label="Delete beatmap"
+                          >
+                            ×
                           </button>
                         </div>
                       )
@@ -692,7 +751,8 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
             {batchError && <span className="text-xs text-red-400">{batchError}</span>}
             <button
               onClick={generateSelected}
-              disabled={selectedStems.size === 0}
+              disabled={selectedStems.size === 0 || !!lock.owner}
+              title={lock.owner ? 'Another task is running' : undefined}
               className="px-3 py-1.5 bg-jam-600 hover:bg-jam-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-md text-xs font-medium transition-colors"
             >
               Generate beatmap for {selectedStems.size || 'selected'} stem{selectedStems.size === 1 ? '' : 's'}

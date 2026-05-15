@@ -124,17 +124,23 @@ async def delete_vocalmap_version(
     job_id: str | None = Query(default=None),
     track_id: str | None = Query(default=None),
 ):
-    """Delete a single vocalmap snapshot. Refuses to delete the active version."""
+    """Delete a single vocalmap snapshot. If it matches the active version
+    (fetched_at equality), also wipe vocal_notes.json so the editor +
+    Publish-to-Game don't keep a dangling active reference. Returns
+    `was_active` so the caller can refresh derived UI."""
     target = _resolve_dir(job_id=job_id, track_id=track_id)
     snap = vocals_service.load_vocal_notes_version(target, filename)
     if snap is None:
         raise HTTPException(404, 'Version not found')
     active = vocals_service.load_vocal_notes(target) or {}
-    if active.get('fetched_at') and snap.get('fetched_at') == active['fetched_at']:
-        raise HTTPException(409, 'Cannot delete the active version. Activate another first.')
+    was_active = bool(active.get('fetched_at')) and snap.get('fetched_at') == active['fetched_at']
+    if was_active:
+        active_path = target / 'vocal_notes.json'
+        if active_path.exists():
+            active_path.unlink()
     if not vocals_service.delete_vocal_notes_version(target, filename):
         raise HTTPException(404, 'Version not found')
-    return {'ok': True}
+    return {'ok': True, 'was_active': was_active}
 
 
 import asyncio

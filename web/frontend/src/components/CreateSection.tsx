@@ -717,10 +717,10 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
               }}
               className="text-sm text-gray-500 hover:text-jam-300 underline-offset-2 hover:underline transition-colors"
             >
-              I only have stems — no master mix
+              Stems mode
             </button>
             <p className="text-[11px] text-gray-700 mt-1">
-              We'll mux the stems together to synthesise song.ogg.
+              Upload stems directly. Add a master mix on the next page, or we'll mux the stems into song.ogg.
             </p>
             <div className="mt-4 pt-4 border-t border-gray-800/60">
               <BlankTutorialButton />
@@ -747,12 +747,12 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
             </div>
           )}
 
-          {!file && (
+          {!file && mode === 'manual' && (
             <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 flex items-center justify-between gap-4">
               <p className="text-sm text-gray-400">
-                <span className="text-gray-200 font-medium">Stems-only mode.</span>{' '}
-                The uploaded stems will be summed into{' '}
-                <span className="text-gray-300 font-mono">song.ogg</span> automatically.
+                <span className="text-gray-200 font-medium">Stems mode.</span>{' '}
+                Add a master mix below if you have one — otherwise the stems are summed into{' '}
+                <span className="text-gray-300 font-mono">song.ogg</span>.
               </p>
             </div>
           )}
@@ -763,7 +763,7 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
               {(
                 [
                   { key: 'generate', label: 'Generate stems', sub: 'Run Demucs to split the master' },
-                  { key: 'manual', label: 'Upload stems', sub: 'Bring your own stems; master becomes song.ogg' },
+                  { key: 'manual', label: 'Stems mode', sub: 'Upload your own stems; master mix optional' },
                 ] as const
               ).map((opt) => {
                 const active = mode === opt.key
@@ -897,12 +897,44 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
           {mode === 'manual' && (
             <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">
               <div>
-                <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Upload stems</h3>
+                <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Stems mode</h3>
                 <p className="text-xs text-gray-500 mt-1">
-                  Drop one file per stem (any audio format). Each gets converted to OGG with the game name. The master
-                  audio above becomes <span className="text-gray-400 font-mono">song.ogg</span>.
+                  Drop one file per stem (any audio format). Each gets converted to OGG with the game name.
+                  The master mix is optional — if omitted the stems are summed into{' '}
+                  <span className="text-gray-400 font-mono">song.ogg</span>.
                 </p>
               </div>
+              <label
+                className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+                  file ? 'border-jam-500/40 bg-jam-600/5' : 'border-gray-700 hover:border-gray-500 bg-gray-800/40'
+                }`}
+              >
+                <input
+                  type="file"
+                  accept=".flac,.mp3,.ogg,.wav,.m4a,.aac,.wma"
+                  className="hidden"
+                  onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                />
+                <span className="text-sm font-medium text-gray-300">Master mix</span>
+                <span className="text-[10px] uppercase tracking-wider text-gray-500">optional</span>
+                <span className="text-xs text-gray-500 flex-1 truncate">
+                  {file ? file.name : 'Click to choose file — stems will be muxed if omitted'}
+                </span>
+                {file && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      setFile(null)
+                    }}
+                    className="text-gray-500 hover:text-gray-200 text-xs"
+                    aria-label="Remove master mix"
+                  >
+                    ✕
+                  </button>
+                )}
+              </label>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                 {(['vocals', 'drums', 'bass', 'guitar', 'piano', 'other'] as const).map((stem) => {
                   const meta = STEM_META[stem]

@@ -394,6 +394,11 @@ async def generate_beatmap_from_track(
             if result is None:
                 await job.send_error('No onsets detected in stem audio')
             else:
+                try:
+                    from importlib.metadata import version as _pkg_version
+                    _madmom_version = _pkg_version('madmom')
+                except Exception:
+                    _madmom_version = None
                 add_beatmap_record(
                     track_id=track_id,
                     beatmap_id=job.id,
@@ -401,6 +406,8 @@ async def generate_beatmap_from_track(
                     folder_name=folder_name,
                     song_name=song_name,
                     source_dir=output_dir,
+                    model='madmom',
+                    model_version=_madmom_version,
                 )
                 await job.send_done(result)
         except asyncio.CancelledError:
@@ -715,6 +722,8 @@ async def create_empty_beatmap_for_track(
             folder_name=folder_name,
             song_name=bm_name,
             source_dir=bm_src,
+            model='manual',
+            model_version=None,
         )
 
         return {
@@ -836,6 +845,8 @@ async def create_blank_tutorial(
             folder_name=f'{artist} - {name}',
             song_name=name,
             source_dir=bm_src,
+            model='manual',
+            model_version=None,
         )
 
         return {
