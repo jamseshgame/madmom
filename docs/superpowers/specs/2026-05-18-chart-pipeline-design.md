@@ -50,7 +50,7 @@ generator ran first. Stems can disagree on tempo.
 - Real-Notes sample playback. The pipeline produces `N` notes; `R` notes
   + `realnotes_pack`/`realnotes_scale` events are out of scope. The
   per-pitch detection work here makes a future Real-Notes integration
-  trivial, but the chart output stays vanilla Clone Hero.
+  trivial, but the chart output stays vanilla Jamsesh.
 - Hold-note and slide-note generation. Sustains computed by the existing
   generator's `compute_sustain_ticks` rule are preserved (gap-to-next-
   onset > threshold), but no new sustain or slide logic is introduced.

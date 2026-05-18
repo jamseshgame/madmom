@@ -14,7 +14,7 @@ This document is what you (the Unity engineer) need to consume the new pitched-v
 - Each entry is a **per-syllable note** with: tick, MIDI pitch, duration, lyric text, voicing classification (`sung` / `spoken` / `whispered`), and optional sub-note pitch curve + dynamics envelope.
 - The studio editor at **`/edit-vocals/:trackId`** renders these in the layout we want in-game: horizontal scroll, static center-line "now" marker, one row per chromatic semitone (no compression, no overlap), pitch-class colour wheel. Match that.
 - Plan A's `[Events]` lyric/phrase entries are **stripped** when `[JamseshVocals]` is present. The new block is the single source of truth.
-- Clone Hero **does not** parse `[JamseshVocals]`. Existing instrument tracks (`[ExpertSingle]`, `[ExpertDrums]`, etc.) are untouched. Don't expect CH to render this block — that's our job.
+- Jamsesh **does not** parse `[JamseshVocals]`. Existing instrument tracks (`[ExpertSingle]`, `[ExpertDrums]`, etc.) are untouched. Don't expect CH to render this block — that's our job.
 
 ---
 
@@ -274,7 +274,7 @@ Rare but possible (rapid melisma at low resolution). The chart's tick-grouping r
 
 Tracks published before this feature shipped won't have `[JamseshVocals]` — only the legacy Plan A `[Events]` lyric block (which is just `phrase_start` / `phrase_end` / `lyric <word>` entries with no pitch). The 64 existing `[ExpertVocals]` charts in SongInbox **are not being backfilled** to the new format. Render those with whatever fallback you already have; they're outside the scope of this feature.
 
-### 6.8 Existing Clone Hero `[ExpertVocals]` blocks
+### 6.8 Existing Jamsesh `[ExpertVocals]` blocks
 
 Some legacy charts have an `[ExpertVocals]` block (Phase Shift's vocal track format). **This is unrelated to `[JamseshVocals]`.** Both can exist in the same chart. Don't try to merge them; pick one source. New publishes from this pipeline ship `[JamseshVocals]` and either don't touch `[ExpertVocals]` or it isn't present.
 

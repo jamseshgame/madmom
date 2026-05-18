@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the madmom-based chart generator with a modular 8-stage pipeline (grid / onsets / pitch / quantization / lanes / playability / difficulty / serialize) that produces musically-faithful, playable Clone Hero charts for pitched stems.
+**Goal:** Replace the madmom-based chart generator with a modular 8-stage pipeline (grid / onsets / pitch / quantization / lanes / playability / difficulty / serialize) that produces musically-faithful, playable .charts for pitched stems.
 
 **Architecture:** Each stage is a pluggable engine with its own parameters; each stage's output is persisted JSON in `<track_dir>` or `<track_dir>/stems/<stem>/v2/`, with versioning and stale-marking. Editor exposes per-stage cards mirroring the existing lyrics workflow. Drums stays on the legacy madmom path but consumes the new shared `grid.json` from Phase 2 onwards.
 
@@ -5397,7 +5397,7 @@ def _serialize_synctrack(grid: dict[str, Any]) -> str:
     lines = []
     rows: list[tuple[int, str]] = []
     for ts in grid['time_sig_segments']:
-        # Clone Hero: TS <num> [<denom_pow>]
+        # Jamsesh: TS <num> [<denom_pow>]
         if ts.get('denom_pow', 2) == 2:
             rows.append((int(ts['tick_start']), f'TS {ts["num"]}'))
         else:
@@ -6551,7 +6551,7 @@ Expected: no TS errors, build succeeds.
 
 - [ ] **Step 3: Manual smoke**
 
-Start the backend (`venv/Scripts/python.exe run.py` from `web/backend/`) and the frontend (`npm run dev` from `web/frontend/`). Open a track in the editor, navigate to Generate tab, run S1 (manual), then S2..S7 with default engines for the guitar stem, build chart. Confirm `notes.chart` appears under `stems/guitar/v2/` and parses in Clone Hero.
+Start the backend (`venv/Scripts/python.exe run.py` from `web/backend/`) and the frontend (`npm run dev` from `web/frontend/`). Open a track in the editor, navigate to Generate tab, run S1 (manual), then S2..S7 with default engines for the guitar stem, build chart. Confirm `notes.chart` appears under `stems/guitar/v2/` and parses in Jamsesh.
 
 - [ ] **Step 4: Commit a "phase complete" marker**
 

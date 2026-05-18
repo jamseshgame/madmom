@@ -5,7 +5,7 @@ playback / pass-fail logic are the Unity side's responsibility.
 
 This document describes the on-disk format produced by **Publish to Game** for
 songs flagged as tutorials. Everything is back-compat: a non-tutorial-aware
-parser sees a normal Clone Hero song folder and ignores the new keys/section.
+parser sees a normal Jamsesh song folder and ignores the new keys/section.
 
 ---
 
@@ -38,7 +38,7 @@ vo/                             ; tutorial narration clips (NEW)
 
 The new bits are `tutorial_samples/`, `vo/`, plus a `[onboarding]` section in
 `song.ini` and a `[TutorialScript]` section in
-`notes_fixed_slides.chart`. **None of the standard Clone Hero pieces change.**
+`notes_fixed_slides.chart`. **None of the standard Jamsesh pieces change.**
 
 If `song.ini` does not contain `onboarding = True`, treat the song as a normal
 gameplay chart and ignore everything below.

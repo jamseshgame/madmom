@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 """
-CloneHeroChartGenerator -- generate Clone Hero .chart files from audio.
+JamseshChartGenerator -- generate .chart files from audio.
 
 This program analyzes an audio file to detect onsets, estimate tempo,
 and assign notes to 5 fret lanes based on spectral content. The output
-is a .chart file compatible with Clone Hero.
+is a .chart file compatible with the .chart format.
 
 === FRET RULES (HARD ENFORCED) ===
 
@@ -584,7 +584,7 @@ def compute_sustain_ticks(onset_idx, onsets, bpm, resolution, sustain_threshold)
 
 def write_chart(outfile, song_name, bpm, resolution, difficulty, notes, slide_events):
     """
-    Write a Clone Hero .chart file with notes and slide events.
+    Write a .chart file with notes and slide events.
 
     """
     bpm_value = int(round(bpm * 1000))
@@ -619,18 +619,18 @@ def write_chart(outfile, song_name, bpm, resolution, difficulty, notes, slide_ev
 
 
 def main():
-    """CloneHeroChartGenerator"""
+    """JamseshChartGenerator"""
 
     p = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description='''
-    Generate Clone Hero .chart files from audio.
+    Generate .chart files from audio.
 
     This program analyzes an audio file to detect onsets, estimate tempo,
     and assign frets based on spectral content. The output is a .chart
-    file compatible with Clone Hero.
+    file compatible with the .chart format.
 
-      $ CloneHeroChartGenerator input.wav -o output.chart
+      $ JamseshChartGenerator input.wav -o output.chart
 
     ''',
     )

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a per-syllable, pitched vocal beatmap from any track's vocals stem (via `torchcrepe` pitch detection + `pyphen` syllabification) and embed it as a custom `[JamseshVocals]` block in the published Clone Hero `notes.chart`. The vocals stem card's **Generate Beatmap** button rewires to drive the full pipeline (auto-fetch lyrics → pitch detect → build notes → save).
+**Goal:** Build a per-syllable, pitched vocal beatmap from any track's vocals stem (via `torchcrepe` pitch detection + `pyphen` syllabification) and embed it as a custom `[JamseshVocals]` block in the published Jamsesh `notes.chart`. The vocals stem card's **Generate Beatmap** button rewires to drive the full pipeline (auto-fetch lyrics → pitch detect → build notes → save).
 
 **Architecture:** New `app/services/vocals.py` owns pitch detection, syllabification, voicing classification, persistence, and chart injection. `app/routers/vocals.py` exposes REST + an SSE Job for `Generate Beatmap`. The Job orchestrates lyrics fetch (LRClib → Whisper fallback, both already implemented in Plan A), then runs CREPE on the vocals stem, aligns f0 frames to syllable windows, classifies voicing, and persists `vocal_notes.json` next to `lyrics.json`. Publish-to-Game writes `[JamseshVocals]` (preferred) or falls back to Plan A's `[Events]` lyric events when only lyrics exist.
 
@@ -1833,7 +1833,7 @@ Both `lyrics.json` and `vocal_notes.json` should be saved in the track stems dir
 
 ### Task 16: In-game render check
 
-- [ ] **Step 1: Open the published track in Clone Hero**
+- [ ] **Step 1: Open the published track in Jamsesh**
 
 Pull the SongInbox commit folder into a CH library, launch CH, play the song. CH may not natively render `[JamseshVocals]` (custom block). What to check:
 

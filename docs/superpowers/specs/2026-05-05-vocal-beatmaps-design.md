@@ -7,7 +7,7 @@
 
 ## Goal
 
-Produce a per-syllable, pitched vocal beatmap from any track's vocals stem and embed it in the published Clone Hero `notes.chart`. The output supersedes UltraStar's data model: every syllable carries pitch, duration, lyric text, voicing classification, dynamics envelope, and an optional sub-note pitch curve.
+Produce a per-syllable, pitched vocal beatmap from any track's vocals stem and embed it in the published Jamsesh `notes.chart`. The output supersedes UltraStar's data model: every syllable carries pitch, duration, lyric text, voicing classification, dynamics envelope, and an optional sub-note pitch curve.
 
 The user-facing flow: **Generate Beatmap on the vocals stem card** runs the full pipeline (lyrics → syllabification → CREPE pitch detection → alignment → write `vocal_notes.json`). Publish-to-Game injects a new `[JamseshVocals]` block alongside the existing instruments, slide notes, and tutorial events.
 

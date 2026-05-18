@@ -1089,7 +1089,7 @@ function parseChart(text: string, prefer?: string, customNames: Set<string> = ne
 
 const LANE_FILL = ['#22c55e', '#ef4444', '#eab308', '#3b82f6', '#f97316'] // 0-4
 const GUITAR_LABELS = ['Green', 'Red', 'Yellow', 'Blue', 'Orange']
-// 5-lane Clone Hero drums convention (kick, snare, hi-hat, tom, cymbal)
+// 5-lane Jamsesh drums convention (kick, snare, hi-hat, tom, cymbal)
 const DRUM_LABELS = ['Kick', 'Snare', 'Hi-hat', 'Tom', 'Cymbal']
 
 const SNAP_OPTIONS = [

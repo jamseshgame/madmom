@@ -73,7 +73,7 @@ DEMUCS_TO_GAME = {
     'piano': 'piano',
 }
 
-# Clone Hero song.ini field order
+# song.ini field order
 _SONG_INI_FIELDS = [
     'name', 'artist', 'album', 'genre', 'year', 'song_length', 'charter',
     'diff_band', 'diff_guitar', 'diff_rhythm', 'diff_bass', 'diff_drums', 'diff_keys',
@@ -84,11 +84,11 @@ _SONG_INI_FIELDS = [
 
 
 def write_song_ini(output_dir: Path, fields: dict) -> Path:
-    """Write a Clone Hero-compatible song.ini file.
+    """Write a Jamsesh-compatible song.ini file.
 
     Standard fields go in [song]. Any keys prefixed with `sample_` or any of
     the onboarding control keys (onboarding, tutorial_voice) get a separate
-    [onboarding] section so Clone Hero ignores them while the Jamsesh runtime
+    [onboarding] section so Jamsesh ignores them while the Jamsesh runtime
     can pick them up cleanly.
     """
     ini_path = output_dir / 'song.ini'

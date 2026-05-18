@@ -1,5 +1,5 @@
 """
-Wraps bin/CloneHeroChartGenerator and bin/JamseshMenu functions for web use.
+Wraps bin/JamseshChartGenerator and bin/JamseshMenu functions for web use.
 
 Imports the generator functions via importlib so we can call them in-process
 instead of shelling out, enabling progress callbacks for SSE.
@@ -20,7 +20,7 @@ import numpy as np
 from ..config import settings
 
 # ---------------------------------------------------------------------------
-# Import functions from bin/CloneHeroChartGenerator
+# Import functions from bin/JamseshChartGenerator
 # ---------------------------------------------------------------------------
 
 _generator_mod = None
@@ -30,7 +30,7 @@ def _load_generator():
     global _generator_mod
     if _generator_mod is not None:
         return _generator_mod
-    gen_path = settings.bin_dir / 'CloneHeroChartGenerator'
+    gen_path = settings.bin_dir / 'JamseshChartGenerator'
     # File has no .py extension — explicitly use SourceFileLoader
     loader = importlib.machinery.SourceFileLoader('chart_generator_bin', str(gen_path))
     spec = importlib.util.spec_from_loader('chart_generator_bin', loader, origin=str(gen_path))
@@ -53,7 +53,7 @@ DIFFICULTIES = [
 ]
 
 
-# Stem name → Clone Hero chart section suffix used by the publish flow when
+# Stem name → .chart section suffix used by the publish flow when
 # merging multiple per-stem beatmaps into one notes_fixed_slides.chart.
 # Stems not in this map are skipped from the merged chart.
 STEM_TO_SECTION_SUFFIX: dict[str, str] = {

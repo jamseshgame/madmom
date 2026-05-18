@@ -210,9 +210,9 @@ def read_audio_metadata(audio_path):
 
 def run_chart_generator(audio_path, output_path, song_name, difficulty, threshold, chord_threshold, quantize,
                         cache_out=None, cache_in=None):
-    """Run the CloneHeroChartGenerator for a single difficulty."""
+    """Run the JamseshChartGenerator for a single difficulty."""
     bin_dir = os.path.dirname(os.path.abspath(__file__))
-    generator = os.path.join(bin_dir, 'CloneHeroChartGenerator')
+    generator = os.path.join(bin_dir, 'JamseshChartGenerator')
 
     cmd = [
         sys.executable, generator,

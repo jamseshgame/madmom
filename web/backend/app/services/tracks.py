@@ -335,7 +335,7 @@ def get_beatmap_dir(track_id: str, beatmap_id: str) -> Path | None:
 
 def rename_beatmap_record(track_id: str, beatmap_id: str, song_name: str) -> dict | None:
     """Rename a beatmap. Updates the beatmaps[] entry and rewrites the [Song]
-    name in the beatmap's song.ini and notes.chart so a downstream Clone Hero
+    name in the beatmap's song.ini and notes.chart so a downstream Jamsesh
     consumer sees the new title too. Returns the updated record or None."""
     name = (song_name or '').strip()
     if not name:

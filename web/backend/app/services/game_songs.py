@@ -25,7 +25,7 @@ def _ensure_token():
 
 
 def _parse_song_ini(text: str) -> dict[str, str]:
-    """Parse a Clone Hero song.ini into a flat dict. Ignores section headers."""
+    """Parse a song.ini into a flat dict. Ignores section headers."""
     out: dict[str, str] = {}
     for raw in text.splitlines():
         line = raw.strip()

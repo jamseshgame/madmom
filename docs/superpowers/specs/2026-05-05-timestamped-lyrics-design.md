@@ -6,7 +6,7 @@
 
 ## Goal
 
-Let users attach time-synced lyrics to a track, surface them in the manual beatmap editor, and embed them in the published Clone Hero `notes.chart` so the song renders karaoke-style in-game.
+Let users attach time-synced lyrics to a track, surface them in the manual beatmap editor, and embed them in the published Jamsesh `notes.chart` so the song renders karaoke-style in-game.
 
 Two source paths:
 
@@ -200,7 +200,7 @@ Publish response gains `lyrics: { source, word_count, included: bool }` so the U
   - Full pipeline against a known LRClib hit (e.g., "Mr. Brightside") — assert chart contains expected events at expected ticks.
   - Whisper smoke test against a short fixture vocal file — assert non-empty word list and monotone timestamps.
 - **Manual**:
-  - Publish a real popular track end-to-end, open in Clone Hero, confirm karaoke renders.
+  - Publish a real popular track end-to-end, open in Jamsesh, confirm karaoke renders.
   - Edit lyrics in the manual editor, save, re-publish, re-open in CH, confirm changes propagated.
 
 ## Open questions

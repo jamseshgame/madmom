@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship a complete user-visible lyrics feature: fetch synced lyrics from LRClib or transcribe with Whisper, persist them per-track, preview in the UI, and embed them in the published Clone Hero `notes.chart` so the song renders karaoke-style in-game. Manual editor integration is **deferred to Plan B**.
+**Goal:** Ship a complete user-visible lyrics feature: fetch synced lyrics from LRClib or transcribe with Whisper, persist them per-track, preview in the UI, and embed them in the published Jamsesh `notes.chart` so the song renders karaoke-style in-game. Manual editor integration is **deferred to Plan B**.
 
 **Architecture:** A new `lyrics` backend service (LRClib client + faster-whisper wrapper + chart-event injection + persistence) exposed via REST + SSE. A shared React component handles fetch/preview/state for both the vocals stem card (Separation Complete view) and the Studio Library track detail. Publish-to-Game pulls `lyrics.json` and rewrites the merged chart's `[Events]` block.
 
@@ -1815,7 +1815,7 @@ Note where faster-whisper caches the model (typically `~/.cache/huggingface/`). 
 
 ### Task 18: In-game render check
 
-- [ ] **Step 1: Open in Clone Hero**
+- [ ] **Step 1: Open in Jamsesh**
 
 Pull the published track folder from SongInbox into a CH song library, launch CH, play the song, and confirm lyrics render karaoke-style with phrase highlighting matching the music.
 
