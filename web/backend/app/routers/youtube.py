@@ -11,10 +11,12 @@ import shutil
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, Form, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from ..config import settings
+from ..routers.auth import require_auth
+from ..services import youtube_cookies as yc
 from ..services.jobs import JobKind, JobStatus, create_job, get_job
 
 router = APIRouter(prefix='/api/youtube', tags=['youtube'])
@@ -24,29 +26,33 @@ _MAX_DURATION_SECONDS = 30 * 60  # 30 minutes
 _VIDEO_ID_RE = re.compile(r'^[A-Za-z0-9_-]{6,32}$')
 
 
-def _ytdl_common_opts() -> dict[str, Any]:
+def _ytdl_common_opts(username: str | None = None) -> dict[str, Any]:
     """Shared yt-dlp options applied to every call (search + download).
 
-    Includes:
-    - `cookiefile` when settings.youtube_cookies_file points at a readable
-      Netscape-format cookies.txt — needed on cloud IPs that YouTube has
-      flagged for bot detection.
-    - `extractor_args` forcing the Android InnerTube player client first,
-      which is more permissive about anonymous access than the web client
-      and often slips past the bot wall on its own. The web client stays
-      as a fallback.
+    Resolves cookies in priority order: per-user file (uploaded via
+    /api/youtube/cookies) → global settings.youtube_cookies_file → none.
+    Per-user wins so different sessions can use their own auth without
+    stepping on each other.
+
+    Also forces the Android InnerTube player client first (web stays as
+    a fallback) — more permissive about anonymous access than the web
+    client and often slips past the bot wall on its own.
     """
     opts: dict[str, Any] = {
         'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
     }
-    cookies = (settings.youtube_cookies_file or '').strip()
-    if cookies and Path(cookies).is_file():
+    cookies = yc.resolve_cookies_for_user(username)
+    if cookies:
         opts['cookiefile'] = cookies
     return opts
 
 
 @router.get('/search')
-async def search_youtube(q: str, limit: int = 10) -> list[dict[str, Any]]:
+async def search_youtube(
+    q: str,
+    limit: int = 10,
+    user: dict = Depends(require_auth),
+) -> list[dict[str, Any]]:
     """Search YouTube for the query and return up to `limit` results.
 
     Uses yt-dlp's `ytsearch<n>:` virtual URL with extract_flat — no full extract
@@ -61,7 +67,7 @@ async def search_youtube(q: str, limit: int = 10) -> list[dict[str, Any]]:
 
     def _search() -> list[dict[str, Any]]:
         opts = {
-            **_ytdl_common_opts(),
+            **_ytdl_common_opts(user.get('username')),
             'quiet': True,
             'no_warnings': True,
             'extract_flat': True,
@@ -103,7 +109,10 @@ async def search_youtube(q: str, limit: int = 10) -> list[dict[str, Any]]:
 
 
 @router.post('/download')
-async def start_youtube_download(video_id: str = Form(...)):
+async def start_youtube_download(
+    video_id: str = Form(...),
+    user: dict = Depends(require_auth),
+):
     """Kick off a yt-dlp download + MP3 extract as a Job. Returns job_id for
     the universal SSE / status endpoints to track."""
     video_id = (video_id or '').strip()
@@ -150,7 +159,7 @@ async def start_youtube_download(video_id: str = Form(...)):
                     )
 
             opts = {
-                **_ytdl_common_opts(),
+                **_ytdl_common_opts(user.get('username')),
                 'format': 'bestaudio/best',
                 'outtmpl': str(job_dir / '%(title).200B.%(ext)s'),
                 'quiet': True,
@@ -257,3 +266,44 @@ async def download_youtube_file(job_id: str):
         media_type='audio/mpeg',
         filename=path.name,
     )
+
+
+# ── Per-user cookies management ────────────────────────────────────────────
+
+@router.get('/cookies')
+async def get_cookies_status(user: dict = Depends(require_auth)) -> dict[str, Any]:
+    """Return whether the current user has uploaded YouTube cookies + when."""
+    status = yc.cookies_status(user.get('username'))
+    # Tell the UI if the global fallback is configured so it can show a
+    # different empty-state message ("server-wide cookies in use" vs.
+    # "no cookies — searches may be blocked").
+    status['global_fallback_configured'] = bool(
+        (settings.youtube_cookies_file or '').strip()
+        and Path(settings.youtube_cookies_file).is_file()
+    )
+    return status
+
+
+@router.post('/cookies')
+async def upload_cookies(
+    file: UploadFile = File(...),
+    user: dict = Depends(require_auth),
+) -> dict[str, Any]:
+    """Upload a Netscape-format cookies.txt. Replaces any previous file."""
+    if file.size and file.size > 1_000_000:
+        # Netscape cookies.txt for a YouTube session is ~10 KB. 1 MB is a
+        # generous ceiling that catches misuploads (whole-profile JSON,
+        # screenshots, etc.).
+        raise HTTPException(413, 'cookies file too large (max 1 MB)')
+    content = await file.read()
+    try:
+        return yc.save_cookies(user['username'], content)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.delete('/cookies')
+async def delete_cookies(user: dict = Depends(require_auth)) -> dict[str, Any]:
+    """Remove the current user's cookies file, if any."""
+    removed = yc.delete_cookies(user['username'])
+    return {'removed': removed, 'has_cookies': False}

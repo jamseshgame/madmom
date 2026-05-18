@@ -174,6 +174,121 @@ interface YouTubeResult {
   url: string
 }
 
+interface CookieStatus {
+  has_cookies: boolean
+  uploaded_at: string | null
+  size_bytes: number
+  global_fallback_configured?: boolean
+}
+
+const COOKIE_EXTENSION_URL =
+  'https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc'
+
+function CookiesRow() {
+  const [status, setStatus] = useState<CookieStatus | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const fileRef = useRef<HTMLInputElement | null>(null)
+
+  const reload = useCallback(() => {
+    fetch('/api/youtube/cookies').then(r => r.json()).then(setStatus).catch(() => {})
+  }, [])
+  useEffect(() => { reload() }, [reload])
+
+  const upload = async (file: File) => {
+    setBusy(true); setErr('')
+    try {
+      const fd = new FormData()
+      fd.append('file', file)
+      const r = await fetch('/api/youtube/cookies', { method: 'POST', body: fd })
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}))
+        throw new Error(e.detail || `Upload failed (${r.status})`)
+      }
+      setStatus(await r.json())
+    } catch (e) {
+      setErr((e as Error).message)
+    } finally {
+      setBusy(false)
+      if (fileRef.current) fileRef.current.value = ''
+    }
+  }
+
+  const clear = async () => {
+    setBusy(true); setErr('')
+    try {
+      const r = await fetch('/api/youtube/cookies', { method: 'DELETE' })
+      if (!r.ok) throw new Error(`Delete failed (${r.status})`)
+      reload()
+    } catch (e) {
+      setErr((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const ago = (iso: string | null): string => {
+    if (!iso) return ''
+    const ms = Date.now() - new Date(iso).getTime()
+    const days = Math.floor(ms / 86_400_000)
+    if (days >= 1) return `${days}d ago`
+    const hrs = Math.floor(ms / 3_600_000)
+    if (hrs >= 1) return `${hrs}h ago`
+    const mins = Math.floor(ms / 60_000)
+    return `${Math.max(1, mins)}m ago`
+  }
+
+  const statusLine = status?.has_cookies
+    ? <>
+        <span className="text-emerald-400">✓ Cookies on file</span>
+        {status.uploaded_at && <span className="text-gray-600"> · uploaded {ago(status.uploaded_at)}</span>}
+      </>
+    : status?.global_fallback_configured
+      ? <span className="text-gray-400">Using server-wide cookies (admin-configured)</span>
+      : <span className="text-amber-400">No cookies — YouTube may block searches on this server</span>
+
+  return (
+    <div className="text-xs text-gray-400 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-gray-800/60 pt-2">
+      <span className="font-medium text-gray-500">YouTube cookies:</span>
+      <span>{statusLine}</span>
+      <span className="grow" />
+      <a
+        href={COOKIE_EXTENSION_URL}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-jam-400 hover:text-jam-300 underline underline-offset-2"
+        title="Chrome/Edge extension that exports the active tab's cookies as a Netscape cookies.txt"
+      >
+        Get the extension ↗
+      </a>
+      <input
+        ref={fileRef}
+        type="file"
+        accept=".txt,text/plain"
+        className="hidden"
+        onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(f) }}
+      />
+      <button
+        onClick={() => fileRef.current?.click()}
+        disabled={busy}
+        className="px-2 py-0.5 bg-jam-700/40 hover:bg-jam-700/70 border border-jam-700 text-jam-200 rounded text-[11px] font-medium disabled:opacity-40 transition-colors"
+      >
+        {busy ? '…' : status?.has_cookies ? 'Replace' : 'Upload cookies.txt'}
+      </button>
+      {status?.has_cookies && (
+        <button
+          onClick={clear}
+          disabled={busy}
+          className="px-2 py-0.5 bg-red-900/30 hover:bg-red-800/50 border border-red-800/60 text-red-300 rounded text-[11px] disabled:opacity-40 transition-colors"
+        >
+          Clear
+        </button>
+      )}
+      {err && <span className="basis-full text-red-400">{err}</span>}
+    </div>
+  )
+}
+
 function YouTubeSearch({ onPicked }: { onPicked: (file: File) => void }) {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<YouTubeResult[] | null>(null)
@@ -297,6 +412,7 @@ function YouTubeSearch({ onPicked }: { onPicked: (file: File) => void }) {
           {searching ? 'Searching…' : 'Search'}
         </button>
       </form>
+      <CookiesRow />
       {searchError && <div className="text-xs text-red-400">{searchError}</div>}
       {pullError && <div className="text-xs text-red-400">{pullError}</div>}
 
