@@ -24,6 +24,13 @@ class Settings(BaseSettings):
 
     elevenlabs_api_key: str = ''
 
+    # Optional Netscape-format cookies.txt for yt-dlp. YouTube increasingly
+    # gates anonymous IPs (especially cloud / DO droplets) behind a
+    # "confirm you're not a bot" wall; passing cookies from a signed-in
+    # browser session sidesteps it. Leave empty to skip cookies entirely
+    # (works on home networks but not on the droplet most of the time).
+    youtube_cookies_file: str = ''
+
     madmom_root: str = str(Path(__file__).resolve().parents[4])
 
     # Default chart-generation model the editor offers when creating a new

@@ -24,6 +24,27 @@ _MAX_DURATION_SECONDS = 30 * 60  # 30 minutes
 _VIDEO_ID_RE = re.compile(r'^[A-Za-z0-9_-]{6,32}$')
 
 
+def _ytdl_common_opts() -> dict[str, Any]:
+    """Shared yt-dlp options applied to every call (search + download).
+
+    Includes:
+    - `cookiefile` when settings.youtube_cookies_file points at a readable
+      Netscape-format cookies.txt — needed on cloud IPs that YouTube has
+      flagged for bot detection.
+    - `extractor_args` forcing the Android InnerTube player client first,
+      which is more permissive about anonymous access than the web client
+      and often slips past the bot wall on its own. The web client stays
+      as a fallback.
+    """
+    opts: dict[str, Any] = {
+        'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
+    }
+    cookies = (settings.youtube_cookies_file or '').strip()
+    if cookies and Path(cookies).is_file():
+        opts['cookiefile'] = cookies
+    return opts
+
+
 @router.get('/search')
 async def search_youtube(q: str, limit: int = 10) -> list[dict[str, Any]]:
     """Search YouTube for the query and return up to `limit` results.
@@ -40,6 +61,7 @@ async def search_youtube(q: str, limit: int = 10) -> list[dict[str, Any]]:
 
     def _search() -> list[dict[str, Any]]:
         opts = {
+            **_ytdl_common_opts(),
             'quiet': True,
             'no_warnings': True,
             'extract_flat': True,
@@ -128,6 +150,7 @@ async def start_youtube_download(video_id: str = Form(...)):
                     )
 
             opts = {
+                **_ytdl_common_opts(),
                 'format': 'bestaudio/best',
                 'outtmpl': str(job_dir / '%(title).200B.%(ext)s'),
                 'quiet': True,
@@ -195,7 +218,14 @@ async def start_youtube_download(video_id: str = Form(...)):
                 return
             import traceback
             print(f'[youtube] Job {job.id} failed: {traceback.format_exc()}')
-            await job.send_error(str(e) or 'YouTube download failed')
+            msg = str(e) or 'YouTube download failed'
+            if "Sign in to confirm" in msg or 'not a bot' in msg.lower():
+                msg += (
+                    '\n\nYouTube has flagged this server\'s IP. Add a Netscape-format '
+                    'cookies.txt exported from a signed-in browser and set '
+                    'YOUTUBE_COOKIES_FILE in web/.env to its path on disk.'
+                )
+            await job.send_error(msg)
 
     job.task = asyncio.create_task(_run())
     return {'job_id': job.id}
