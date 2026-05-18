@@ -2,7 +2,7 @@
 the global registry via side effect."""
 from __future__ import annotations
 
-from . import grid_librosa, grid_manual  # noqa: F401
+from . import grid_librosa, grid_manual, onsets_librosa  # noqa: F401
 
 try:
     from . import grid_allinone  # noqa: F401
