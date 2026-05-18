@@ -15,3 +15,8 @@ chatterbox-tts==0.1.7
 #   May not install cleanly on Windows due to native deps; engine is
 #   guarded with try/except import, tests use pytest.importorskip.
 allin1>=1.0.0
+
+# - basic-pitch: Spotify's polyphonic note transcription model.
+#   May not install cleanly on Windows due to TensorFlow native deps.
+#   Lazy-loaded on first use; tests use pytest.importorskip.
+basic-pitch>=0.3.0

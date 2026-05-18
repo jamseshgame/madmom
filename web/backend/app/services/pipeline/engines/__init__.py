@@ -9,3 +9,9 @@ try:
 except ImportError:
     # all-in-one is an extras dep — skip when not installed
     pass
+
+try:
+    from . import onsets_basic_pitch, pitches_basic_pitch  # noqa: F401
+except ImportError:
+    # basic-pitch is an extras dep — skip when not installed
+    pass
