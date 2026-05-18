@@ -42,3 +42,17 @@ def test_avoid_cramps_demotes_big_jumps():
                            on_progress=_noop)
     second = out['lanes'][1]['frets'][0]
     assert second <= 3
+
+
+def test_chain_runs_engines_in_order():
+    from app.services.pipeline.engines.playability_engines import run_chain
+    inp = _lanes([(0, 2), (96, 2), (192, 2), (288, 2), (384, 2), (480, 0)])
+    out = run_chain(
+        audio_path=None,
+        upstream={'lanes_expert': inp},
+        params={'chain': ['spread-fretboard', 'avoid-cramps'],
+                'spread-fretboard': {'max_same_fret_run': 4},
+                'avoid-cramps': {'max_jump': 3, 'min_gap_ticks': 96}},
+        on_progress=_noop,
+    )
+    assert any(e['reason'] == 'same_fret_run' for e in out['edits'])

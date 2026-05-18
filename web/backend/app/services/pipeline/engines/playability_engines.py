@@ -102,6 +102,38 @@ def run_avoid_cramps(audio_path, upstream, params, on_progress):
     }
 
 
+_CHAIN_PARAMS = {
+    'chain': {'type': 'enum', 'options': ['spread-fretboard', 'avoid-cramps'],
+              'default': ['spread-fretboard'], 'label': 'Engine chain (in order)'},
+}
+
+
+def run_chain(audio_path, upstream, params, on_progress):
+    chain = params.get('chain') or []
+    if isinstance(chain, str):
+        chain = [chain]
+    runners = {'spread-fretboard': run_spread_fretboard, 'avoid-cramps': run_avoid_cramps}
+    current_input = upstream.get('lanes_expert')
+    if current_input is None:
+        raise ValueError('S6 requires upstream lanes_expert')
+    all_edits = []
+    for step, engine_id in enumerate(chain):
+        runner = runners.get(engine_id)
+        if runner is None:
+            continue
+        sub_params = params.get(engine_id, {})
+        on_progress('chain', int(20 + 60 * step / max(1, len(chain))),
+                    f'Running {engine_id}…')
+        result = runner(audio_path, {'lanes_expert': current_input}, sub_params, lambda *a: None)
+        all_edits.extend(result.get('edits', []))
+        current_input = {'lanes': result['lanes']}
+    return {
+        'engine': 'chain', 'params': params,
+        'generated_at': dt.datetime.utcnow().isoformat() + 'Z',
+        'lanes': current_input['lanes'], 'edits': all_edits,
+    }
+
+
 for _id, _name, _schema, _runner in (
     ('identity', 'Identity (pass-through, default)', {}, run_identity),
     ('spread-fretboard', 'Spread fretboard (anti-repetition)', _SPREAD_PARAMS, run_spread_fretboard),
@@ -110,3 +142,8 @@ for _id, _name, _schema, _runner in (
     register_engine(Stage.LANES_FILTERED, EngineSpec(
         id=_id, display_name=_name, params_schema=_schema, runner=_runner,
     ))
+
+register_engine(Stage.LANES_FILTERED, EngineSpec(
+    id='chain', display_name='Chain (compose engines)',
+    params_schema=_CHAIN_PARAMS, runner=run_chain,
+))
