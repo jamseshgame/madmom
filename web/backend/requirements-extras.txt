@@ -20,3 +20,8 @@ allin1>=1.0.0
 #   May not install cleanly on Windows due to TensorFlow native deps.
 #   Lazy-loaded on first use; tests use pytest.importorskip.
 basic-pitch>=0.3.0
+
+# - aubio: C-backed audio processing library for fast onset detection.
+#   May not install cleanly on Windows due to C/Cython native deps.
+#   Engine is guarded with try/except import; function lazy-loads aubio.
+aubio>=0.4.9

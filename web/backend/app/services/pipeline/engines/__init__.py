@@ -15,3 +15,9 @@ try:
 except ImportError:
     # basic-pitch is an extras dep — skip when not installed
     pass
+
+try:
+    from . import onsets_aubio  # noqa: F401
+except ImportError:
+    # aubio is an extras dep — skip when not installed
+    pass
