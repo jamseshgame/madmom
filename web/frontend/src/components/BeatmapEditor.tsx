@@ -11,6 +11,7 @@ import { WaveformStrip } from './WaveformStrip'
 import { ImportedSourcesPanel } from './ImportedSourcesPanel'
 import { ClipsLibraryPanel } from './ClipsLibraryPanel'
 import { SourcePickerModal } from './SourcePickerModal'
+import { GenerateTab } from './pipeline/GenerateTab'
 
 // .chart parsing ------------------------------------------------------------
 
@@ -7870,6 +7871,10 @@ export default function BeatmapEditor() {
               <span className="font-mono text-gray-300"> Del</span> delete ·
               <span className="font-mono text-gray-300"> Space</span> play
             </p>
+          </CollapsibleSection>
+
+          <CollapsibleSection id="generate" title="Generate" defaultOpen={false}>
+            <GenerateTab trackId={trackId} />
           </CollapsibleSection>
         </aside>
 
