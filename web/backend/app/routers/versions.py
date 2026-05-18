@@ -52,8 +52,36 @@ PACKAGES: list[dict[str, str | bool]] = [
     },
     {
         'name': 'torchcrepe',
-        'used_for': 'Per-frame pitch detection on vocal stems for beatmaps',
+        'used_for': 'Per-frame pitch detection on vocal stems for beatmaps; also the `crepe` engine in pipeline V2 stage S3',
         'license': 'MIT',
+    },
+    {
+        'name': 'librosa',
+        'used_for': 'Pipeline V2 — audio loading, librosa-beat grid engine (S1), librosa-onset (S2), pyin pitch (S3), MFCC sections, Krumhansl-Schmuckler key detection',
+        'license': 'ISC',
+    },
+    {
+        'name': 'soundfile',
+        'used_for': 'Audio file I/O backing librosa.load — required for the V2 pipeline\'s audio_io helper',
+        'license': 'BSD-3-Clause',
+    },
+    {
+        'name': 'basic-pitch',
+        'used_for': 'Pipeline V2 — polyphonic note transcription (Spotify ICASSP 2022 model) powering the basic-pitch onsets engine (S2) and the basic-pitch pitches engine (S3) via one cached inference',
+        'license': 'Apache-2.0',
+        'optional': True,
+    },
+    {
+        'name': 'allin1',
+        'used_for': 'Pipeline V2 — joint beat + downbeat + tempo + segment detection (mir-aidj/all-in-one) powering the all-in-one grid engine (S1). ~150 MB checkpoint downloads on first call',
+        'license': 'MIT',
+        'optional': True,
+    },
+    {
+        'name': 'aubio',
+        'used_for': 'Pipeline V2 — fast C-backed onset detection (HFC / complex / energy / specflux methods) powering the aubio-complex engine (S2)',
+        'license': 'GPL-3.0',
+        'optional': True,
     },
     {
         'name': 'syllabipy',
