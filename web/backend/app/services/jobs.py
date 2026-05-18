@@ -32,6 +32,7 @@ class JobKind(str, Enum):
     MANUAL_STEMS = 'manual_stems'
     BEATMAP = 'beatmap'
     YOUTUBE = 'youtube'
+    PIPELINE_STAGE = 'pipeline_stage'
     OTHER = 'other'
 
 

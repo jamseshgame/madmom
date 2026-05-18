@@ -86,3 +86,8 @@ def test_mark_downstream_stale_from_pitches(tmp_track):
     assert guitar.onsets.stale is False  # upstream of pitches
     assert guitar.pitches.stale is False  # is the one that changed
     assert guitar.quantized.stale is True
+
+
+def test_pipeline_stage_job_kind_exists():
+    from app.services.jobs import JobKind
+    assert JobKind.PIPELINE_STAGE.value == 'pipeline_stage'
