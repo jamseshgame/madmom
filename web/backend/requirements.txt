@@ -42,3 +42,6 @@ torchcrepe>=0.0.23
 syllabipy>=0.2
 # Password hashing for the multi-user account store.
 bcrypt>=4.0
+# Audio loading via librosa (resampling, mono downmix).
+librosa>=0.10.1
+soundfile>=0.12.1
