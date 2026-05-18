@@ -47,3 +47,7 @@
 doapi.txt
 elevenapi.txt
 web/.env
+
+# Local debris
+test_output.txt
+track-detail.yml
