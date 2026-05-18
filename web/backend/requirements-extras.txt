@@ -10,3 +10,8 @@
 #   numpy 2). Runtime works fine on the newer trio — Resemble's pin is
 #   defensive. Lazy-loaded on first /api/tts/synth call.
 chatterbox-tts==0.1.7
+
+# - allin1: mir-aidj/all-in-one joint beat+downbeat+tempo+segment model.
+#   May not install cleanly on Windows due to native deps; engine is
+#   guarded with try/except import, tests use pytest.importorskip.
+allin1>=1.0.0
