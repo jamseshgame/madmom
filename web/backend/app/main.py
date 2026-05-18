@@ -23,6 +23,7 @@ from .routers import (
     highways,
     jobs,
     lyrics,
+    pipeline,
     sample_packs,
     scene_events,
     stems,
@@ -81,6 +82,7 @@ app.include_router(youtube.router, dependencies=_auth_dep)
 app.include_router(tutorial.router, dependencies=_auth_dep)
 app.include_router(elevenlabs.router, dependencies=_auth_dep)
 app.include_router(lyrics.router, dependencies=_auth_dep)
+app.include_router(pipeline.router)
 app.include_router(vocals.router, dependencies=_auth_dep)
 app.include_router(sample_packs.router, dependencies=_auth_dep)
 app.include_router(scene_events.router, dependencies=_auth_dep)
