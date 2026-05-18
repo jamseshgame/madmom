@@ -19,6 +19,8 @@ from fastapi import APIRouter, Body, HTTPException, Query
 from ..config import settings
 from ..services.jobs import JobKind, create_job, get_job
 from ..services.pipeline.registry import Stage, engines_catalog, get_engine
+
+_S7_STAGES = {Stage.LANES_HARD, Stage.LANES_MEDIUM, Stage.LANES_EASY}
 from ..services.pipeline.state import (
     PipelineState,
     StageState,
@@ -168,6 +170,24 @@ def _make_stage_subrouter(stage: Stage) -> APIRouter:
                 payload.setdefault('params', params)
                 payload.setdefault('generated_at',
                                    __import__('datetime').datetime.utcnow().isoformat() + 'Z')
+
+                # S7 engines return {'by_difficulty': {'easy': {...}, 'medium': {...}, 'hard': {...}}}
+                # Write each as a separate stage's active file.
+                if stage in _S7_STAGES and 'by_difficulty' in payload:
+                    bd = payload['by_difficulty']
+                    for diff_key, diff_stage in (
+                        ('hard', Stage.LANES_HARD), ('medium', Stage.LANES_MEDIUM), ('easy', Stage.LANES_EASY)
+                    ):
+                        if diff_key in bd:
+                            diff_payload = dict(bd[diff_key])
+                            diff_payload.setdefault('engine', engine_id)
+                            diff_payload.setdefault('params', params)
+                            save_version_and_activate(td, diff_stage, stem_ or None, diff_payload)
+                            _update_state_after_run(td, diff_stage, stem_ or None,
+                                                    diff_payload.get('engine', 'unknown'), diff_payload)
+                    mark_downstream_stale(td, changed_stage=stage, stem=stem_ or None)
+                    await job.send_done({'stage': 'lanes_(hard|medium|easy)', 'engine': engine_id})
+                    return
 
                 save_version_and_activate(td, stage, stem_ or None, payload)
                 _update_state_after_run(td, stage, stem_ or None, engine_id, payload)

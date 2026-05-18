@@ -24,12 +24,14 @@ def run_identity(audio_path, upstream, params, on_progress):
     inp = upstream.get('lanes_expert')
     if inp is None:
         raise ValueError('S6 requires upstream lanes_expert')
-    return {
+    result = {
         'engine': 'identity', 'params': params,
         'generated_at': dt.datetime.utcnow().isoformat() + 'Z',
         'lanes': inp['lanes'],
         'edits': [],
     }
+    result['metric_weights'] = inp.get('metric_weights', {})
+    return result
 
 
 def run_spread_fretboard(audio_path, upstream, params, on_progress):
@@ -60,11 +62,13 @@ def run_spread_fretboard(audio_path, upstream, params, on_progress):
             run_count = 1
             run_fret = f
     on_progress('done', 100, f'{len(edits)} displacements')
-    return {
+    result = {
         'engine': 'spread-fretboard', 'params': params,
         'generated_at': dt.datetime.utcnow().isoformat() + 'Z',
         'lanes': lanes, 'edits': edits,
     }
+    result['metric_weights'] = inp.get('metric_weights', {})
+    return result
 
 
 def run_avoid_cramps(audio_path, upstream, params, on_progress):
@@ -95,11 +99,13 @@ def run_avoid_cramps(audio_path, upstream, params, on_progress):
                       'reason': 'max_jump_exceeded'})
         curr['frets'] = [new_f]
     on_progress('done', 100, f'{len(edits)} demotions')
-    return {
+    result = {
         'engine': 'avoid-cramps', 'params': params,
         'generated_at': dt.datetime.utcnow().isoformat() + 'Z',
         'lanes': lanes, 'edits': edits,
     }
+    result['metric_weights'] = inp.get('metric_weights', {})
+    return result
 
 
 _CHAIN_PARAMS = {
@@ -131,6 +137,7 @@ def run_chain(audio_path, upstream, params, on_progress):
         'engine': 'chain', 'params': params,
         'generated_at': dt.datetime.utcnow().isoformat() + 'Z',
         'lanes': current_input['lanes'], 'edits': all_edits,
+        'metric_weights': upstream.get('lanes_expert', {}).get('metric_weights', {}),
     }
 
 

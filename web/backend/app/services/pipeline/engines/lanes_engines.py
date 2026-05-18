@@ -95,9 +95,15 @@ def run_section_sliding(audio_path, upstream, params, on_progress):
         lanes_out.extend(_emit(events, grid, section_label, edges, hi, lo, chord_thresh))
     lanes_out.sort(key=lambda x: x['tick'])
     on_progress('done', 100, f'{len(lanes_out)} lane events')
+    metric_weights = {
+        str(e['tick']): int(e.get('metric_weight', 0))
+        for e in quant['events']
+        if not e.get('dropped')
+    }
     return {'engine': 'section-sliding', 'params': params,
             'generated_at': datetime.datetime.now(datetime.UTC).isoformat().replace('+00:00', 'Z'),
-            'lanes': lanes_out}
+            'lanes': lanes_out,
+            'metric_weights': metric_weights}
 
 
 def run_global_percentile(audio_path, upstream, params, on_progress):
@@ -120,9 +126,15 @@ def run_global_percentile(audio_path, upstream, params, on_progress):
     lanes_out = _emit(events, grid, 'song', edges, hi, lo, chord_thresh)
     lanes_out.sort(key=lambda x: x['tick'])
     on_progress('done', 100, f'{len(lanes_out)} lane events')
+    metric_weights = {
+        str(e['tick']): int(e.get('metric_weight', 0))
+        for e in quant['events']
+        if not e.get('dropped')
+    }
     return {'engine': 'global-percentile', 'params': params,
             'generated_at': datetime.datetime.now(datetime.UTC).isoformat().replace('+00:00', 'Z'),
-            'lanes': lanes_out}
+            'lanes': lanes_out,
+            'metric_weights': metric_weights}
 
 
 _KEY_TO_PC = {'C': 0, 'C#': 1, 'D': 2, 'D#': 3, 'E': 4, 'F': 5, 'F#': 6,
@@ -164,9 +176,15 @@ def run_key_relative(audio_path, upstream, params, on_progress):
                               'section': 'song'})
     lanes_out.sort(key=lambda x: x['tick'])
     on_progress('done', 100, f'{len(lanes_out)} lane events')
+    metric_weights = {
+        str(e['tick']): int(e.get('metric_weight', 0))
+        for e in quant['events']
+        if not e.get('dropped')
+    }
     return {'engine': 'key-relative', 'params': params,
             'generated_at': datetime.datetime.now(datetime.UTC).isoformat().replace('+00:00', 'Z'),
-            'lanes': lanes_out}
+            'lanes': lanes_out,
+            'metric_weights': metric_weights}
 
 
 for _id, _name, _runner in (
