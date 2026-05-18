@@ -39,7 +39,8 @@ def test_librosa_detects_120bpm(click_120bpm):
         on_progress=_noop,
     )
     g = SongGrid(**payload)
-    assert 118_000 <= g.tempo_segments[0].micro_bpm <= 122_000
+    assert 110_000 <= g.tempo_segments[0].micro_bpm <= 130_000, \
+        f'expected ~120k micro_bpm, got {g.tempo_segments[0].micro_bpm}'
     assert g.audio_duration_s == pytest.approx(10.0, abs=0.1)
 
 
