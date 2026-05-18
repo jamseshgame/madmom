@@ -31,3 +31,5 @@ try:
 except ImportError:
     # torchcrepe is an extras dep — skip when not installed
     pass
+
+from . import quantized_engines  # noqa: F401
