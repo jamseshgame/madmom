@@ -85,3 +85,35 @@ def test_save_creates_parent_dirs_for_stem(tmp_track):
         payload={'engine': 'basic-pitch', 'params': {}, 'generated_at': '2026-05-18T11:00:00Z'},
     )
     assert (tmp_track / 'stems' / 'guitar' / 'v2' / 'onsets.json').exists()
+
+
+def test_move_active_to_stale_for_grid(tmp_track):
+    from app.services.pipeline.storage import move_active_to_stale
+    # Set up a track-level active file
+    save_version_and_activate(
+        tmp_track, Stage.GRID, stem=None,
+        payload={'engine': 'manual', 'params': {}, 'generated_at': '2026-05-18T11:00:00Z'},
+    )
+    moved = move_active_to_stale(tmp_track, Stage.GRID, stem=None)
+    assert moved is not None
+    assert moved.exists()
+    assert not (tmp_track / 'grid.json').exists()
+    assert moved.parent == tmp_track / '_stale'
+
+
+def test_move_active_to_stale_for_stem_stage(tmp_track):
+    from app.services.pipeline.storage import move_active_to_stale
+    save_version_and_activate(
+        tmp_track, Stage.ONSETS, stem='guitar',
+        payload={'engine': 'basic-pitch', 'params': {}, 'generated_at': '2026-05-18T11:00:00Z'},
+    )
+    moved = move_active_to_stale(tmp_track, Stage.ONSETS, stem='guitar')
+    assert moved is not None
+    assert not (tmp_track / 'stems' / 'guitar' / 'v2' / 'onsets.json').exists()
+    assert moved.parent == tmp_track / 'stems' / 'guitar' / 'v2' / '_stale'
+
+
+def test_move_active_to_stale_noop_when_no_active(tmp_track):
+    from app.services.pipeline.storage import move_active_to_stale
+    moved = move_active_to_stale(tmp_track, Stage.GRID, stem=None)
+    assert moved is None

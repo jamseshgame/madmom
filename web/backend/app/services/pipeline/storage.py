@@ -145,3 +145,21 @@ def list_versions(
         )
         e['active'] = is_active
     return entries
+
+
+def move_active_to_stale(
+    track_dir_: Path,
+    stage: Stage,
+    stem: str | None,
+) -> Path | None:
+    """Move the active file for `stage` (if any) into the `_stale/` folder
+    with a timestamp suffix. Returns the destination path, or None if there
+    was no active file to move."""
+    active = stage_path(track_dir_, stage, stem)
+    if not active.exists():
+        return None
+    sdir = stale_dir(track_dir_, stage, stem)
+    sdir.mkdir(parents=True, exist_ok=True)
+    dest = sdir / f'{stage.value}_{_iso_stamp()}.json'
+    active.rename(dest)
+    return dest

@@ -19,6 +19,8 @@ from .storage import (
     archive_dir,
     stale_dir,
     save_version_and_activate,
+    list_versions,
+    move_active_to_stale,
 )
 from .types import (
     StageId,
@@ -46,6 +48,8 @@ __all__ = [
     'archive_dir',
     'stale_dir',
     'save_version_and_activate',
+    'list_versions',
+    'move_active_to_stale',
     'StageId',
     'EngineId',
     'EngineParams',
