@@ -70,18 +70,26 @@ PACKAGES: list[dict[str, str | bool]] = [
         'used_for': 'Pipeline V2 — polyphonic note transcription (Spotify ICASSP 2022 model) powering the basic-pitch onsets engine (S2) and the basic-pitch pitches engine (S3) via one cached inference',
         'license': 'Apache-2.0',
         'optional': True,
+        # basic-pitch's pyproject pins an old numpy that fails to build from
+        # source on Python 3.12+ (pkgutil.ImpImporter / distutils.msvccompiler
+        # removed). Install --no-deps; the venv already has a working numpy
+        # via the main requirements.txt. Matches deploy.sh's pattern for
+        # requirements-extras.txt.
+        'no_deps': True,
     },
     {
         'name': 'allin1',
         'used_for': 'Pipeline V2 — joint beat + downbeat + tempo + segment detection (mir-aidj/all-in-one) powering the all-in-one grid engine (S1). ~150 MB checkpoint downloads on first call',
         'license': 'MIT',
         'optional': True,
+        'no_deps': True,
     },
     {
         'name': 'aubio',
         'used_for': 'Pipeline V2 — fast C-backed onset detection (HFC / complex / energy / specflux methods) powering the aubio-complex engine (S2)',
         'license': 'GPL-3.0',
         'optional': True,
+        'no_deps': True,
     },
     {
         'name': 'syllabipy',
@@ -210,6 +218,7 @@ async def get_versions():
             'license': cfg.get('license', ''),
             'optional': bool(cfg.get('optional', False)),
             'pinned': bool(cfg.get('pinned', False)),
+            'no_deps': bool(cfg.get('no_deps', False)),
         })
 
     by_name = {p['name']: p for p in packages}
@@ -246,12 +255,18 @@ async def upgrade_package(package: str):
     if cfg and cfg.get('pinned'):
         raise HTTPException(409, f'{package} is pinned (local install) — upgrade manually')
 
+    no_deps = bool(cfg.get('no_deps', False)) if cfg else False
     job = create_job(kind=JobKind.OTHER, title=f'pip upgrade {package}')
 
     async def _run() -> None:
         try:
             await job.send('pip', 5, f'Resolving latest {package} on PyPI…')
             cmd = [sys.executable, '-m', 'pip', 'install', '--upgrade', '--no-input', package]
+            if no_deps:
+                # Some packages (notably basic-pitch) pin build-time numpy/setuptools
+                # versions that won't build on modern Python; install bare and trust
+                # the venv's existing deps. Matches deploy.sh for requirements-extras.txt.
+                cmd.insert(-1, '--no-deps')
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,

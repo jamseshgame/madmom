@@ -9,6 +9,7 @@ type PackageStatus = {
   license: string
   optional: boolean
   pinned: boolean
+  no_deps?: boolean
 }
 
 type Versions = {
@@ -212,9 +213,10 @@ function UpgradePanel({
   if (!target || phase === 'idle') return null
   const isFreshInstall = target.installed == null
   const verb = isFreshInstall ? 'Install' : 'Upgrade'
+  const noDepsFlag = target.no_deps ? ' --no-deps' : ''
   const pipCmd = isFreshInstall
-    ? `pip install ${target.name}`
-    : `pip install --upgrade ${target.name}`
+    ? `pip install${noDepsFlag} ${target.name}`
+    : `pip install --upgrade${noDepsFlag} ${target.name}`
   return (
     <div
       className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center px-4"
@@ -243,9 +245,11 @@ function UpgradePanel({
                 Runs <span className="font-mono">{pipCmd}</span> in the backend venv.
               </p>
               <p className="text-amber-200/80">
-                {isFreshInstall
-                  ? <>This package is optional — pip will pull its full dependency tree, which can be large for ML packages (TensorFlow, PyTorch, model checkpoints). After install, the backend service needs a quick restart to pick up the new engine.</>
-                  : <>Pip's resolver may pull other packages along with it. After install, the backend service needs a quick restart to pick up the new code.</>}
+                {target.no_deps
+                  ? <>Installs <span className="font-mono">--no-deps</span> — pip won't pull dependencies because this package pins build-time versions that don't build on modern Python. The venv's existing numpy/torch satisfy what it actually needs at runtime. After install, restart the backend to register the new engine.</>
+                  : isFreshInstall
+                    ? <>This package is optional — pip will pull its full dependency tree, which can be large for ML packages (TensorFlow, PyTorch, model checkpoints). After install, the backend service needs a quick restart to pick up the new engine.</>
+                    : <>Pip's resolver may pull other packages along with it. After install, the backend service needs a quick restart to pick up the new code.</>}
               </p>
             </div>
             <div className="flex justify-end gap-2 pt-1">
