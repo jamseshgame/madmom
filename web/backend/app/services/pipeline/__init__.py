@@ -57,3 +57,6 @@ __all__ = [
     'EngineNotFoundError',
     'StageValidationError',
 ]
+
+# Side-effect: register all engines.
+from . import engines  # noqa: F401, E402

@@ -33,15 +33,16 @@ def test_phase0_empty_track(client, tmp_path, monkeypatch):
         lambda track_id: tmp_path / 'tracks' / track_id,
     )
 
-    # Engines catalog: all 9 stages, all empty engine lists (Phase 0 has no engines)
+    # Engines catalog: 8 non-grid stages still empty; grid has the manual engine now
     r = client.get('/api/pipeline/engines')
     assert r.status_code == 200
     cat = r.json()
-    for stage in ['grid', 'onsets', 'pitches', 'quantized',
+    for stage in ['onsets', 'pitches', 'quantized',
                   'lanes_expert', 'lanes_filtered',
                   'lanes_hard', 'lanes_medium', 'lanes_easy']:
         assert stage in cat
         assert cat[stage] == []
+    assert any(e['engine_id'] == 'manual' for e in cat['grid'])
 
     # Empty pipeline state for an unknown track
     r = client.get('/api/pipeline/state?track_id=newtrack')
