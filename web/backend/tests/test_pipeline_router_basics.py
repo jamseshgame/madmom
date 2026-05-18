@@ -7,6 +7,17 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from app.routers.auth import require_auth
+from app.main import app
+
+
+@pytest.fixture(autouse=True)
+def _bypass_auth():
+    """Override the require_auth dependency so TestClient calls succeed without a cookie."""
+    app.dependency_overrides[require_auth] = lambda: None
+    yield
+    app.dependency_overrides.pop(require_auth, None)
+
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
