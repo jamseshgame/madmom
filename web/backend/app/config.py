@@ -26,6 +26,12 @@ class Settings(BaseSettings):
 
     madmom_root: str = str(Path(__file__).resolve().parents[4])
 
+    # Default chart-generation model the editor offers when creating a new
+    # beatmap. 'madmom' = legacy CloneHeroChartGenerator path; 'v2' = the new
+    # modular pipeline (see web/backend/app/services/pipeline/). Flip to 'v2'
+    # once V2 has been validated on enough songs.
+    beatmap_model_default: str = 'madmom'
+
     # Path to the Unity project the editor pulls 3D gem meshes from. Points
     # at the local checkout by default; overrideable per environment.
     jamseshquest_gems_dir: str = str(
