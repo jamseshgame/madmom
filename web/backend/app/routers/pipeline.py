@@ -310,3 +310,41 @@ def _update_state_after_run(
 
 for _stage in Stage:
     router.include_router(_make_stage_subrouter(_stage), prefix=f'/{_stage.value}')
+
+
+@router.post('/build-chart')
+async def build_chart(track_id: str = Query(...), stem: str = Query(...)):
+    """Run S8 — read all active stage outputs for the stem, serialize, write notes.chart."""
+    from ..services.pipeline.serialize import serialize_chart
+    td = _resolve_track_dir(track_id)
+    grid_p = stage_path(td, Stage.GRID, None)
+    if not grid_p.exists():
+        raise HTTPException(404, 'No active grid')
+    grid = json.loads(grid_p.read_text())
+
+    lanes_per_difficulty: dict[str, dict] = {}
+    expert_p = stage_path(td, Stage.LANES_EXPERT, stem)
+    filtered_p = stage_path(td, Stage.LANES_FILTERED, stem)
+    use_p = filtered_p if filtered_p.exists() else expert_p
+    if not use_p.exists():
+        raise HTTPException(404, 'No active lanes_expert (or _filtered) for stem')
+    lanes_per_difficulty['ExpertSingle'] = json.loads(use_p.read_text())
+
+    for diff_section, stage in (
+        ('HardSingle', Stage.LANES_HARD),
+        ('MediumSingle', Stage.LANES_MEDIUM),
+        ('EasySingle', Stage.LANES_EASY),
+    ):
+        p = stage_path(td, stage, stem)
+        if p.exists():
+            lanes_per_difficulty[diff_section] = json.loads(p.read_text())
+
+    text = serialize_chart(
+        grid=grid, lanes_per_difficulty=lanes_per_difficulty,
+        song_name=track_id, resolution=int(grid['resolution']),
+    )
+    out_dir = td / 'stems' / stem / 'v2'
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / 'notes.chart'
+    out_path.write_text(text, encoding='utf-8')
+    return {'chart_path': str(out_path)}
