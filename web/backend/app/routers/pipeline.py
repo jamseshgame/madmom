@@ -45,11 +45,12 @@ _TRACK_LEVEL_STAGES = {Stage.GRID}
 def _resolve_track_dir(track_id: str) -> Path:
     """Return the directory where a Track's pipeline files live.
 
-    Default: <upload_dir>/tracks/<track_id>. The tracks service may
-    override this lookup once Track records have a canonical dir; for
-    Phase 0 this is the simplest path that's stable per track_id.
+    Uses the Tracks service's canonical directory: <upload_dir>/_tracks/<id>.
+    Falls back to a synthetic path under <upload_dir>/_tracks/<id> for IDs
+    that don't have a Track record yet (so tests using arbitrary IDs work).
     """
-    return Path(settings.upload_dir) / 'tracks' / track_id
+    from ..services.tracks import TRACKS_DIR
+    return TRACKS_DIR / track_id
 
 
 def _require_stem(stage: Stage, stem: str | None) -> str:

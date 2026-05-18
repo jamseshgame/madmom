@@ -165,6 +165,7 @@ def get_track_enriched(track_id: str) -> dict[str, Any] | None:
     if not t:
         return None
     data = t.to_dict()
+    data['has_grid'] = (t.dir / 'grid.json').exists()
     ini = _read_song_ini_metadata(t.stems_dir)
     for key in ('name', 'artist', 'album', 'genre', 'year'):
         if ini.get(key):
