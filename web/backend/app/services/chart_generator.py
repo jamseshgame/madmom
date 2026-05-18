@@ -190,6 +190,7 @@ async def generate_full_chart(
     genre: str = 'Unknown',
     ini_overrides: dict | None = None,
     progress_callback=None,
+    grid_path: str | None = None,
 ):
     """
     Generate a full 4-difficulty chart. Runs CPU-bound work in a thread.
@@ -252,6 +253,24 @@ async def generate_full_chart(
         await report('analyse', 40, f'Found {len(onsets)} onsets, {bpm:.1f} BPM (snapped from {raw_bpm:.1f})')
     else:
         await report('analyse', 40, f'Found {len(onsets)} onsets, {bpm:.1f} BPM')
+
+    # If a V2 pipeline grid.json exists for this track, override the detected
+    # BPM with the grid's primary tempo so all stems in the song share the
+    # same SyncTrack. This is the minimal Phase-2 integration; multi-segment
+    # tempo maps will require further work in the legacy write_chart.
+    if grid_path:
+        import json as _json
+        try:
+            with open(grid_path, 'r') as gf:
+                grid = _json.load(gf)
+            tempo_segs = grid.get('tempo_segments') or []
+            if tempo_segs:
+                grid_bpm = float(tempo_segs[0]['micro_bpm']) / 1000.0
+                if abs(grid_bpm - bpm) > 0.5:
+                    await report('analyse', 42, f'Overriding stem-detected BPM {bpm:.1f} → grid BPM {grid_bpm:.1f}')
+                bpm = grid_bpm
+        except Exception as e:
+            await report('analyse', 42, f'grid.json unusable ({e}); keeping detected BPM')
 
     if len(onsets) == 0:
         await report('error', -1, 'No onsets detected in audio')

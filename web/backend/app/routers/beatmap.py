@@ -240,6 +240,17 @@ async def create_beatmap_from_stem(
     async def _run():
         job.status = JobStatus.RUNNING
         try:
+            grid_path = None
+            try:
+                from ..services.tracks import Track
+                t = Track.load(track_id) if track_id else None
+                if t:
+                    gp = t.dir / 'grid.json'
+                    if gp.exists():
+                        grid_path = str(gp)
+            except Exception:
+                grid_path = None
+
             result = await generate_full_chart(
                 audio_path=str(stem_path),
                 output_dir=str(output_dir),
@@ -249,6 +260,7 @@ async def create_beatmap_from_stem(
                 year='',
                 genre='',
                 progress_callback=job.send,
+                grid_path=grid_path,
             )
             if result is None:
                 await job.send_error('No onsets detected in stem audio')
