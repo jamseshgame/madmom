@@ -210,6 +210,11 @@ function UpgradePanel({
   cancelConfirm, closePanel, confirm, restartBackend,
 }: ReturnType<typeof useUpgradeFlow>) {
   if (!target || phase === 'idle') return null
+  const isFreshInstall = target.installed == null
+  const verb = isFreshInstall ? 'Install' : 'Upgrade'
+  const pipCmd = isFreshInstall
+    ? `pip install ${target.name}`
+    : `pip install --upgrade ${target.name}`
   return (
     <div
       className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center px-4"
@@ -222,11 +227,12 @@ function UpgradePanel({
       <div className="bg-gray-900 border border-gray-700 rounded-xl w-full max-w-lg p-5 space-y-4">
         <div>
           <h3 className="text-lg font-semibold text-gray-100">
-            Upgrade <span className="font-mono text-jam-300">{target.name}</span>
+            {verb} <span className="font-mono text-jam-300">{target.name}</span>
           </h3>
           <p className="text-xs text-gray-500 mt-0.5">
-            {target.installed} → {target.latest}
-            {target.up_to_date && newVersion ? ` · now ${newVersion}` : ''}
+            {isFreshInstall
+              ? <>→ {target.latest}{newVersion ? ` · now ${newVersion}` : ''}</>
+              : <>{target.installed} → {target.latest}{target.up_to_date && newVersion ? ` · now ${newVersion}` : ''}</>}
           </p>
         </div>
 
@@ -234,11 +240,12 @@ function UpgradePanel({
           <>
             <div className="bg-amber-900/20 border border-amber-800/40 rounded-lg p-3 text-xs text-amber-300/90 space-y-1">
               <p>
-                Runs <span className="font-mono">pip install --upgrade {target.name}</span> in the backend venv.
+                Runs <span className="font-mono">{pipCmd}</span> in the backend venv.
               </p>
               <p className="text-amber-200/80">
-                Pip's resolver may pull other packages along with it. After install, the
-                backend service needs a quick restart to pick up the new code.
+                {isFreshInstall
+                  ? <>This package is optional — pip will pull its full dependency tree, which can be large for ML packages (TensorFlow, PyTorch, model checkpoints). After install, the backend service needs a quick restart to pick up the new engine.</>
+                  : <>Pip's resolver may pull other packages along with it. After install, the backend service needs a quick restart to pick up the new code.</>}
               </p>
             </div>
             <div className="flex justify-end gap-2 pt-1">
@@ -252,7 +259,7 @@ function UpgradePanel({
                 onClick={confirm}
                 className="px-4 py-1.5 bg-jam-600 hover:bg-jam-500 text-white rounded-md text-sm font-medium transition-colors"
               >
-                Run pip install --upgrade
+                Run {pipCmd}
               </button>
             </div>
           </>
@@ -352,8 +359,9 @@ export function VersionsTable() {
         <div>
           <h2 className="text-lg font-semibold text-gray-100">Open-source dependencies</h2>
           <p className="text-xs text-gray-500 mt-0.5">
-            Live version check against PyPI. Click <span className="font-mono">Upgrade</span> next
-            to any outdated row to run <span className="font-mono">pip install --upgrade</span> in the backend.
+            Live version check against PyPI. Click <span className="font-mono">Install</span> to
+            add a missing optional package, or <span className="font-mono">Upgrade</span> on an
+            outdated row to run <span className="font-mono">pip install --upgrade</span> in the backend.
           </p>
         </div>
         <button
@@ -388,6 +396,7 @@ export function VersionsTable() {
                       ? { label: 'up to date', cls: 'bg-emerald-900/40 text-emerald-300 border-emerald-800/60' }
                       : { label: 'update available', cls: 'bg-amber-900/40 text-amber-300 border-amber-800/60' }
               const canUpgrade = p.up_to_date === false && p.installed && p.latest && !p.pinned
+              const canInstall = p.installed == null && p.latest && !p.pinned
               return (
                 <tr key={p.name} className="border-b border-gray-800/60 last:border-b-0">
                   <td className="px-4 py-2">
@@ -427,6 +436,14 @@ export function VersionsTable() {
                         title={`pip install --upgrade ${p.name}`}
                       >
                         Upgrade
+                      </button>
+                    ) : canInstall ? (
+                      <button
+                        onClick={() => flow.start(p)}
+                        className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-[11px] font-medium transition-colors"
+                        title={`pip install ${p.name}`}
+                      >
+                        Install
                       </button>
                     ) : (
                       <span className="text-[11px] text-gray-700">—</span>
