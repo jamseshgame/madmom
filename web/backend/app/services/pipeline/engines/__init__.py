@@ -35,3 +35,5 @@ except ImportError:
 from . import quantized_engines  # noqa: F401
 
 from . import lanes_engines  # noqa: F401
+
+from . import playability_engines  # noqa: F401
