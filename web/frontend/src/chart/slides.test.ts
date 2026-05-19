@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { nextSlideId, groupSlides, type SlideNote } from './slides'
-import { importSlides, type SlideEvent } from './slides'
+import { nextSlideId, groupSlides, importSlides, buildSlideEmitInfo, pruneSlides, type SlideNote, type SlideEvent } from './slides'
 
 describe('nextSlideId', () => {
   it('returns 1 when no note has a slideId', () => {
@@ -88,5 +87,96 @@ describe('importSlides', () => {
     const notes: SlideNote[] = [{ tick: 200, lane: 2, sustain: 0 }]
     importSlides(notes, [{ tick: 100, fret: 1 }, { tick: 200, fret: 2 }], 192)
     expect(notes[0].slideId).toBeUndefined()
+  })
+})
+
+describe('buildSlideEmitInfo', () => {
+  it('assigns start / middle / end by tick order', () => {
+    const notes: SlideNote[] = [
+      { tick: 100, lane: 1, sustain: 0, slideId: 1 },
+      { tick: 200, lane: 2, sustain: 0, slideId: 1 },
+      { tick: 300, lane: 3, sustain: 0, slideId: 1 },
+    ]
+    const roles = buildSlideEmitInfo(notes)
+    expect(roles.get(notes[0])).toBe('start')
+    expect(roles.get(notes[1])).toBe('middle')
+    expect(roles.get(notes[2])).toBe('end')
+  })
+
+  it('marks every note at the first tick as start (chord slide)', () => {
+    const notes: SlideNote[] = [
+      { tick: 100, lane: 1, sustain: 0, slideId: 1 },
+      { tick: 100, lane: 2, sustain: 0, slideId: 1 },
+      { tick: 200, lane: 2, sustain: 0, slideId: 1 },
+      { tick: 200, lane: 3, sustain: 0, slideId: 1 },
+    ]
+    const roles = buildSlideEmitInfo(notes)
+    expect(roles.get(notes[0])).toBe('start')
+    expect(roles.get(notes[1])).toBe('start')
+    expect(roles.get(notes[2])).toBe('end')
+    expect(roles.get(notes[3])).toBe('end')
+  })
+
+  it('ignores groups with fewer than two distinct ticks', () => {
+    const notes: SlideNote[] = [
+      { tick: 100, lane: 1, sustain: 0, slideId: 1 },
+      { tick: 100, lane: 2, sustain: 0, slideId: 1 },
+    ]
+    expect(buildSlideEmitInfo(notes).size).toBe(0)
+  })
+})
+
+describe('pruneSlides', () => {
+  it('clears slideId from a group with only one distinct tick', () => {
+    const notes: SlideNote[] = [
+      { tick: 100, lane: 1, sustain: 0, slideId: 1 },
+      { tick: 100, lane: 2, sustain: 0, slideId: 1 },
+    ]
+    expect(pruneSlides(notes).every((n) => n.slideId === undefined)).toBe(true)
+  })
+
+  it('leaves a valid multi-tick slide intact (same array reference)', () => {
+    const notes: SlideNote[] = [
+      { tick: 100, lane: 1, sustain: 0, slideId: 1 },
+      { tick: 200, lane: 2, sustain: 0, slideId: 1 },
+    ]
+    expect(pruneSlides(notes)).toBe(notes)
+  })
+})
+
+describe('slide round-trip (spec section 6)', () => {
+  it('imports a real chord slide and re-emits the original chart lines', () => {
+    // Exact shape from the Ben Chango guitar chart (frets 2 & 3):
+    //   16464 = E slide 2 / E slide 3                  (start, no N)
+    //   16560 = N 2 0 + E slide 2 / N 3 0 + E slide 3  (middle)
+    //   16608 = N 2 0 / N 3 0                          (end)
+    const notes: SlideNote[] = [
+      { tick: 16560, lane: 2, sustain: 0 }, { tick: 16560, lane: 3, sustain: 0 },
+      { tick: 16608, lane: 2, sustain: 0 }, { tick: 16608, lane: 3, sustain: 0 },
+    ]
+    const events: SlideEvent[] = [
+      { tick: 16464, fret: 2 }, { tick: 16464, fret: 3 },
+      { tick: 16560, fret: 2 }, { tick: 16560, fret: 3 },
+    ]
+    const tagged = importSlides(notes, events, 192)
+    const roles = buildSlideEmitInfo(tagged)
+    // Reconstruct chart lines exactly as emitNoteSectionLines (Task 6) will.
+    const lines: string[] = []
+    for (const n of [...tagged].sort((a, b) => a.tick - b.tick || a.lane - b.lane)) {
+      const role = roles.get(n)
+      if (!role) { lines.push(`${n.tick} = N ${n.lane} ${n.sustain}`); continue }
+      if (role !== 'start') lines.push(`${n.tick} = N ${n.lane} 0`)
+      if (role !== 'end') lines.push(`${n.tick} = E slide ${n.lane}`)
+    }
+    expect(lines).toEqual([
+      '16464 = E slide 2',
+      '16464 = E slide 3',
+      '16560 = N 2 0',
+      '16560 = E slide 2',
+      '16560 = N 3 0',
+      '16560 = E slide 3',
+      '16608 = N 2 0',
+      '16608 = N 3 0',
+    ])
   })
 })

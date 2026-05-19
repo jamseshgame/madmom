@@ -136,3 +136,43 @@ export function importSlides(
   }
   return result
 }
+
+/** Distinct ticks in a group, ascending. */
+function distinctTicks(group: SlideNote[]): number[] {
+  return [...new Set(group.map((n) => n.tick))].sort((a, b) => a - b)
+}
+
+/**
+ * Compute each slide-tagged note's serialization role. Groups with fewer than
+ * two distinct ticks are not real slides and are omitted (their notes
+ * serialize as plain notes).
+ */
+export function buildSlideEmitInfo(notes: SlideNote[]): Map<SlideNote, SlideRole> {
+  const roles = new Map<SlideNote, SlideRole>()
+  for (const group of groupSlides(notes).values()) {
+    const ticks = distinctTicks(group)
+    if (ticks.length < 2) continue
+    const first = ticks[0]
+    const last = ticks[ticks.length - 1]
+    for (const n of group) {
+      roles.set(n, n.tick === first ? 'start' : n.tick === last ? 'end' : 'middle')
+    }
+  }
+  return roles
+}
+
+/**
+ * Clear slideId from any slide group that is no longer a valid slide (fewer
+ * than two distinct ticks). Call after edits that delete notes. Returns the
+ * same array reference when nothing changed.
+ */
+export function pruneSlides(notes: SlideNote[]): SlideNote[] {
+  const toClear = new Set<number>()
+  for (const [id, group] of groupSlides(notes)) {
+    if (distinctTicks(group).length < 2) toClear.add(id)
+  }
+  if (toClear.size === 0) return notes
+  return notes.map((n) =>
+    n.slideId != null && toClear.has(n.slideId) ? { ...n, slideId: undefined } : n,
+  )
+}
