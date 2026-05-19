@@ -261,6 +261,7 @@ async def create_beatmap_from_stem(
                 genre='',
                 progress_callback=job.send,
                 grid_path=grid_path,
+                stem=stem,
             )
             if result is None:
                 await job.send_error('No onsets detected in stem audio')

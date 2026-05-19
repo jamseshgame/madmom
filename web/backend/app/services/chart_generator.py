@@ -191,17 +191,25 @@ async def generate_full_chart(
     ini_overrides: dict | None = None,
     progress_callback=None,
     grid_path: str | None = None,
+    stem: str | None = None,
 ):
     """
     Generate a full 4-difficulty chart. Runs CPU-bound work in a thread.
 
     progress_callback: async callable(step: str, progress: int, message: str)
+    stem: source stem name. 'drums' forces single-hit output — no sustains
+        and no slides, since percussion notes are always plain hits.
 
     Returns dict with chart stats and file paths.
     """
     import asyncio
 
     gen = _load_generator()
+
+    # Drum charts are single-hit only: percussion has no sustains or slides.
+    # When generating from the drums stem, force every note to zero sustain
+    # and skip slide promotion so the chart is pure hits.
+    single_hits_only = stem == 'drums'
 
     async def report(step, pct, msg):
         if progress_callback:
@@ -325,7 +333,10 @@ async def generate_full_chart(
                 frets = gen.validate_frets(frets_per_onset[i])
                 tick = gen.seconds_to_ticks(onset_time, bpm, resolution)
                 tick = gen.quantize_tick(tick, resolution, quantize)
-                sustain = gen.compute_sustain_ticks(i, diff_onsets, bpm, resolution, threshold)
+                sustain = (
+                    0 if single_hits_only
+                    else gen.compute_sustain_ticks(i, diff_onsets, bpm, resolution, threshold)
+                )
                 for fret in frets:
                     notes.append((tick, fret, 0 if fret == 7 else sustain))
 
@@ -352,12 +363,14 @@ async def generate_full_chart(
                     validated.append((tick, fret, sustain))
             deduped = validated
 
-            # Slides (chord slides use fixed parallel pairs)
-            sequences = gen.detect_slide_sequences(deduped, bpm, resolution)
+            # Slides (chord slides use fixed parallel pairs). Drums get
+            # none — single hits only.
             slide_events = []
-            if sequences:
-                sequences, deduped = gen.promote_chord_slides(sequences, deduped, ratio=0.3)
-                deduped, slide_events = gen.apply_slide_conversion(deduped, sequences)
+            if not single_hits_only:
+                sequences = gen.detect_slide_sequences(deduped, bpm, resolution)
+                if sequences:
+                    sequences, deduped = gen.promote_chord_slides(sequences, deduped, ratio=0.3)
+                    deduped, slide_events = gen.apply_slide_conversion(deduped, sequences)
 
             deduped = gen.unify_chord_sustains(deduped)
             return deduped, slide_events

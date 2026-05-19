@@ -390,6 +390,7 @@ async def generate_beatmap_from_track(
                 genre=song_genre,
                 ini_overrides=ini_overrides,
                 progress_callback=job.send,
+                stem=stem,
             )
             if result is None:
                 await job.send_error('No onsets detected in stem audio')
