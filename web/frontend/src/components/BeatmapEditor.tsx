@@ -3836,8 +3836,10 @@ export default function BeatmapEditor() {
   const makeSlide = useCallback(() => {
     if (!chart || selectedIds.size < 2) return
     const id = nextSlideId(chart.notes)
-    const next = chart.notes.map((n, i) =>
-      selectedIds.has(i) ? { ...n, slideId: id } : n,
+    // pruneSlides dissolves any existing slide left below 2 ticks when some of
+    // its notes are re-tagged into this new slide.
+    const next = pruneSlides(
+      chart.notes.map((n, i) => (selectedIds.has(i) ? { ...n, slideId: id } : n)),
     )
     commitNotes(next)
   }, [chart, selectedIds, commitNotes])
@@ -7293,7 +7295,12 @@ export default function BeatmapEditor() {
               </button>
               <button
                 onClick={removeSlide}
-                className="px-1.5 py-1.5 rounded text-[11px] font-medium bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors"
+                disabled={selectedIds.size === 0}
+                className={`px-1.5 py-1.5 rounded text-[11px] font-medium transition-colors ${
+                  selectedIds.size === 0
+                    ? 'bg-gray-800 text-gray-600 cursor-not-allowed'
+                    : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+                }`}
                 title="Remove slide — untag the selected notes' slide"
               >
                 ⤢✕ Remove slide
