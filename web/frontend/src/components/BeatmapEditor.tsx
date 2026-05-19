@@ -12,7 +12,7 @@ import { ImportedSourcesPanel } from './ImportedSourcesPanel'
 import { ClipsLibraryPanel } from './ClipsLibraryPanel'
 import { SourcePickerModal } from './SourcePickerModal'
 import { GenerateTab } from './pipeline/GenerateTab'
-import { importSlides, buildSlideEmitInfo, type SlideEvent } from '../chart/slides'
+import { importSlides, buildSlideEmitInfo, groupSlides, type SlideEvent } from '../chart/slides'
 
 // .chart parsing ------------------------------------------------------------
 
@@ -1115,6 +1115,55 @@ const SNAP_OPTIONS = [
   { label: '1/16', divisor: 4 },
   { label: '1/32', divisor: 8 },
 ] as const
+
+// Draw each slide as a diagonal ribbon: a thick, semi-transparent segment
+// between consecutive slide positions, coloured by the lane it leaves.
+function drawSlideRibbons(
+  ctx: CanvasRenderingContext2D,
+  notes: ChartNote[],
+  o: {
+    laneFill: string[]
+    gemX0: number
+    laneW: number
+    hit: number
+    scrollSpeed: number
+    currentTime: number
+    t2s: (tick: number) => number
+    selectedSlideIds: Set<number>
+  },
+): void {
+  const laneX = (lane: number) => o.gemX0 + (lane + 0.5) * o.laneW
+  const tickY = (tick: number) => o.hit - (o.t2s(tick) - o.currentTime) * o.scrollSpeed
+  ctx.lineCap = 'round'
+  ctx.lineJoin = 'round'
+  for (const [sid, group] of groupSlides(notes)) {
+    const byTick = new Map<number, number[]>()
+    for (const n of group) {
+      const f = byTick.get(n.tick)
+      if (f) f.push(n.lane)
+      else byTick.set(n.tick, [n.lane])
+    }
+    const ticks = [...byTick.keys()].sort((a, b) => a - b)
+    if (ticks.length < 2) continue
+    for (const f of byTick.values()) f.sort((a, b) => a - b)
+    const maxFrets = Math.max(...ticks.map((t) => byTick.get(t)!.length))
+    const selected = o.selectedSlideIds.has(sid)
+    for (let r = 0; r < maxFrets; r++) {
+      for (let i = 0; i + 1 < ticks.length; i++) {
+        const fa = byTick.get(ticks[i])!
+        const fb = byTick.get(ticks[i + 1])!
+        const laneA = fa[Math.min(r, fa.length - 1)]
+        const laneB = fb[Math.min(r, fb.length - 1)]
+        ctx.beginPath()
+        ctx.moveTo(laneX(laneA), tickY(ticks[i]))
+        ctx.lineTo(laneX(laneB), tickY(ticks[i + 1]))
+        ctx.strokeStyle = o.laneFill[laneA] + (selected ? 'ff' : '88')
+        ctx.lineWidth = o.laneW * (selected ? 0.46 : 0.4)
+        ctx.stroke()
+      }
+    }
+  }
+}
 
 interface BeatmapMeta {
   name: string
@@ -4988,6 +5037,23 @@ export default function BeatmapEditor() {
       ctx.font = 'bold 10px sans-serif'
       ctx.textAlign = 'center'
       ctx.fillText('OPEN', GEM_X0 + GEM_W / 2, y + 3)
+    })
+
+    // Slide ribbons sit beneath the gems.
+    const selectedSlideIds = new Set<number>()
+    for (const i of selectedIds) {
+      const s = chart.notes[i]?.slideId
+      if (s != null) selectedSlideIds.add(s)
+    }
+    drawSlideRibbons(ctx, chart.notes, {
+      laneFill: LANE_FILL,
+      gemX0: GEM_X0,
+      laneW: LANE_W,
+      hit: HIT,
+      scrollSpeed,
+      currentTime,
+      t2s,
+      selectedSlideIds,
     })
 
     // Single-lane notes
