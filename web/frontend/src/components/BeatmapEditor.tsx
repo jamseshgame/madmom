@@ -1653,6 +1653,11 @@ const LANE_COLOR_HEX = [0x22c55e, 0xef4444, 0xeab308, 0x3b82f6, 0xf97316] // 0-4
 
 // Unit cylinder reused for every hold/slide bar — scaled per segment.
 const BAR_GEOMETRY = new THREE.CylinderGeometry(1, 1, 1, 12)
+// Scratch vectors reused each frame by the bar-positioning loop.
+const BAR_UP = new THREE.Vector3(0, 1, 0)
+const BAR_A = new THREE.Vector3()
+const BAR_B = new THREE.Vector3()
+const BAR_DIR = new THREE.Vector3()
 
 // One straight bar segment in runway space (endpoints share Y).
 interface BarSeg {
@@ -1878,6 +1883,10 @@ const GemMeshLayer = forwardRef<GemMeshLayerHandle, {
         })
       }
       lanePoolRef.current = []
+      for (const m of barPoolRef.current) {
+        ;(m.material as THREE.Material).dispose()
+      }
+      barPoolRef.current = []
       for (const g of ghostGemsRef.current) scene.remove(g)
       ghostGemsRef.current = []
       for (const e of explosionsRef.current) scene.remove(e.obj)
@@ -2523,21 +2532,18 @@ const GemMeshLayer = forwardRef<GemMeshLayerHandle, {
       }
       while (barPool.length > barSegs.length) {
         const m = barPool.pop()!
+        ;(m.material as THREE.Material).dispose()
         scene.remove(m)
       }
-      const barUp = new THREE.Vector3(0, 1, 0)
-      const barA = new THREE.Vector3()
-      const barB = new THREE.Vector3()
-      const barDir = new THREE.Vector3()
       for (let i = 0; i < barSegs.length; i++) {
         const seg = barSegs[i]
         const mesh = barPool[i]
-        barA.set(seg.ax, barY, seg.az)
-        barB.set(seg.bx, barY, seg.bz)
-        barDir.subVectors(barB, barA)
-        const len = Math.max(barDir.length(), 0.0001)
-        mesh.position.copy(barA).add(barB).multiplyScalar(0.5)
-        mesh.quaternion.setFromUnitVectors(barUp, barDir.normalize())
+        BAR_A.set(seg.ax, barY, seg.az)
+        BAR_B.set(seg.bx, barY, seg.bz)
+        BAR_DIR.subVectors(BAR_B, BAR_A)
+        const len = Math.max(BAR_DIR.length(), 0.0001)
+        mesh.position.copy(BAR_A).add(BAR_B).multiplyScalar(0.5)
+        mesh.quaternion.setFromUnitVectors(BAR_UP, BAR_DIR.normalize())
         mesh.scale.set(barRadius, len, barRadius)
         const mat = mesh.material as THREE.MeshStandardMaterial
         mat.color.setHex(seg.colorHex)
