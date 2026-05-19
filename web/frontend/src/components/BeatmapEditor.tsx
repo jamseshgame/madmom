@@ -2514,6 +2514,40 @@ const GemMeshLayer = forwardRef<GemMeshLayerHandle, {
         })
       }
 
+      // Slides: a bar per segment between consecutive slide positions.
+      for (const group of groupSlides(props.notes).values()) {
+        const byTick = new Map<number, number[]>()
+        for (const n of group) {
+          const f = byTick.get(n.tick)
+          if (f) f.push(n.lane)
+          else byTick.set(n.tick, [n.lane])
+        }
+        const ticks = [...byTick.keys()].sort((x, y) => x - y)
+        if (ticks.length < 2) continue
+        for (const f of byTick.values()) f.sort((x, y) => x - y)
+        const maxFrets = Math.max(...ticks.map((t) => byTick.get(t)!.length))
+        for (let r = 0; r < maxFrets; r++) {
+          for (let i = 0; i + 1 < ticks.length; i++) {
+            const sA = t2s(ticks[i])
+            const sB = t2s(ticks[i + 1])
+            if (!inWindow(sA, sB)) continue
+            const fa = byTick.get(ticks[i])!
+            const fb = byTick.get(ticks[i + 1])!
+            const laneA = fa[Math.min(r, fa.length - 1)]
+            const laneB = fb[Math.min(r, fb.length - 1)]
+            // Bars only span the five coloured fret lanes (LANE_COLOR_HEX has 0-4).
+            if (laneA > 4 || laneB > 4) continue
+            barSegs.push({
+              ax: (laneA - 2) * LANE_UNIT,
+              az: -(sA - props.currentTime) * Z_PER_SECOND,
+              bx: (laneB - 2) * LANE_UNIT,
+              bz: -(sB - props.currentTime) * Z_PER_SECOND,
+              colorHex: LANE_COLOR_HEX[laneA],
+            })
+          }
+        }
+      }
+
       // Sync the bar mesh pool to barSegs.
       const barPool = barPoolRef.current
       while (barPool.length < barSegs.length) {
