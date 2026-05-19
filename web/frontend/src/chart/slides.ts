@@ -51,3 +51,88 @@ export function groupSlides(notes: SlideNote[]): Map<number, SlideNote[]> {
   }
   return groups
 }
+
+// A run breaks when the gap between consecutive E-slide positions exceeds
+// resolution * this factor (~2 beats). Heuristic — see spec section 5.1.
+const SLIDE_GAP_FACTOR = 2
+
+/**
+ * Detect slides from a difficulty section's `E slide` events and return a NEW
+ * note array with the participating notes tagged with a `slideId`. Start
+ * positions (which carry no `N` line in the chart) are synthesized as new
+ * zero-sustain notes so they render and can be selected.
+ *
+ * Pure: the input `notes` array and its objects are never mutated.
+ */
+export function importSlides(
+  notes: SlideNote[],
+  slideEvents: SlideEvent[],
+  resolution: number,
+): SlideNote[] {
+  if (slideEvents.length === 0) return notes
+  const result: SlideNote[] = notes.map((n) => ({ ...n }))
+  const threshold = resolution * SLIDE_GAP_FACTOR
+
+  // Slide positions: tick -> sorted unique frets.
+  const byTick = new Map<number, number[]>()
+  for (const ev of slideEvents) {
+    const frets = byTick.get(ev.tick)
+    if (frets) {
+      if (!frets.includes(ev.fret)) frets.push(ev.fret)
+    } else {
+      byTick.set(ev.tick, [ev.fret])
+    }
+  }
+  for (const frets of byTick.values()) frets.sort((a, b) => a - b)
+  const posTicks = [...byTick.keys()].sort((a, b) => a - b)
+
+  // Chain positions into runs, breaking when the gap is too large.
+  const runs: number[][] = []
+  let cur: number[] = []
+  for (const t of posTicks) {
+    if (cur.length > 0 && t - cur[cur.length - 1] > threshold) {
+      runs.push(cur)
+      cur = []
+    }
+    cur.push(t)
+  }
+  if (cur.length > 0) runs.push(cur)
+
+  let sid = nextSlideId(result)
+  for (const run of runs) {
+    const id = sid++
+    let maxFrets = 1
+    // Tag (or synthesize) the start + middle positions.
+    for (const t of run) {
+      const frets = byTick.get(t)!
+      if (frets.length > maxFrets) maxFrets = frets.length
+      for (const fret of frets) {
+        const existing = result.find(
+          (n) => n.tick === t && n.lane === fret && n.slideId == null,
+        )
+        if (existing) {
+          existing.slideId = id
+        } else {
+          result.push({ tick: t, lane: fret, sustain: 0, slideId: id })
+        }
+      }
+    }
+    // End position: the nearest later note tick within the gap threshold.
+    const lastTick = run[run.length - 1]
+    const laterTicks = result
+      .filter((n) => n.tick > lastTick && n.slideId == null)
+      .map((n) => n.tick)
+    if (laterTicks.length > 0) {
+      const endTick = Math.min(...laterTicks)
+      if (endTick - lastTick <= threshold) {
+        const endNotes = result
+          .filter((n) => n.tick === endTick && n.slideId == null)
+          .sort((a, b) => a.lane - b.lane)
+        for (const n of endNotes.slice(0, maxFrets)) {
+          n.slideId = id
+        }
+      }
+    }
+  }
+  return result
+}
