@@ -12,7 +12,7 @@ import { ImportedSourcesPanel } from './ImportedSourcesPanel'
 import { ClipsLibraryPanel } from './ClipsLibraryPanel'
 import { SourcePickerModal } from './SourcePickerModal'
 import { GenerateTab } from './pipeline/GenerateTab'
-import { importSlides, type SlideEvent } from '../chart/slides'
+import { importSlides, buildSlideEmitInfo, type SlideEvent } from '../chart/slides'
 
 // .chart parsing ------------------------------------------------------------
 
@@ -539,10 +539,18 @@ function emitNoteSectionLines(notes: ChartNote[]): string[] {
   // events when state changes — they always precede the R note that triggered
   // the change, so the reader sees the declaration first.
   const sorted = [...notes].sort((a, b) => a.tick - b.tick || a.lane - b.lane)
+  const slideRoles = buildSlideEmitInfo(notes)
   let activePack: string | undefined
   let activeScale: string | undefined
   const out: string[] = []
   for (const n of sorted) {
+    const role = slideRoles.get(n)
+    if (role) {
+      // start -> E slide only · middle -> N + E slide · end -> N only
+      if (role !== 'start') out.push(`  ${n.tick} = N ${n.lane} 0`)
+      if (role !== 'end') out.push(`  ${n.tick} = E slide ${n.lane}`)
+      continue
+    }
     if (n.type === 'real') {
       if (n.pack && n.pack !== activePack) {
         out.push(`  ${n.tick} = E realnotes_pack ${n.pack}`)
@@ -575,7 +583,7 @@ function replaceSectionNotes(text: string, name: string, notes: ChartNote[]): st
   if (open === -1 || close === -1) return text
   const inner = text.slice(open + 1, close)
   // Strip everything we re-emit: N + R note lines and E realnotes_* events.
-  // Other E events (slides, etc.), S star power, and A anchors pass through.
+  // Other E events, S star power, and A anchors pass through. E slide is owned by the model.
   const keptLines = inner
     .split('\n')
     .map((l) => l.replace(/\r$/, ''))
@@ -584,6 +592,8 @@ function replaceSectionNotes(text: string, name: string, notes: ChartNote[]): st
       if (!t) return false
       if (/^\d+\s*=\s*[NR]\s+/.test(t)) return false
       if (/^\d+\s*=\s*E\s+realnotes_(pack|scale)\b/.test(t)) return false
+      // E slide lines are now owned by the model (emitted by emitNoteSectionLines).
+      if (/^\d+\s*=\s*E\s+slide\b/.test(t)) return false
       return true
     })
   const newLines = emitNoteSectionLines(notes)
