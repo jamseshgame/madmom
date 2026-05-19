@@ -8334,76 +8334,76 @@ export default function BeatmapEditor() {
                 />
               </div>
             )}
-            {/* Live-play HUD — streak (top-left) + score (top-right). Shown
-                whenever Live mode is selected so the user can see scoring
-                state even when paused; the values reset when playback
-                rewinds to the start. */}
-            {playMode === 'live' && (
-              <>
-                <div className="absolute top-3 left-3 pointer-events-none flex flex-col items-start">
-                  <span className="uppercase tracking-wider text-gray-400 font-mono" style={{ fontSize: 50 }}>Streak</span>
-                  <span
-                    className={`font-bold font-mono leading-none ${
-                      streak >= 50 ? 'text-fuchsia-300' :
-                      streak >= 25 ? 'text-amber-300' :
-                      streak >= 10 ? 'text-cyan-300' :
-                      'text-white'
-                    }`}
-                    style={{ fontSize: 150, textShadow: '0 0 24px rgba(0,0,0,0.95)' }}
-                  >
-                    {streak}
-                  </span>
-                  {maxStreak > 0 && (
-                    <span className="text-gray-500 font-mono" style={{ fontSize: 50 }}>best · {maxStreak}</span>
-                  )}
-                  {lastTier && (
-                    <span
-                      className={`font-bold font-mono mt-2 ${
-                        lastTier === 'perfect' ? 'text-emerald-300' :
-                        lastTier === 'early' || lastTier === 'late' ? 'text-cyan-300' :
-                        lastTier === 'veryEarly' || lastTier === 'veryLate' ? 'text-amber-400' :
-                        lastTier === 'miss' ? 'text-red-400' :
-                        lastTier === 'frets' ? 'text-orange-400' :
-                        'text-gray-400'
-                      }`}
-                      style={{ fontSize: 60, textShadow: '0 0 20px rgba(0,0,0,0.95)' }}
-                      title={
-                        lastTier === 'frets' ? 'A note was within timing window but the held fret combo didn\'t match.'
-                        : lastTier === 'empty' ? 'No note within the timing window when you strummed.'
-                        : undefined
-                      }
-                    >
-                      {lastTier === 'perfect' ? 'PERFECT'
-                        : lastTier === 'early' ? 'EARLY'
-                        : lastTier === 'late' ? 'LATE'
-                        : lastTier === 'veryEarly' ? 'VERY EARLY'
-                        : lastTier === 'veryLate' ? 'VERY LATE'
-                        : lastTier === 'miss' ? 'MISS'
-                        : lastTier === 'frets' ? 'WRONG FRETS'
-                        : 'NO NOTE'}
-                    </span>
-                  )}
-                </div>
-                <div className="absolute top-3 right-3 pointer-events-none flex flex-col items-end" style={{ marginTop: view3d.enabled ? 24 : 0 }}>
-                  <span className="uppercase tracking-wider text-gray-400 font-mono" style={{ fontSize: 50 }}>Score</span>
-                  <span
-                    className="font-bold font-mono leading-none text-white tabular-nums"
-                    style={{ fontSize: 150, textShadow: '0 0 24px rgba(0,0,0,0.95)' }}
-                  >
-                    {score.toLocaleString()}
-                  </span>
-                  <span className="text-gray-500 font-mono" style={{ fontSize: 50 }}>
-                    {pointsPerPerfectHit.toLocaleString()} / perfect
-                  </span>
-                </div>
-              </>
-            )}
             {ruleError && (
               <div className="absolute top-3 left-1/2 -translate-x-1/2 bg-red-900/90 border border-red-700 text-red-100 text-[12px] font-medium px-3 py-1.5 rounded shadow-lg pointer-events-none max-w-[90%] text-center">
                 ⚠ {ruleError}
               </div>
             )}
           </div>
+          {/* Live-play HUD — streak (top-left) + score (top-right). Shown
+              whenever Live mode is selected so the user can see scoring
+              state even when paused; the values reset when playback
+              rewinds to the start. */}
+          {playMode === 'live' && (
+            <>
+              <div className="absolute top-3 left-3 z-20 pointer-events-none flex flex-col items-start">
+                <span className="uppercase tracking-wider text-gray-400 font-mono" style={{ fontSize: 50 }}>Streak</span>
+                <span
+                  className={`font-bold font-mono leading-none ${
+                    streak >= 50 ? 'text-fuchsia-300' :
+                    streak >= 25 ? 'text-amber-300' :
+                    streak >= 10 ? 'text-cyan-300' :
+                    'text-white'
+                  }`}
+                  style={{ fontSize: 150, textShadow: '0 0 24px rgba(0,0,0,0.95)' }}
+                >
+                  {streak}
+                </span>
+                {maxStreak > 0 && (
+                  <span className="text-gray-500 font-mono" style={{ fontSize: 50 }}>best · {maxStreak}</span>
+                )}
+                {lastTier && (
+                  <span
+                    className={`font-bold font-mono mt-2 ${
+                      lastTier === 'perfect' ? 'text-emerald-300' :
+                      lastTier === 'early' || lastTier === 'late' ? 'text-cyan-300' :
+                      lastTier === 'veryEarly' || lastTier === 'veryLate' ? 'text-amber-400' :
+                      lastTier === 'miss' ? 'text-red-400' :
+                      lastTier === 'frets' ? 'text-orange-400' :
+                      'text-gray-400'
+                    }`}
+                    style={{ fontSize: 60, textShadow: '0 0 20px rgba(0,0,0,0.95)' }}
+                    title={
+                      lastTier === 'frets' ? 'A note was within timing window but the held fret combo didn\'t match.'
+                      : lastTier === 'empty' ? 'No note within the timing window when you strummed.'
+                      : undefined
+                    }
+                  >
+                    {lastTier === 'perfect' ? 'PERFECT'
+                      : lastTier === 'early' ? 'EARLY'
+                      : lastTier === 'late' ? 'LATE'
+                      : lastTier === 'veryEarly' ? 'VERY EARLY'
+                      : lastTier === 'veryLate' ? 'VERY LATE'
+                      : lastTier === 'miss' ? 'MISS'
+                      : lastTier === 'frets' ? 'WRONG FRETS'
+                      : 'NO NOTE'}
+                  </span>
+                )}
+              </div>
+              <div className="absolute top-3 right-3 z-20 pointer-events-none flex flex-col items-end" style={{ marginTop: view3d.enabled ? 24 : 0 }}>
+                <span className="uppercase tracking-wider text-gray-400 font-mono" style={{ fontSize: 50 }}>Score</span>
+                <span
+                  className="font-bold font-mono leading-none text-white tabular-nums"
+                  style={{ fontSize: 150, textShadow: '0 0 24px rgba(0,0,0,0.95)' }}
+                >
+                  {score.toLocaleString()}
+                </span>
+                <span className="text-gray-500 font-mono" style={{ fontSize: 50 }}>
+                  {pointsPerPerfectHit.toLocaleString()} / perfect
+                </span>
+              </div>
+            </>
+          )}
         </div>
 
         <aside className={`${maxHighway ? 'hidden' : ''} w-80 shrink-0 border-l border-gray-800 bg-gray-950 overflow-y-auto p-4 space-y-5`}>
