@@ -217,7 +217,7 @@ export function groupSlides(notes: SlideNote[]): Map<number, SlideNote[]> {
 - [ ] **Step 4: Run the test, verify it passes**
 
 Run: `cd web/frontend && npm test -- src/chart/slides.test.ts`
-Expected: PASS — 4 tests green.
+Expected: PASS — 3 tests green.
 
 - [ ] **Step 5: Commit**
 
