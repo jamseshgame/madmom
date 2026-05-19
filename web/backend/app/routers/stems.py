@@ -17,6 +17,7 @@ from ..services.stems import (
     MODEL_STEMS,
     _convert_to_ogg,
     _mix_to_ogg,
+    _write_peaks_file,
     separate_stems,
     write_song_ini,
 )
@@ -308,6 +309,16 @@ async def manual_stems(
                     game_stems['album_png'] = 'album.png'
                 except Exception as ae:
                     print(f'[stems/manual] album.png write failed: {ae}')
+
+            # Precompute waveform peaks (parity with the Demucs /separate
+            # flow) so the result page skips an in-browser Web Audio decode.
+            try:
+                audio_stems = {
+                    k: v for k, v in game_stems.items() if k not in ('song_ini', 'album_png')
+                }
+                await _write_peaks_file(audio_stems, out_dir, job.send)
+            except Exception as pe:
+                print(f'[stems/manual] peaks computation failed: {pe}')
 
             job.metadata['stems'] = game_stems
             job.metadata['game_ready'] = True
