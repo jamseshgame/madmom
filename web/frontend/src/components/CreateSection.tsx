@@ -33,6 +33,32 @@ const STEM_META: Record<string, { label: string; color: string }> = {
   other: { label: 'Other', color: 'text-blue-400' },
 }
 
+/**
+ * Turn a failed upload response into a human-readable message. The body
+ * may be FastAPI JSON (`{detail: ...}`) or an HTML error page served by
+ * nginx itself (e.g. a 413 when the request body exceeds
+ * `client_max_body_size`). Reading it as text first means a non-JSON
+ * body produces a useful message instead of crashing `res.json()` with
+ * "Unexpected token '<', "<html>..."`.
+ */
+async function describeUploadError(res: Response): Promise<string> {
+  const body = await res.text().catch(() => '')
+  try {
+    const detail = (JSON.parse(body) as { detail?: unknown })?.detail
+    if (typeof detail === 'string' && detail) return detail
+    if (detail) return JSON.stringify(detail)
+  } catch {
+    // Not JSON — fall through to a status-based message.
+  }
+  if (res.status === 413) {
+    return 'Upload too large — the combined size of your files exceeds the server limit. Use fewer or smaller stems, or compressed formats (FLAC/OGG/MP3) instead of WAV.'
+  }
+  if (res.status === 502 || res.status === 503 || res.status === 504) {
+    return `Server unavailable (HTTP ${res.status}). Please wait a moment and try again.`
+  }
+  return `Upload failed (HTTP ${res.status}).`
+}
+
 function BlankTutorialButton() {
   const navigate = useNavigate()
   const [open, setOpen] = useState(false)
@@ -729,8 +755,7 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
     try {
       const res = await fetch(endpoint, { method: 'POST', body: formData })
       if (!res.ok) {
-        const err = await res.json()
-        throw new Error(err.detail || 'Upload failed')
+        throw new Error(await describeUploadError(res))
       }
       const { job_id } = await res.json()
       setJobId(job_id)
