@@ -1651,6 +1651,18 @@ function ScenePicker({
 
 const LANE_COLOR_HEX = [0x22c55e, 0xef4444, 0xeab308, 0x3b82f6, 0xf97316] // 0-4
 
+// Unit cylinder reused for every hold/slide bar — scaled per segment.
+const BAR_GEOMETRY = new THREE.CylinderGeometry(1, 1, 1, 12)
+
+// One straight bar segment in runway space (endpoints share Y).
+interface BarSeg {
+  ax: number
+  az: number
+  bx: number
+  bz: number
+  colorHex: number
+}
+
 interface GemMeshLayerHandle {
   // Spawn a one-shot GemExplosion mesh at the strike-line of the given lane.
   // Called from BeatmapEditor's live-mode strum handler on a successful hit.
@@ -1713,6 +1725,7 @@ const GemMeshLayer = forwardRef<GemMeshLayerHandle, {
   const sepMainMeshesRef = useRef<THREE.Mesh[]>([])
   const sepGlowMeshesRef = useRef<THREE.Mesh[]>([])
   const lanePoolRef = useRef<THREE.Object3D[]>([])  // pooled clones, recycled per-frame
+  const barPoolRef = useRef<THREE.Mesh[]>([])
   // Five ghost gem instances permanently parked at the strike line (one per
   // lane). They render translucent and animate downward when the matching
   // fret button is held, mirroring the GH "held fret" tell.
@@ -2468,6 +2481,68 @@ const GemMeshLayer = forwardRef<GemMeshLayerHandle, {
         stillActive.push(e)
       }
       explosionsRef.current = stillActive
+
+      // --- Hold & slide bars (glowing tubes) ---
+      const barSegs: BarSeg[] = []
+      const barRadius = baseGemSize * 0.22
+      const barY = baseGemSize * 0.5
+      const inWindow = (s1: number, s2: number) =>
+        Math.min(s1, s2) <= topSec && Math.max(s1, s2) >= bottomSec
+
+      // Holds: a bar from the head gem back along the runway for the sustain.
+      for (const n of props.notes) {
+        if (n.lane > 4 || n.sustain <= 0) continue
+        const sHead = t2s(n.tick)
+        const sTail = t2s(n.tick + n.sustain)
+        if (!inWindow(sHead, sTail)) continue
+        const x = (n.lane - 2) * LANE_UNIT
+        barSegs.push({
+          ax: x,
+          az: -(sHead - props.currentTime) * Z_PER_SECOND,
+          bx: x,
+          bz: -(sTail - props.currentTime) * Z_PER_SECOND,
+          colorHex: LANE_COLOR_HEX[n.lane],
+        })
+      }
+
+      // Sync the bar mesh pool to barSegs.
+      const barPool = barPoolRef.current
+      while (barPool.length < barSegs.length) {
+        const mesh = new THREE.Mesh(
+          BAR_GEOMETRY,
+          new THREE.MeshStandardMaterial({
+            color: 0xffffff,
+            emissive: 0xffffff,
+            emissiveIntensity: 0.55,
+            metalness: 0.2,
+            roughness: 0.5,
+          }),
+        )
+        barPool.push(mesh)
+        scene.add(mesh)
+      }
+      while (barPool.length > barSegs.length) {
+        const m = barPool.pop()!
+        scene.remove(m)
+      }
+      const barUp = new THREE.Vector3(0, 1, 0)
+      const barA = new THREE.Vector3()
+      const barB = new THREE.Vector3()
+      const barDir = new THREE.Vector3()
+      for (let i = 0; i < barSegs.length; i++) {
+        const seg = barSegs[i]
+        const mesh = barPool[i]
+        barA.set(seg.ax, barY, seg.az)
+        barB.set(seg.bx, barY, seg.bz)
+        barDir.subVectors(barB, barA)
+        const len = Math.max(barDir.length(), 0.0001)
+        mesh.position.copy(barA).add(barB).multiplyScalar(0.5)
+        mesh.quaternion.setFromUnitVectors(barUp, barDir.normalize())
+        mesh.scale.set(barRadius, len, barRadius)
+        const mat = mesh.material as THREE.MeshStandardMaterial
+        mat.color.setHex(seg.colorHex)
+        mat.emissive.setHex(seg.colorHex)
+      }
 
       renderer.render(scene, camera)
     }
