@@ -5,6 +5,7 @@
 # Local tooling sandboxes
 /.claude/
 /.playwright-mcp/
+/.superpowers/
 
 # Editor debug screenshots at repo root
 /gem-*.png
