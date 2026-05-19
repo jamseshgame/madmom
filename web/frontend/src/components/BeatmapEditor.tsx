@@ -3783,10 +3783,6 @@ export default function BeatmapEditor() {
   // multiple (pack, scale) combos within different sections, so the outer key
   // is the combo identifier; the resolver looks up the right one per note.
   const realNotesBuffersRef = useRef<Map<string, Map<string, AudioBuffer>> | null>(null)
-  // Pre-computed list of (seconds, pack, scale, sample-name) for every real-
-  // note in the chart, sorted by seconds. Rebuilt when the chart or tempo
-  // map changes.
-  const realNotesEntriesRef = useRef<Array<{ sec: number; pack: string; scale: string; sampleName: string }>>([])
   // Last currentTime we processed — used to detect playback range so we don't
   // re-fire samples on every animation frame.
   const realNotesLastTimeRef = useRef<number>(0)
@@ -4365,31 +4361,6 @@ export default function BeatmapEditor() {
     }
   }, [realNotesVolume])
 
-  // Rebuild the (sec, pack, scale, sampleName) entry list whenever the chart
-  // or tempo map changes. Pre-sorted by sec so the fire-on-cross effect can
-  // scan a bounded window in O(crossings).
-  useEffect(() => {
-    if (!chart) {
-      realNotesEntriesRef.current = []
-      return
-    }
-    const realTicks = new Set<number>()
-    for (const n of chart.notes) if (n.type === 'real') realTicks.add(n.tick)
-    const entries: Array<{ sec: number; pack: string; scale: string; sampleName: string }> = []
-    for (const tick of realTicks) {
-      const resolved = _resolveRealNote(tick)
-      if (!resolved) continue
-      entries.push({
-        sec: tickToSec(tempoSegments, chart.resolution, tick),
-        pack: resolved.pack,
-        scale: resolved.scale,
-        sampleName: resolved.sampleName,
-      })
-    }
-    entries.sort((a, b) => a.sec - b.sec)
-    realNotesEntriesRef.current = entries
-  }, [chart, tempoSegments, _resolveRealNote])
-
   // Helper — fire a single decoded sample now via the AudioContext. Used by
   // both the autohit-mode cross effect and the live-mode strum handler.
   // Schedules with `start(0)` (= "as soon as possible" in the audio thread)
@@ -4411,12 +4382,16 @@ export default function BeatmapEditor() {
     src.start(0)
   }, [])
 
-  // Fire matching samples as the playhead crosses real-notes during playback.
-  // Only active in 'autohit' mode — in 'live' mode the player drives hits via
-  // the gamepad. Detects seeks via a delta threshold and rebases without
-  // firing.
+  // Autohit playback: as the playhead crosses each gem, shatter it and — when
+  // a sound pack is loaded — fire its real-note sample. Only active in
+  // 'autohit' mode ('live' mode drives hits via the gamepad). Detects seeks
+  // via a delta threshold and rebases without firing.
+  //
+  // Driven off liveEntries (EVERY playable tick). The shatter is NOT gated on
+  // the sound pack — a gem explodes when crossed regardless. Only the audio
+  // sample is gated on realNotesEnabled / realNotesReady.
   useEffect(() => {
-    if (!playing || !realNotesEnabled || !realNotesReady || playMode !== 'autohit') {
+    if (!playing || playMode !== 'autohit') {
       realNotesLastTimeRef.current = currentTime
       return
     }
@@ -4427,20 +4402,13 @@ export default function BeatmapEditor() {
       return
     }
     if (delta <= 0) return
-    const entries = realNotesEntriesRef.current
-    const liveEntries = liveEntriesRef.current
-    for (const e of entries) {
+    const canSample = realNotesEnabled && realNotesReady
+    for (const e of liveEntriesRef.current) {
       if (e.sec <= prev) continue
       if (e.sec > currentTime) break
-      if (e.sampleName) fireSampleNow(e.pack, e.scale, e.sampleName)
-      // Spawn explosions on the lanes the note covers. Look up the fret set
-      // from the live-entry index (same set, same sec) so we don't have to
-      // walk chart.notes here.
-      const matched = liveEntries.find((l) => l.sec === e.sec)
-      if (matched) {
-        const lanes = matched.frets === null ? [0, 1, 2, 3, 4] : [...matched.frets]
-        for (const lane of lanes) gemMeshLayerRef.current?.spawnExplosion(lane)
-      }
+      if (canSample && e.sampleName) fireSampleNow(e.pack, e.scale, e.sampleName)
+      const lanes = e.frets === null ? [0, 1, 2, 3, 4] : [...e.frets]
+      for (const lane of lanes) gemMeshLayerRef.current?.spawnExplosion(lane)
     }
     realNotesLastTimeRef.current = currentTime
   }, [currentTime, playing, realNotesEnabled, realNotesReady, playMode, fireSampleNow])
