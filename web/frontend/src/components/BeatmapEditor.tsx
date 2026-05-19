@@ -12,7 +12,7 @@ import { ImportedSourcesPanel } from './ImportedSourcesPanel'
 import { ClipsLibraryPanel } from './ClipsLibraryPanel'
 import { SourcePickerModal } from './SourcePickerModal'
 import { GenerateTab } from './pipeline/GenerateTab'
-import { importSlides, buildSlideEmitInfo, groupSlides, type SlideEvent } from '../chart/slides'
+import { importSlides, buildSlideEmitInfo, groupSlides, nextSlideId, pruneSlides, type SlideEvent } from '../chart/slides'
 
 // .chart parsing ------------------------------------------------------------
 
@@ -3833,6 +3833,29 @@ export default function BeatmapEditor() {
     if (!rejected) setDirty(true)
   }, [flashRuleError])
 
+  const makeSlide = useCallback(() => {
+    if (!chart || selectedIds.size < 2) return
+    const id = nextSlideId(chart.notes)
+    const next = chart.notes.map((n, i) =>
+      selectedIds.has(i) ? { ...n, slideId: id } : n,
+    )
+    commitNotes(next)
+  }, [chart, selectedIds, commitNotes])
+
+  const removeSlide = useCallback(() => {
+    if (!chart || selectedIds.size === 0) return
+    const ids = new Set<number>()
+    for (const i of selectedIds) {
+      const s = chart.notes[i]?.slideId
+      if (s != null) ids.add(s)
+    }
+    if (ids.size === 0) return
+    const next = chart.notes.map((n) =>
+      n.slideId != null && ids.has(n.slideId) ? { ...n, slideId: undefined } : n,
+    )
+    commitNotes(next)
+  }, [chart, selectedIds, commitNotes])
+
   const updateSections = useCallback((updater: (prev: ChartSection[]) => ChartSection[]) => {
     setChart((prev) => {
       if (!prev) return prev
@@ -5697,6 +5720,7 @@ export default function BeatmapEditor() {
       if (e.key === '1' && !isCtrl) { setTool('select'); e.preventDefault(); return }
       if (e.key === '2' && !isCtrl) { setTool('note'); e.preventDefault(); return }
       if (e.key === '3' && !isCtrl) { setTool('real'); e.preventDefault(); return }
+      if ((e.key === 's' || e.key === 'S') && !isCtrl) { makeSlide(); e.preventDefault(); return }
 
       if (e.code === 'Space') {
         e.preventDefault()
@@ -5791,7 +5815,7 @@ export default function BeatmapEditor() {
 
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault()
-        const next = chart.notes.filter((_, i) => !selectedIds.has(i))
+        const next = pruneSlides(chart.notes.filter((_, i) => !selectedIds.has(i)))
         commitNotes(next)
         setSelectedIds(new Set())
         return
@@ -5928,7 +5952,7 @@ export default function BeatmapEditor() {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [chart, selectedIds, snapDivisor, commitNotes, undo, redo, currentTime])
+  }, [chart, selectedIds, snapDivisor, commitNotes, undo, redo, currentTime, makeSlide])
 
   const switchDifficulty = (name: string) => {
     if (!chart || name === chart.activeName) return
@@ -7252,6 +7276,27 @@ export default function BeatmapEditor() {
                 title="Redo (Ctrl+Shift+Z or Ctrl+Y)"
               >
                 ↷ Redo
+              </button>
+            </div>
+            <div className="flex items-stretch gap-1">
+              <button
+                onClick={makeSlide}
+                disabled={selectedIds.size < 2}
+                className={`px-1.5 py-1.5 rounded text-[11px] font-medium transition-colors ${
+                  selectedIds.size < 2
+                    ? 'bg-gray-800 text-gray-600 cursor-not-allowed'
+                    : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+                }`}
+                title="Make slide (s) — tag the selected notes (2+) as one slide run"
+              >
+                ⤢ Make slide
+              </button>
+              <button
+                onClick={removeSlide}
+                className="px-1.5 py-1.5 rounded text-[11px] font-medium bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors"
+                title="Remove slide — untag the selected notes' slide"
+              >
+                ⤢✕ Remove slide
               </button>
             </div>
             <details className="mt-1.5 group">
