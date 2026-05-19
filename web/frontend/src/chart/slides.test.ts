@@ -117,6 +117,20 @@ describe('buildSlideEmitInfo', () => {
     expect(roles.get(notes[3])).toBe('end')
   })
 
+  it('assigns middle to chord notes at an intermediate tick', () => {
+    const notes: SlideNote[] = [
+      { tick: 100, lane: 1, sustain: 0, slideId: 1 },
+      { tick: 100, lane: 2, sustain: 0, slideId: 1 },
+      { tick: 200, lane: 2, sustain: 0, slideId: 1 },
+      { tick: 200, lane: 3, sustain: 0, slideId: 1 },
+      { tick: 300, lane: 3, sustain: 0, slideId: 1 },
+      { tick: 300, lane: 4, sustain: 0, slideId: 1 },
+    ]
+    const roles = buildSlideEmitInfo(notes)
+    expect(roles.get(notes[2])).toBe('middle')
+    expect(roles.get(notes[3])).toBe('middle')
+  })
+
   it('ignores groups with fewer than two distinct ticks', () => {
     const notes: SlideNote[] = [
       { tick: 100, lane: 1, sustain: 0, slideId: 1 },
@@ -132,7 +146,10 @@ describe('pruneSlides', () => {
       { tick: 100, lane: 1, sustain: 0, slideId: 1 },
       { tick: 100, lane: 2, sustain: 0, slideId: 1 },
     ]
-    expect(pruneSlides(notes).every((n) => n.slideId === undefined)).toBe(true)
+    expect(pruneSlides(notes)).toEqual([
+      { tick: 100, lane: 1, sustain: 0, slideId: undefined },
+      { tick: 100, lane: 2, sustain: 0, slideId: undefined },
+    ])
   })
 
   it('leaves a valid multi-tick slide intact (same array reference)', () => {
