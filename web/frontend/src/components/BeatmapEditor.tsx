@@ -5165,14 +5165,15 @@ export default function BeatmapEditor() {
       const noteSec = t2s(tick)
       const dy = (noteSec - currentTime) * scrollSpeed
       const y = HIT - dy
-      if (y < -200 || y > H + 200) return
       const note = chart.notes[ids[0]]
+      // Cull on the hold bar's full head->tail extent so a long open hold
+      // doesn't vanish while its tail is still on screen.
+      const tailLen = note.sustain > 0 ? t2s(note.sustain) * scrollSpeed : 0
+      if (y < -200 || y - tailLen > H + 200) return
       const isSelected = ids.some((id) => selectedIds.has(id))
       const barH = 14
       // Sustain bar runs upward from the note marker like single-lane sustains.
       if (note.sustain > 0) {
-        const sustainSec = t2s(note.sustain)
-        const tailLen = sustainSec * scrollSpeed
         ctx.fillStyle = '#a855f7' + '55'  // purple/violet for opens
         ctx.fillRect(GEM_X0, y - tailLen, GEM_W, tailLen)
       }
@@ -5218,12 +5219,14 @@ export default function BeatmapEditor() {
       const noteSec = t2s(n.tick)
       const dy = (noteSec - currentTime) * scrollSpeed
       const y = HIT - dy
-      if (y < -200 || y > H + 200) continue
+      // The hold bar extends upward from the head; cull on the bar's full
+      // head->tail extent so a long hold doesn't vanish while its tail is
+      // still on screen after the head scrolls past the bottom.
+      const tailLen = n.sustain > 0 ? t2s(n.sustain) * scrollSpeed : 0
+      if (y < -200 || y - tailLen > H + 200) continue
       const x = GEM_X0 + (n.lane + 0.5) * LANE_W
 
       if (n.sustain > 0) {
-        const sustainSec = t2s(n.sustain)
-        const tailLen = sustainSec * scrollSpeed
         ctx.fillStyle = LANE_FILL[n.lane] + '88'
         ctx.fillRect(x - LANE_W * 0.1, y - tailLen, LANE_W * 0.2, tailLen)
       }
