@@ -1146,8 +1146,11 @@ function drawSlideRibbons(
     }
     const ticks = [...byTick.keys()].sort((a, b) => a - b)
     if (ticks.length < 2) continue
-    for (const f of byTick.values()) f.sort((a, b) => a - b)
-    const maxFrets = Math.max(...ticks.map((t) => byTick.get(t)!.length))
+    let maxFrets = 1
+    for (const f of byTick.values()) {
+      f.sort((a, b) => a - b)
+      if (f.length > maxFrets) maxFrets = f.length
+    }
     const selected = o.selectedSlideIds.has(sid)
     for (let r = 0; r < maxFrets; r++) {
       for (let i = 0; i + 1 < ticks.length; i++) {
@@ -2524,8 +2527,11 @@ const GemMeshLayer = forwardRef<GemMeshLayerHandle, {
         }
         const ticks = [...byTick.keys()].sort((x, y) => x - y)
         if (ticks.length < 2) continue
-        for (const f of byTick.values()) f.sort((x, y) => x - y)
-        const maxFrets = Math.max(...ticks.map((t) => byTick.get(t)!.length))
+        let maxFrets = 1
+        for (const f of byTick.values()) {
+          f.sort((x, y) => x - y)
+          if (f.length > maxFrets) maxFrets = f.length
+        }
         for (let r = 0; r < maxFrets; r++) {
           for (let i = 0; i + 1 < ticks.length; i++) {
             const sA = t2s(ticks[i])
