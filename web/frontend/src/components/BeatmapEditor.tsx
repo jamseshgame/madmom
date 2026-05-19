@@ -1134,6 +1134,7 @@ function drawSlideRibbons(
 ): void {
   const laneX = (lane: number) => o.gemX0 + (lane + 0.5) * o.laneW
   const tickY = (tick: number) => o.hit - (o.t2s(tick) - o.currentTime) * o.scrollSpeed
+  ctx.save()
   ctx.lineCap = 'round'
   ctx.lineJoin = 'round'
   for (const [sid, group] of groupSlides(notes)) {
@@ -1154,6 +1155,9 @@ function drawSlideRibbons(
         const fb = byTick.get(ticks[i + 1])!
         const laneA = fa[Math.min(r, fa.length - 1)]
         const laneB = fb[Math.min(r, fb.length - 1)]
+        // Ribbons only span the five coloured fret lanes; laneFill has no
+        // entry for modifier (5/6) or open (7) lanes.
+        if (laneA > 4 || laneB > 4) continue
         ctx.beginPath()
         ctx.moveTo(laneX(laneA), tickY(ticks[i]))
         ctx.lineTo(laneX(laneB), tickY(ticks[i + 1]))
@@ -1163,6 +1167,7 @@ function drawSlideRibbons(
       }
     }
   }
+  ctx.restore()
 }
 
 interface BeatmapMeta {
