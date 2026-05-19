@@ -12,6 +12,7 @@ import { ImportedSourcesPanel } from './ImportedSourcesPanel'
 import { ClipsLibraryPanel } from './ClipsLibraryPanel'
 import { SourcePickerModal } from './SourcePickerModal'
 import { GenerateTab } from './pipeline/GenerateTab'
+import { importSlides, type SlideEvent } from '../chart/slides'
 
 // .chart parsing ------------------------------------------------------------
 
@@ -19,6 +20,9 @@ interface ChartNote {
   tick: number
   lane: number       // 0-4 colored frets, 5 force-hopo, 6 tap, 7 open
   sustain: number    // sustain length in ticks (0 = single hit)
+  // Slide membership. Notes sharing a slideId form one slide run; see
+  // chart/slides.ts. The earliest tick is the start, the latest is the end.
+  slideId?: number
   // Real-note: emit as `R` instead of `N`. Pack/scale are propagated from the
   // most recent E realnotes_pack / realnotes_scale event in the section at
   // parse time, and re-emitted as E events at serialize time when the active
@@ -412,7 +416,7 @@ function findNoteSections(text: string): string[] {
   return out
 }
 
-function parseSectionNotes(text: string, name: string): ChartNote[] {
+function parseSectionNotes(text: string, name: string, resolution: number): ChartNote[] {
   const start = text.indexOf(`[${name}]`)
   if (start === -1) return []
   const open = text.indexOf('{', start)
@@ -427,6 +431,7 @@ function parseSectionNotes(text: string, name: string): ChartNote[] {
     | { tick: number; kind: 'note' | 'realnote'; lane: number; sustain: number }
     | { tick: number; kind: 'pack' | 'scale'; value: string }
   const raws: { i: number; line: RawLine }[] = []
+  const slideEvents: SlideEvent[] = []
   let i = 0
   for (const raw of inner.split('\n')) {
     i++
@@ -440,6 +445,8 @@ function parseSectionNotes(text: string, name: string): ChartNote[] {
     if (m) { raws.push({ i, line: { tick: Number(m[1]), kind: 'pack', value: m[2] } }); continue }
     m = t.match(/^(\d+)\s*=\s*E\s+realnotes_scale\s+(\S+)/)
     if (m) { raws.push({ i, line: { tick: Number(m[1]), kind: 'scale', value: m[2] } }); continue }
+    m = t.match(/^(\d+)\s*=\s*E\s+slide\s+(\d+)/)
+    if (m) { slideEvents.push({ tick: Number(m[1]), fret: Number(m[2]) }); continue }
   }
   raws.sort((a, b) => a.line.tick - b.line.tick || a.i - b.i)
   let activePack: string | undefined
@@ -454,7 +461,7 @@ function parseSectionNotes(text: string, name: string): ChartNote[] {
       type: 'real', pack: activePack, scale: activeScale,
     })
   }
-  return notes
+  return importSlides(notes, slideEvents, resolution)
 }
 
 // Slice a source beatmap's notes into a [MusicSeg_<id>] section body.
@@ -1052,7 +1059,7 @@ function parseChart(text: string, prefer?: string, customNames: Set<string> = ne
   // there's always a current target. The first save creates the section.
   if (!activeName) activeName = 'EasySingle'
 
-  const notes = activeName ? parseSectionNotes(text, activeName) : []
+  const notes = activeName ? parseSectionNotes(text, activeName, resolution) : []
   const tutorial = parseTutorialSection(text)
   const musicSections = parseMusicSections(text)
   const importedSources = parseImportedSources(text)
@@ -5737,7 +5744,7 @@ export default function BeatmapEditor() {
       chart.sceneEvents,
       passthroughWithSections,
     )
-    const newNotes = parseSectionNotes(newFull, name)
+    const newNotes = parseSectionNotes(newFull, name, chart.resolution)
     // Tutorial section is shared across difficulties — just keep current state.
     // Track the new section in availableSections so the dropdown reflects it as
     // "live" even before the first save creates the on-disk block.
@@ -6723,7 +6730,7 @@ export default function BeatmapEditor() {
             const noteCountOf = (name: string): number => {
               if (name === chart.activeName) return chart.notes.length
               if (!chart.availableSections.includes(name)) return 0
-              return parseSectionNotes(chart.fullText, name).length
+              return parseSectionNotes(chart.fullText, name, chart.resolution).length
             }
             return (
               <CollapsibleSection id="difficulty" title="Difficulty">
