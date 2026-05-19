@@ -308,9 +308,13 @@ function checkNoteRules(notes: ChartNote[], resolution: number): string | null {
   const CHORD_NEAR = Math.max(1, Math.round(resolution / 16))  // ≈ 1/16 beat
   // Group gem + open notes by tick. Modifiers (lanes 5/6) are skipped — they
   // attach to the underlying note and don't add to the chord count.
+  // Slide-tagged notes are also excluded: a slide is a run of sequential notes,
+  // not a chord — synthesised slide-start notes must not inflate the per-tick
+  // count and falsely block commits on unrelated edits.
   const tickLanes = new Map<number, number[]>()
   for (const n of notes) {
     if (n.lane > 4 && n.lane !== 7) continue
+    if (n.slideId != null) continue   // slides are runs, not chords
     const arr = tickLanes.get(n.tick)
     if (arr) arr.push(n.lane); else tickLanes.set(n.tick, [n.lane])
   }
