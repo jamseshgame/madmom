@@ -4,10 +4,12 @@ disk, invokes the engine, writes the result back as a new active
 version, and updates pipeline_state.json. No FastAPI or async deps."""
 from __future__ import annotations
 
+import datetime as dt
 import json
 from pathlib import Path
 from typing import Any, Callable
 
+from ...routers.pipeline_order import upstream_for
 from .registry import Stage, get_engine
 from .state import (
     StageState,
@@ -17,13 +19,13 @@ from .state import (
     save_pipeline_state,
 )
 from .storage import (
+    _TRACK_LEVEL_STAGES,
     list_versions,
     save_version_and_activate,
     stage_path,
 )
 
 
-_TRACK_LEVEL_STAGES = {Stage.GRID}
 _S7_STAGES = {Stage.LANES_HARD, Stage.LANES_MEDIUM, Stage.LANES_EASY}
 
 
@@ -36,7 +38,6 @@ def _gather_upstream(track_dir: Path, stage: Stage, stem: str | None) -> dict[st
         upstream['grid'] = json.loads(grid_p.read_text())
     if stem is None:
         return upstream
-    from ...routers.pipeline_order import upstream_for
     for s in upstream_for(stage):
         p = stage_path(track_dir, s, stem)
         if p.exists():
@@ -108,10 +109,9 @@ def run_stage(
     )
     payload.setdefault('engine', engine_id)
     payload.setdefault('params', params)
-    import datetime as _dt
     payload.setdefault(
         'generated_at',
-        _dt.datetime.now(_dt.UTC).isoformat().replace('+00:00', 'Z'),
+        dt.datetime.now(dt.UTC).isoformat().replace('+00:00', 'Z'),
     )
 
     if stage in _S7_STAGES and 'by_difficulty' in payload:
