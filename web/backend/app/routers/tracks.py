@@ -425,6 +425,241 @@ async def generate_beatmap_from_track(
     return {'job_id': job.id}
 
 
+@router.post('/{track_id}/generate-beatmap-v2')
+async def generate_beatmap_v2(
+    track_id: str,
+    stem: str = Form(...),
+    # song.ini fields (same shape as legacy endpoint)
+    name: str = Form(''),
+    artist: str = Form(''),
+    album: str = Form(''),
+    genre: str = Form(''),
+    year: str = Form(''),
+    charter: str = Form('Jamsesh'),
+    loading_phrase: str = Form(''),
+    icon: str = Form(''),
+    album_track: int = Form(0),
+    playlist_track: int = Form(0),
+    delay: int = Form(0),
+    preview_start_time: int = Form(0),
+    video_start_time: int = Form(0),
+    song_length: int = Form(0),
+    diff_guitar: int = Form(-1),
+    diff_rhythm: int = Form(-1),
+    diff_bass: int = Form(-1),
+    diff_guitar_coop: int = Form(-1),
+    diff_drums: int = Form(-1),
+    diff_drums_real: int = Form(-1),
+    diff_keys: int = Form(-1),
+    diff_guitarghl: int = Form(-1),
+    diff_bassghl: int = Form(-1),
+    hopo_frequency: int = Form(0),
+    sustain_cutoff_threshold: int = Form(0),
+    five_lane_drums: bool = Form(True),
+    modchart: bool = Form(False),
+    # V2 pipeline engine selections
+    onsets_engine: str = Form('librosa-onset'),
+    onsets_params: str = Form('{}'),
+    pitches_engine: str = Form('yin'),
+    pitches_params: str = Form('{}'),
+    quantized_engine: str = Form('metric-weighted'),
+    quantized_params: str = Form('{}'),
+    lanes_engine: str = Form('section-sliding'),
+    lanes_params: str = Form('{}'),
+    playability_engine: str = Form('identity'),
+    playability_params: str = Form('{}'),
+):
+    """Generate a beatmap by driving the V2 staged pipeline end-to-end.
+
+    Unlike `/generate-beatmap` (legacy), this endpoint runs each V2 stage in
+    sequence with the caller-selected engines and writes the final
+    notes.chart via the V2 serializer. Drums stem is rejected — drums use
+    the legacy endpoint for single-hit output.
+    """
+    import json as _json
+
+    if stem == 'drums':
+        raise HTTPException(400, 'Drums stem is not supported by V2 pipeline; use /generate-beatmap')
+
+    track = get_track(track_id)
+    if not track:
+        raise HTTPException(404, 'Track not found')
+    filename = track.stems.get(stem)
+    if not filename:
+        raise HTTPException(404, f'Stem not found: {stem}')
+    stem_path = track.stems_dir / filename
+    if not stem_path.exists():
+        raise HTTPException(404, 'Stem file not found on disk')
+
+    def _parse(field_name: str, raw: str) -> dict:
+        try:
+            return _json.loads(raw or '{}')
+        except _json.JSONDecodeError as e:
+            raise HTTPException(400, f'{field_name} is not valid JSON: {e}')
+
+    engine_params = {
+        'onsets': (onsets_engine, _parse('onsets_params', onsets_params)),
+        'pitches': (pitches_engine, _parse('pitches_params', pitches_params)),
+        'quantized': (quantized_engine, _parse('quantized_params', quantized_params)),
+        'lanes_expert': (lanes_engine, _parse('lanes_params', lanes_params)),
+        'lanes_filtered': (playability_engine, _parse('playability_params', playability_params)),
+    }
+
+    song_name = name or f'{track.name} ({stem})'
+    song_artist = artist or track.artist or 'Unknown'
+    song_album = album or track.album or 'Unknown'
+    song_genre = genre or track.genre or 'Unknown'
+    song_year = year or track.year or ''
+
+    ini_overrides = {
+        'charter': charter, 'loading_phrase': loading_phrase, 'icon': icon,
+        'album_track': album_track, 'playlist_track': playlist_track,
+        'delay': delay, 'preview_start_time': preview_start_time,
+        'video_start_time': video_start_time, 'song_length': song_length,
+        'diff_guitar': diff_guitar, 'diff_rhythm': diff_rhythm,
+        'diff_bass': diff_bass, 'diff_guitar_coop': diff_guitar_coop,
+        'diff_drums': diff_drums, 'diff_drums_real': diff_drums_real,
+        'diff_keys': diff_keys, 'diff_guitarghl': diff_guitarghl,
+        'diff_bassghl': diff_bassghl, 'hopo_frequency': hopo_frequency,
+        'sustain_cutoff_threshold': sustain_cutoff_threshold,
+        'five_lane_drums': five_lane_drums, 'modchart': modchart,
+    }
+
+    upload_dir = Path(settings.upload_dir)
+    bm_title = f'{song_artist} — {song_name} ({stem})' if song_artist and song_artist != 'Unknown' else f'{song_name} ({stem})'
+    job = create_job(kind=JobKind.BEATMAP, title=bm_title)
+    job.track_id = track_id
+    job.metadata['track_id'] = track_id
+    job.metadata['stem'] = stem
+    job.metadata['pipeline'] = 'v2'
+    job_dir = upload_dir / job.id
+    job_dir.mkdir(parents=True)
+    job.output_dir = job_dir
+
+    safe_artist = song_artist.replace('/', '-').replace('\\', '-').replace(':', '-').strip()
+    safe_title = song_name.replace('/', '-').replace('\\', '-').replace(':', '-').strip()
+    folder_name = f'{safe_artist} - {safe_title}'
+    job.metadata['folder_name'] = folder_name
+    output_dir = job_dir / folder_name
+
+    async def _run():
+        from ..services.pipeline.registry import Stage
+        from ..services.pipeline.runner import run_stage
+        from ..services.pipeline.storage import stage_path
+        from ..services.pipeline.serialize import serialize_chart
+        from ..services.audio import convert_to_ogg
+        from ..services.chart_generator import write_chart_song_ini
+        from ..services import tracks as tracks_mod
+
+        job.status = JobStatus.RUNNING
+        loop = asyncio.get_running_loop()
+
+        def make_on_progress(stage_lo: int, stage_hi: int):
+            def cb(step: str, pct: int, msg: str) -> None:
+                mapped = int(stage_lo + (stage_hi - stage_lo) * (max(0, min(100, pct)) / 100))
+                asyncio.run_coroutine_threadsafe(job.send(step, mapped, msg), loop)
+            return cb
+
+        try:
+            td = tracks_mod.TRACKS_DIR / track_id
+
+            # S1: Grid (track-level) — reuse if active.json exists
+            grid_p = stage_path(td, Stage.GRID, None)
+            if not grid_p.exists():
+                await job.send('grid', 2, 'Computing tempo grid…')
+                await loop.run_in_executor(None, lambda: run_stage(
+                    Stage.GRID, td, None, 'librosa-beat', {},
+                    make_on_progress(2, 10),
+                ))
+
+            # Stem-scoped stages
+            stages = [
+                (Stage.ONSETS, *engine_params['onsets'], 10, 25, 'Detecting onsets'),
+                (Stage.PITCHES, *engine_params['pitches'], 25, 45, 'Estimating pitches'),
+                (Stage.QUANTIZED, *engine_params['quantized'], 45, 55, 'Quantising to grid'),
+                (Stage.LANES_EXPERT, *engine_params['lanes_expert'], 55, 70, 'Mapping lanes (Expert)'),
+                (Stage.LANES_FILTERED, *engine_params['lanes_filtered'], 70, 78, 'Filtering for playability'),
+            ]
+            for st, eng, p, lo, hi, label in stages:
+                await job.send(st.value, lo, label + '…')
+                await loop.run_in_executor(None, lambda st=st, eng=eng, p=p, lo=lo, hi=hi: run_stage(
+                    st, td, stem, eng, p, make_on_progress(lo, hi),
+                ))
+
+            # S7: difficulties — defaults, run once (writes all three sub-stages)
+            await job.send('lanes_hard', 78, 'Building Hard/Medium/Easy…')
+            await loop.run_in_executor(None, lambda: run_stage(
+                Stage.LANES_HARD, td, stem, 'metric-weight', {},
+                make_on_progress(78, 90),
+            ))
+
+            # S8: build chart
+            await job.send('build', 90, 'Writing notes.chart…')
+            grid = _json.loads(grid_p.read_text())
+            lanes_per_difficulty: dict[str, dict] = {}
+            filtered_p = stage_path(td, Stage.LANES_FILTERED, stem)
+            expert_p = stage_path(td, Stage.LANES_EXPERT, stem)
+            lanes_per_difficulty['ExpertSingle'] = _json.loads(
+                (filtered_p if filtered_p.exists() else expert_p).read_text()
+            )
+            for diff_section, st in (
+                ('HardSingle', Stage.LANES_HARD),
+                ('MediumSingle', Stage.LANES_MEDIUM),
+                ('EasySingle', Stage.LANES_EASY),
+            ):
+                p = stage_path(td, st, stem)
+                if p.exists():
+                    lanes_per_difficulty[diff_section] = _json.loads(p.read_text())
+
+            chart_text = serialize_chart(
+                grid=grid, lanes_per_difficulty=lanes_per_difficulty,
+                song_name=song_name, resolution=int(grid['resolution']),
+            )
+            output_dir.mkdir(parents=True, exist_ok=True)
+            chart_path = str(output_dir / 'notes.chart')
+            Path(chart_path).write_text(chart_text, encoding='utf-8')
+
+            # Audio
+            await job.send('convert', 94, 'Converting audio to song.ogg…')
+            ogg_path = str(output_dir / 'song.ogg')
+            await loop.run_in_executor(None, lambda: convert_to_ogg(str(stem_path), ogg_path))
+
+            # song.ini
+            await job.send('finalize', 97, 'Writing song.ini…')
+            write_chart_song_ini(
+                out_dir=output_dir, chart_path=chart_path,
+                song_name=song_name, artist=song_artist, album=song_album,
+                genre=song_genre, year=song_year, ini_overrides=ini_overrides,
+            )
+
+            # Register beatmap record
+            try:
+                from importlib.metadata import version as _pkg_version
+                _madmom_version = _pkg_version('madmom')
+            except Exception:
+                _madmom_version = None
+            model_version = f'{_madmom_version}+v2' if _madmom_version else 'v2'
+            add_beatmap_record(
+                track_id=track_id, beatmap_id=job.id, stem=stem,
+                folder_name=folder_name, song_name=song_name,
+                source_dir=output_dir,
+                model='madmom', model_version=model_version,
+            )
+            await job.send_done({
+                'chart_path': chart_path, 'ogg_path': ogg_path,
+                'song_name': song_name, 'artist': song_artist,
+                'folder_name': folder_name,
+            })
+        except asyncio.CancelledError:
+            return
+        except Exception as e:  # noqa: BLE001
+            if not job.cancelled:
+                await job.send_error(str(e) or 'V2 pipeline failed')
+
+    job.task = asyncio.create_task(_run())
+    return {'job_id': job.id}
+
+
 def _parse_song_ini_sections(text: str) -> dict[str, dict[str, str]]:
     """Parse a song.ini, preserving [section] grouping. Lower-cases keys/sections."""
     sections: dict[str, dict[str, str]] = {}
