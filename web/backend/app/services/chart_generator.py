@@ -180,6 +180,90 @@ def merge_charts(chart_paths: list[str], section_names: list[str], output_path: 
                 f.write(f'[{section_name}]\n{{{sections[section_name]}}}\n')
 
 
+def write_chart_song_ini(
+    out_dir: Path | str,
+    *,
+    chart_path: str,
+    song_name: str,
+    artist: str,
+    album: str,
+    genre: str,
+    year: str,
+    ini_overrides: dict | None = None,
+) -> str:
+    """Write song.ini next to a notes.chart, including [<diff>_stats]
+    sections derived from the chart.
+
+    Returns the path to the written ini.
+    """
+    from .chart_analyser import analyse_chart_file
+
+    out_dir = Path(out_dir)
+    with open(chart_path, 'r') as f:
+        chart_content = f.read()
+    analysis = analyse_chart_file(chart_content)
+
+    pair_names = ['0+1', '1+2', '2+3', '3+4']
+    ini_path = str(out_dir / 'song.ini')
+    ov = ini_overrides or {}
+    with open(ini_path, 'w') as f:
+        f.write('[song]\n')
+        f.write(f'name = {song_name}\n')
+        f.write(f'artist = {artist}\n')
+        f.write(f'album = {album}\n')
+        f.write(f'genre = {genre}\n')
+        f.write(f'year = {year}\n')
+        f.write(f'charter = {ov.get("charter", "Jamsesh")}\n')
+        f.write(f'loading_phrase = {ov.get("loading_phrase", "")}\n')
+        if ov.get('icon'):
+            f.write(f'icon = {ov["icon"]}\n')
+        f.write(f'album_track = {ov.get("album_track", 0)}\n')
+        f.write(f'playlist_track = {ov.get("playlist_track", 0)}\n')
+        f.write(f'delay = {ov.get("delay", 0)}\n')
+        f.write(f'preview_start_time = {ov.get("preview_start_time", 0)}\n')
+        if ov.get('video_start_time'):
+            f.write(f'video_start_time = {ov["video_start_time"]}\n')
+        if ov.get('song_length'):
+            f.write(f'song_length = {ov["song_length"]}\n')
+        for diff_key in (
+            'diff_guitar', 'diff_rhythm', 'diff_bass', 'diff_guitar_coop',
+            'diff_drums', 'diff_drums_real', 'diff_keys',
+            'diff_guitarghl', 'diff_bassghl',
+        ):
+            val = ov.get(diff_key, -1)
+            f.write(f'{diff_key} = {val}\n')
+        if ov.get('hopo_frequency'):
+            f.write(f'hopo_frequency = {ov["hopo_frequency"]}\n')
+        if ov.get('sustain_cutoff_threshold'):
+            f.write(f'sustain_cutoff_threshold = {ov["sustain_cutoff_threshold"]}\n')
+        if ov.get('five_lane_drums'):
+            f.write('five_lane_drums = True\n')
+        if ov.get('modchart'):
+            f.write('modchart = True\n')
+
+        for section_name, stats in analysis.get('difficulties', {}).items():
+            prefix = section_name.replace('Single', '').lower()
+            f.write(f'\n[{prefix}_stats]\n')
+            f.write(f'total_events = {stats["total_events"]}\n')
+            for fret in range(5):
+                f.write(f'single_{fret} = {stats["singles"].get(str(fret), 0)}\n')
+            for fret in range(5):
+                f.write(f'hold_{fret} = {stats["holds"].get(str(fret), 0)}\n')
+            for fret in range(5):
+                f.write(f'slide_{fret} = {stats["slides"].get(str(fret), 0)}\n')
+            for pname in pair_names:
+                f.write(f'chord_{pname} = {stats["chords"].get(pname, 0)}\n')
+            for pname in pair_names:
+                f.write(f'chord_hold_{pname} = {stats["chord_holds"].get(pname, 0)}\n')
+            for pname in pair_names:
+                f.write(f'chord_slide_{pname} = {stats["chord_slides"].get(pname, 0)}\n')
+            f.write(f'open_normal = {stats["open_normal"]}\n')
+            f.write(f'open_hold = {stats["open_hold"]}\n')
+            f.write(f'open_slide = {stats["open_slide"]}\n')
+
+    return ini_path
+
+
 async def generate_full_chart(
     audio_path: str,
     output_dir: str,
@@ -401,71 +485,16 @@ async def generate_full_chart(
 
     # ── Step 5: Write song.ini with note type summaries ──
     await report('finalize', 97, 'Writing song.ini...')
-    from .chart_analyser import analyse_chart_file
-
-    with open(chart_output, 'r') as f:
-        chart_content = f.read()
-    analysis = analyse_chart_file(chart_content)
-
-    pair_names = ['0+1', '1+2', '2+3', '3+4']
-    ini_path = str(out_dir / 'song.ini')
-    ov = ini_overrides or {}
-    with open(ini_path, 'w') as f:
-        f.write('[song]\n')
-        f.write(f'name = {song_name}\n')
-        f.write(f'artist = {artist}\n')
-        f.write(f'album = {album}\n')
-        f.write(f'genre = {genre}\n')
-        f.write(f'year = {year}\n')
-        f.write(f'charter = {ov.get("charter", "Jamsesh")}\n')
-        f.write(f'loading_phrase = {ov.get("loading_phrase", "")}\n')
-        if ov.get('icon'):
-            f.write(f'icon = {ov["icon"]}\n')
-        f.write(f'album_track = {ov.get("album_track", 0)}\n')
-        f.write(f'playlist_track = {ov.get("playlist_track", 0)}\n')
-        f.write(f'delay = {ov.get("delay", 0)}\n')
-        f.write(f'preview_start_time = {ov.get("preview_start_time", 0)}\n')
-        if ov.get('video_start_time'):
-            f.write(f'video_start_time = {ov["video_start_time"]}\n')
-        if ov.get('song_length'):
-            f.write(f'song_length = {ov["song_length"]}\n')
-        # Difficulty ratings
-        for diff_key in [
-            'diff_guitar', 'diff_rhythm', 'diff_bass', 'diff_guitar_coop',
-            'diff_drums', 'diff_drums_real', 'diff_keys',
-            'diff_guitarghl', 'diff_bassghl',
-        ]:
-            val = ov.get(diff_key, -1)
-            f.write(f'{diff_key} = {val}\n')
-        # Gameplay
-        if ov.get('hopo_frequency'):
-            f.write(f'hopo_frequency = {ov["hopo_frequency"]}\n')
-        if ov.get('sustain_cutoff_threshold'):
-            f.write(f'sustain_cutoff_threshold = {ov["sustain_cutoff_threshold"]}\n')
-        if ov.get('five_lane_drums'):
-            f.write('five_lane_drums = True\n')
-        if ov.get('modchart'):
-            f.write('modchart = True\n')
-
-        for section_name, stats in analysis.get('difficulties', {}).items():
-            prefix = section_name.replace('Single', '').lower()
-            f.write(f'\n[{prefix}_stats]\n')
-            f.write(f'total_events = {stats["total_events"]}\n')
-            for fret in range(5):
-                f.write(f'single_{fret} = {stats["singles"].get(str(fret), 0)}\n')
-            for fret in range(5):
-                f.write(f'hold_{fret} = {stats["holds"].get(str(fret), 0)}\n')
-            for fret in range(5):
-                f.write(f'slide_{fret} = {stats["slides"].get(str(fret), 0)}\n')
-            for pname in pair_names:
-                f.write(f'chord_{pname} = {stats["chords"].get(pname, 0)}\n')
-            for pname in pair_names:
-                f.write(f'chord_hold_{pname} = {stats["chord_holds"].get(pname, 0)}\n')
-            for pname in pair_names:
-                f.write(f'chord_slide_{pname} = {stats["chord_slides"].get(pname, 0)}\n')
-            f.write(f'open_normal = {stats["open_normal"]}\n')
-            f.write(f'open_hold = {stats["open_hold"]}\n')
-            f.write(f'open_slide = {stats["open_slide"]}\n')
+    ini_path = write_chart_song_ini(
+        out_dir=out_dir,
+        chart_path=chart_output,
+        song_name=song_name,
+        artist=artist,
+        album=album,
+        genre=genre,
+        year=year,
+        ini_overrides=ini_overrides,
+    )
 
     return {
         'chart_path': chart_output,
