@@ -203,6 +203,7 @@ def add_beatmap_record(
     *,
     model: str | None = None,
     model_version: str | None = None,
+    preset: str | None = None,
 ) -> Track | None:
     """Copy a freshly generated beatmap folder into the track's beatmaps_dir
     and append a record to the track. Returns the updated track.
@@ -210,7 +211,9 @@ def add_beatmap_record(
     `model` / `model_version` capture provenance the same way lyrics_versions
     and vocal_notes_versions do, so the picker UI can badge each row with
     `MADMOM 0.17.dev0` / `MANUAL` / `IMPORTED` and flag stale versions when
-    the installed package moves on."""
+    the installed package moves on. `preset` records which generation-preset
+    name produced the beatmap (V2 pipeline only); the picker renders it as a
+    second badge next to the model badge so A/B comparisons stay legible."""
     track = Track.load(track_id)
     if not track:
         return None
@@ -229,6 +232,7 @@ def add_beatmap_record(
         'active': True,
         'model': model,
         'model_version': model_version,
+        'preset': preset,
     }
     # Replace any prior record with the same id (shouldn't happen, but keeps it tidy)
     track.beatmaps = [b for b in track.beatmaps if b.get('id') != beatmap_id]

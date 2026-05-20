@@ -20,6 +20,7 @@ from .routers import (
     elevenlabs,
     game_songs,
     gem_meshes,
+    generation_presets,
     highways,
     jobs,
     lyrics,
@@ -88,6 +89,7 @@ app.include_router(sample_packs.router, dependencies=_auth_dep)
 app.include_router(scene_events.router, dependencies=_auth_dep)
 app.include_router(gem_meshes.router, dependencies=_auth_dep)
 app.include_router(highways.router, dependencies=_auth_dep)
+app.include_router(generation_presets.router, dependencies=_auth_dep)
 # users router has its own require_admin / require_auth Depends per route
 app.include_router(users.router)
 

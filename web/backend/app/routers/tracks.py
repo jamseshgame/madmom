@@ -468,6 +468,8 @@ async def generate_beatmap_v2(
     lanes_params: str = Form('{}'),
     playability_engine: str = Form('identity'),
     playability_params: str = Form('{}'),
+    # Optional preset name — recorded on the beatmap so the picker badges it
+    preset: str = Form(''),
 ):
     """Generate a beatmap by driving the V2 staged pipeline end-to-end.
 
@@ -644,6 +646,7 @@ async def generate_beatmap_v2(
                 folder_name=folder_name, song_name=song_name,
                 source_dir=output_dir,
                 model='madmom', model_version=model_version,
+                preset=(preset.strip() or None),
             )
             await job.send_done({
                 'chart_path': chart_path, 'ogg_path': ogg_path,

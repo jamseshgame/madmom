@@ -13,6 +13,10 @@ export interface BeatmapRecord {
   // and the picker falls back to a neutral badge.
   model?: string | null
   model_version?: string | null
+  // V2-pipeline-only: the name of the generation preset that produced this
+  // beatmap (e.g. 'v1', 'v4 — chord-heavy'). Surfaced as a secondary badge
+  // next to the model badge so A/B comparison runs stay legible.
+  preset?: string | null
 }
 
 const STEM_COLORS: Record<string, string> = {

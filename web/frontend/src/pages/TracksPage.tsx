@@ -104,6 +104,16 @@ const GENERATION_DEFAULTS: Record<GenerationStage, { engine: string; params: Rec
   lanes_filtered: { engine: 'identity', params: {} },
 }
 
+// A saved bundle of {engine, params} choices for each V2 stage. Built-in
+// presets ship with the backend; user-saved ones live in
+// <upload_dir>/generation_presets.json. The picker on the modal lists both.
+interface GenerationPreset {
+  name: string
+  description?: string
+  builtin?: boolean
+  generation: Record<GenerationStage, { engine: string; params: Record<string, unknown> }>
+}
+
 function BeatmapPanel({
   track,
   stem,
@@ -131,6 +141,14 @@ function BeatmapPanel({
   // resolves) and the user's current per-stage engine + params selection.
   const [engines, setEngines] = useState<Record<string, EngineSpec[]> | null>(null)
   const [generation, setGeneration] = useState<Record<GenerationStage, { engine: string; params: Record<string, unknown> }>>(GENERATION_DEFAULTS)
+  // Generation presets — loaded from /api/generation-presets. `activePreset`
+  // is the currently selected preset name; '' means the user has edited away
+  // from any preset (the dropdown shows "Custom"). The active name is sent
+  // as the `preset` form field so the picker badge stays accurate.
+  const [presets, setPresets] = useState<GenerationPreset[]>([])
+  const [activePreset, setActivePreset] = useState<string>('')
+  const [presetSaving, setPresetSaving] = useState(false)
+  const [presetError, setPresetError] = useState('')
 
   useEffect(() => {
     fetch('/api/tracks/schema/song-ini')
@@ -178,6 +196,91 @@ function BeatmapPanel({
       .catch(console.error)
   }, [])
 
+  const refreshPresets = useCallback(() => {
+    fetch('/api/generation-presets')
+      .then((r) => r.json())
+      .then((list: GenerationPreset[]) => {
+        setPresets(list)
+        // Pick v1 (the default) on first load so the dropdown isn't blank
+        // and the modal's initial state actually matches the labelled preset.
+        if (!activePreset && list.find((p) => p.name === 'v1')) {
+          setActivePreset('v1')
+        }
+      })
+      .catch(console.error)
+  }, [activePreset])
+
+  useEffect(() => { refreshPresets() }, [refreshPresets])
+
+  const applyPreset = (name: string) => {
+    setActivePreset(name)
+    if (!name) return
+    const p = presets.find((x) => x.name === name)
+    if (!p) return
+    // Deep-copy the params so subsequent edits don't mutate the stored preset.
+    const next: typeof generation = { ...GENERATION_DEFAULTS }
+    ;(Object.keys(GENERATION_STAGE_LABELS) as GenerationStage[]).forEach((stage) => {
+      const s = p.generation[stage]
+      if (s) next[stage] = { engine: s.engine, params: { ...s.params } }
+    })
+    setGeneration(next)
+  }
+
+  // Any manual edit to engine/params drops us out of "v1 — selected" into
+  // a Custom state so the dropdown doesn't lie about what's running.
+  const markCustom = () => { if (activePreset) setActivePreset('') }
+
+  const savePresetAs = async () => {
+    setPresetError('')
+    // Suggest the next free vN slot so the user doesn't have to invent a name.
+    const usedV = new Set(presets.filter((p) => /^v\d+/i.test(p.name)).map((p) => p.name))
+    let suggestion = ''
+    for (let i = 12; i < 200; i++) {
+      const candidate = `v${i}`
+      if (!usedV.has(candidate)) { suggestion = candidate; break }
+    }
+    const name = window.prompt('Save current settings as preset (name):', suggestion)
+    if (!name) return
+    setPresetSaving(true)
+    try {
+      const res = await fetch('/api/generation-presets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name.trim(), generation }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || `HTTP ${res.status}`)
+      }
+      setActivePreset(name.trim())
+      refreshPresets()
+    } catch (e) {
+      setPresetError((e as Error).message)
+    } finally {
+      setPresetSaving(false)
+    }
+  }
+
+  const deleteActivePreset = async () => {
+    if (!activePreset) return
+    const target = presets.find((p) => p.name === activePreset)
+    if (!target || target.builtin) return
+    if (!window.confirm(`Delete preset "${activePreset}"?`)) return
+    try {
+      const res = await fetch(`/api/generation-presets/${encodeURIComponent(activePreset)}`, {
+        method: 'DELETE',
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || `HTTP ${res.status}`)
+      }
+      setActivePreset('')
+      refreshPresets()
+    } catch (e) {
+      setPresetError((e as Error).message)
+    }
+  }
+
   const setValue = (key: string, val: unknown) => {
     setValues((prev) => ({ ...prev, [key]: val }))
   }
@@ -209,6 +312,9 @@ function BeatmapPanel({
         formData.append(`${fieldPrefix}_engine`, sel.engine)
         formData.append(`${fieldPrefix}_params`, JSON.stringify(sel.params))
       }
+      // Record which preset (if any) drove this generation so the picker
+      // can show a badge on the result.
+      if (activePreset) formData.append('preset', activePreset)
     }
 
     const endpoint = useV2
@@ -340,7 +446,49 @@ function BeatmapPanel({
                   Also hidden until the engine catalog has loaded. */}
               {idx === 0 && stem !== 'drums' && engines && (
                 <div>
-                  <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Generation</h4>
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Generation</h4>
+                    <div className="flex items-center gap-2">
+                      <select
+                        value={activePreset}
+                        onChange={(e) => applyPreset(e.target.value)}
+                        className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs"
+                        title="Apply a saved preset"
+                      >
+                        <option value="">Custom</option>
+                        {presets.map((p) => (
+                          <option key={p.name} value={p.name}>
+                            {p.builtin ? p.name : `★ ${p.name}`}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={savePresetAs}
+                        disabled={presetSaving}
+                        className="px-2 py-1 text-xs bg-gray-800 hover:bg-gray-700 disabled:opacity-50 border border-gray-700 rounded"
+                        title="Save current settings as a new preset"
+                      >
+                        Save as…
+                      </button>
+                      {activePreset && !presets.find((p) => p.name === activePreset)?.builtin && (
+                        <button
+                          type="button"
+                          onClick={deleteActivePreset}
+                          className="px-2 py-1 text-xs bg-red-900/40 hover:bg-red-800/60 border border-red-800 text-red-300 rounded"
+                          title={`Delete preset "${activePreset}"`}
+                        >
+                          Delete
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  {presetError && <div className="mb-2 text-xs text-red-400">{presetError}</div>}
+                  {activePreset && (
+                    <p className="text-[11px] text-gray-500 italic mb-2">
+                      {presets.find((p) => p.name === activePreset)?.description || ''}
+                    </p>
+                  )}
                   <div className="space-y-3">
                     {(Object.keys(GENERATION_STAGE_LABELS) as GenerationStage[]).map((stage) => {
                       const stageEngines = engines[stage] || []
@@ -353,6 +501,7 @@ function BeatmapPanel({
                             <select
                               value={selected.engine}
                               onChange={(e) => {
+                                markCustom()
                                 const nextEngineId = e.target.value
                                 const nextSpec = stageEngines.find((s) => s.engine_id === nextEngineId)
                                 const nextParams: Record<string, unknown> = {}
@@ -379,10 +528,13 @@ function BeatmapPanel({
                                   keyName={key}
                                   spec={pspec}
                                   value={selected.params[key]}
-                                  onChange={(v) => setGeneration((prev) => ({
-                                    ...prev,
-                                    [stage]: { ...prev[stage], params: { ...prev[stage].params, [key]: v } },
-                                  }))}
+                                  onChange={(v) => {
+                                    markCustom()
+                                    setGeneration((prev) => ({
+                                      ...prev,
+                                      [stage]: { ...prev[stage], params: { ...prev[stage].params, [key]: v } },
+                                    }))
+                                  }}
                                 />
                               ))}
                             </div>
@@ -1734,7 +1886,13 @@ function TracksPageInner() {
                       const modelVer = (bm.model_version || '').trim()
                       const modelLabel = modelVer ? `${model.toUpperCase()} ${modelVer}` : model.toUpperCase()
                       const modelBadgeCls = BEATMAP_MODEL_BADGE[model] || BEATMAP_MODEL_BADGE.manual
-                      const isOlder = model === 'madmom' && !!modelVer && !!installedMadmom && modelVer !== installedMadmom
+                      // model_version uses '<madmom-pkg>+v2' for V2 records,
+                      // strip the suffix when comparing against the installed
+                      // package so the (older) flag doesn't fire on every V2
+                      // beatmap.
+                      const baseModelVer = modelVer.endsWith('+v2') ? modelVer.slice(0, -3) : modelVer
+                      const isOlder = model === 'madmom' && !!baseModelVer && !!installedMadmom && baseModelVer !== installedMadmom
+                      const presetName = (bm.preset || '').trim()
                       const activate = async () => {
                         if (isActive) return
                         try {
@@ -1764,6 +1922,14 @@ function TracksPageInner() {
                         <span className={`shrink-0 inline-block px-1 py-0.5 rounded border text-[9px] font-semibold uppercase ${modelBadgeCls}`}>
                           {modelLabel}
                         </span>
+                        {presetName && (
+                          <span
+                            className="shrink-0 inline-block px-1 py-0.5 rounded border text-[9px] font-semibold uppercase bg-indigo-700/40 text-indigo-200 border-indigo-700/60"
+                            title={`Generation preset: ${presetName}`}
+                          >
+                            {presetName}
+                          </span>
+                        )}
                         <button
                           onClick={() => setStatsBeatmap(bm)}
                           className="flex-1 min-w-0 text-left text-[10px] text-gray-400 hover:text-gray-200 truncate transition-colors"
