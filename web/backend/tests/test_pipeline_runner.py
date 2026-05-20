@@ -148,3 +148,32 @@ def test_audio_path_for_prefers_subfolder_when_both_layouts_present(tmp_path):
     assert p is not None
     # Subfolder layout takes precedence so V2-native tracks keep working
     assert 'inner.ogg' in str(p)
+
+
+def test_audio_path_for_finds_grid_audio_in_stems_dir(tmp_path):
+    """Real Tracks register the full mix as the 'song' stem, so song.ogg
+    lives inside <track_dir>/stems/. The runner must find it there for
+    S1 (Stage.GRID) too."""
+    from app.services.pipeline.runner import _audio_path_for
+    td = tmp_path / 'track'
+    (td / 'stems').mkdir(parents=True)
+    (td / 'stems' / 'song.ogg').write_bytes(b'fake-mix')
+
+    p = _audio_path_for(td, Stage.GRID, None)
+    assert p is not None
+    assert p.name == 'song.ogg'
+    assert 'stems' in str(p)
+
+
+def test_audio_path_for_prefers_root_song_for_grid(tmp_path):
+    """V2 fixtures keep song.ogg at the track root; that location wins
+    over the stems/song.ogg fallback so the existing tests don't change."""
+    from app.services.pipeline.runner import _audio_path_for
+    td = tmp_path / 'track'
+    (td / 'stems').mkdir(parents=True)
+    (td / 'song.ogg').write_bytes(b'root')
+    (td / 'stems' / 'song.ogg').write_bytes(b'stems')
+
+    p = _audio_path_for(td, Stage.GRID, None)
+    assert p is not None
+    assert p.parent == td  # not td / 'stems'

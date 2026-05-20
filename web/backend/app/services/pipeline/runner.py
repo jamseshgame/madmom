@@ -48,15 +48,24 @@ def _gather_upstream(track_dir: Path, stage: Stage, stem: str | None) -> dict[st
 def _audio_path_for(track_dir: Path, stage: Stage, stem: str | None) -> Path | None:
     """Locate the audio file for a stage's engine.
 
-    For S1 (Stage.GRID) we use the full-mix audio at the track root. For
-    stem-scoped stages we accept two layouts:
+    For S1 (Stage.GRID) we use the full-mix audio. V2 fixtures put it at
+    <track_dir>/song.ogg; the production Tracks service puts it inside
+    <track_dir>/stems/song.ogg (the full mix is registered as the 'song'
+    stem). For stem-scoped stages we accept two layouts:
       - subfolder: <track_dir>/stems/<stem>/*.ogg|wav (V2 pipeline native)
       - flat:     <track_dir>/stems/<stem>.ogg|wav   (Tracks service)
     Returns None if no candidate is found.
     """
     if stage == Stage.GRID:
+        # V2-native location first
         for cand in ['song.ogg', 'song.wav', 'mix.ogg', 'mix.wav']:
             p = track_dir / cand
+            if p.exists():
+                return p
+        # Tracks-service location (full mix lives in the stems/ folder)
+        stems_dir = track_dir / 'stems'
+        for cand in ['song.ogg', 'song.wav', 'mix.ogg', 'mix.wav']:
+            p = stems_dir / cand
             if p.exists():
                 return p
         return None
