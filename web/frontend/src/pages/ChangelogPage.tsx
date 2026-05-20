@@ -10,6 +10,21 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.10.0',
+    date: '2026-05-20',
+    summary:
+      'Saved generation presets for the Create Beatmap modal. 11 built-in presets cover the most useful lane-mapping, chord-density, pitch-engine, and playability variations out of the box; user-saved presets persist server-side and survive cache clears. The preset that produced each beatmap is now badged on the picker row so A/B comparison runs stay legible.',
+    entries: [
+      { kind: 'added', text: 'Generation preset dropdown at the top of the Create Beatmap modal\'s GENERATION section. Ships with 11 built-ins: v1 (defaults), v2 (key-relative lane mapping), v3 (legacy global percentile bins for A/B against the old behavior), v4 (chord-heavy), v5 (open-note heavy), v6 (anti-cramps playability), v7 (spread-fretboard playability), v8 (CREPE pitch), v9 (sparse strong-beat quantization), v10 (polyphonic basic-pitch onsets+pitches), v11 (chain playability — spread + cramps composed). Selecting a preset replaces the current engine + params state; editing any value drops the dropdown back to "Custom".' },
+      { kind: 'added', text: 'Save-as button — captures the current GENERATION settings as a new named preset on the backend. Suggests the next free vN slot so the user doesn\'t have to invent a name. User-saved presets get a ★ prefix in the dropdown to distinguish them from built-ins and ship with a Delete button next to the picker. Built-ins are read-only.' },
+      { kind: 'added', text: '/api/generation-presets CRUD endpoints (GET list / POST upsert / DELETE by name) backed by <upload_dir>/generation_presets.json. Built-in presets are returned first in the list and cannot be overwritten or deleted (409 if attempted). The backend validates that every saved preset has all five stages (onsets, pitches, quantized, lanes_expert, lanes_filtered) with engine + params shape.' },
+      { kind: 'added', text: 'Preset badge on the beatmap picker — each row in the Tracks page picker now shows a second indigo chip next to the existing MADMOM/MANUAL/IMPORTED badge with the preset name that produced the beatmap (V2 records only). Tooltip on the badge shows the full preset name. Records produced before this release show no preset chip (legacy / pre-preset / legacy madmom).' },
+      { kind: 'changed', text: '/api/tracks/:id/generate-beatmap-v2 accepts an optional `preset` form field. When set, the value is stored on the beatmap record\'s new `preset` field. add_beatmap_record gained a keyword-only `preset` parameter; legacy callers (chart_generator, scripts) pass nothing and produce unaffected records.' },
+      { kind: 'changed', text: '(older) flag on V2 records: model_version uses the "<madmom-pkg>+v2" suffix for V2 records, which previously made every V2 record show as "older" against the installed madmom. The picker now strips the +v2 suffix before comparing against the installed package version.' },
+      { kind: 'fixed', text: 'V2 pipeline grid stage failed on every production track because _audio_path_for only looked for the full-mix at <track_dir>/song.ogg — the production Tracks service registers the full mix as the "song" stem so song.ogg actually lives at <track_dir>/stems/song.ogg. The runner now checks both locations (root first, then stems fallback) so V2 fixtures and real tracks both work.' },
+    ],
+  },
+  {
     version: '1.9.0',
     date: '2026-05-20',
     summary:
