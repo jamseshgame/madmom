@@ -59,7 +59,7 @@ def _audio_path_for(track_dir: Path, stage: Stage, stem: str | None) -> Path | N
     return candidates[0] if candidates else None
 
 
-def _update_state_after_run(
+def update_state_after_run(
     track_dir: Path,
     stage: Stage,
     stem: str | None,
@@ -126,11 +126,11 @@ def run_stage(
                 diff_payload.setdefault('engine', engine_id)
                 diff_payload.setdefault('params', params)
                 save_version_and_activate(track_dir, diff_stage, stem, diff_payload)
-                _update_state_after_run(track_dir, diff_stage, stem, engine_id)
+                update_state_after_run(track_dir, diff_stage, stem, engine_id)
         mark_downstream_stale(track_dir, changed_stage=stage, stem=stem)
         return payload
 
     save_version_and_activate(track_dir, stage, stem, payload)
-    _update_state_after_run(track_dir, stage, stem, engine_id)
+    update_state_after_run(track_dir, stage, stem, engine_id)
     mark_downstream_stale(track_dir, changed_stage=stage, stem=stem)
     return payload

@@ -19,21 +19,14 @@ from fastapi import APIRouter, Body, HTTPException, Query
 from ..config import settings
 from ..services.jobs import JobKind, create_job, get_job
 from ..services.pipeline.registry import Stage, engines_catalog, get_engine
-from ..services.pipeline.runner import _update_state_after_run, run_stage as _run_stage
-
-_S7_STAGES = {Stage.LANES_HARD, Stage.LANES_MEDIUM, Stage.LANES_EASY}
+from ..services.pipeline.runner import _S7_STAGES, run_stage as _run_stage, update_state_after_run
 from ..services.pipeline.state import (
     PipelineState,
-    StageState,
-    StemState,
     load_pipeline_state,
     mark_downstream_stale,
-    save_pipeline_state,
 )
 from ..services.pipeline.storage import (
     list_versions,
-    move_active_to_stale,
-    save_version_and_activate,
     stage_path,
     versions_dir,
 )
@@ -216,8 +209,8 @@ def _make_stage_subrouter(stage: Stage) -> APIRouter:
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_text(src.read_text())
         payload = json.loads(src.read_text())
-        _update_state_after_run(td, stage, stem_ or None,
-                                payload.get('engine', 'unknown'))
+        update_state_after_run(td, stage, stem_ or None,
+                               payload.get('engine', 'unknown'))
         mark_downstream_stale(td, changed_stage=stage, stem=stem_ or None)
         return {'ok': True}
 
