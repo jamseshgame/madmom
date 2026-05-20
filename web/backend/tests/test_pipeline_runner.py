@@ -124,3 +124,27 @@ def test_run_stage_splits_by_difficulty_into_three_active_files(fake_track_dir, 
     assert guitar.lanes_hard is not None and guitar.lanes_hard.engine == engine_id
     assert guitar.lanes_medium is not None and guitar.lanes_medium.engine == engine_id
     assert guitar.lanes_easy is not None and guitar.lanes_easy.engine == engine_id
+
+
+def test_audio_path_for_finds_stem_in_flat_layout(tmp_path):
+    from app.services.pipeline.runner import _audio_path_for
+    td = tmp_path / 'track'
+    (td / 'stems').mkdir(parents=True)
+    (td / 'stems' / 'bass.ogg').write_bytes(b'fake')
+
+    p = _audio_path_for(td, Stage.ONSETS, 'bass')
+    assert p is not None
+    assert p.name == 'bass.ogg'
+
+
+def test_audio_path_for_prefers_subfolder_when_both_layouts_present(tmp_path):
+    from app.services.pipeline.runner import _audio_path_for
+    td = tmp_path / 'track'
+    (td / 'stems' / 'bass').mkdir(parents=True)
+    (td / 'stems' / 'bass.ogg').write_bytes(b'flat')
+    (td / 'stems' / 'bass' / 'inner.ogg').write_bytes(b'sub')
+
+    p = _audio_path_for(td, Stage.ONSETS, 'bass')
+    assert p is not None
+    # Subfolder layout takes precedence so V2-native tracks keep working
+    assert 'inner.ogg' in str(p)

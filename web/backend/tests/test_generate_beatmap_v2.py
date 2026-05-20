@@ -54,17 +54,15 @@ def fake_track(client, tmp_path):
     Depends on `client` so the TRACKS_DIR monkeypatch is in effect before
     we instantiate Track (Track.save() writes to TRACKS_DIR / id).
 
-    Note: the V2 pipeline runner expects stems at
-    `<track_dir>/stems/<stem>/<file>.ogg` (subfolder layout). The legacy
-    Track.stems_dir layout is flat (`<track_dir>/stems/<file>.ogg`); we
-    write the same audio under both so the legacy stem_path lookup and the
-    pipeline's `_audio_path_for` both resolve.
+    Uses the production (flat) stem layout exclusively:
+    `<track_dir>/stems/<stem>.ogg` — same layout produced by
+    `app.services.tracks.create_track`. The pipeline runner's
+    `_audio_path_for` falls back to this layout when no subfolder is found.
     """
     from app.services.tracks import Track
     tid = 'tracktest'
     td = tmp_path / 'uploads' / '_tracks' / tid
-    (td / 'stems' / 'bass').mkdir(parents=True)
-    (td / 'stems' / 'guitar').mkdir(parents=True)
+    (td / 'stems').mkdir(parents=True)
 
     sr = 22050
     n = sr * 6
@@ -74,12 +72,8 @@ def fake_track(client, tmp_path):
         i = int(s * sr)
         y[i:i + burst.shape[0]] += burst
     sf.write(td / 'song.ogg', y, sr)
-    # Flat layout for the legacy Track.stems_dir / filename lookup
     sf.write(td / 'stems' / 'bass.ogg', y, sr)
     sf.write(td / 'stems' / 'guitar.ogg', y, sr)
-    # Subfolder layout for the pipeline runner's `_audio_path_for`
-    sf.write(td / 'stems' / 'bass' / 'bass.ogg', y, sr)
-    sf.write(td / 'stems' / 'guitar' / 'guitar.ogg', y, sr)
 
     t = Track(
         id=tid, name='Test', created_at=time.time(), stems={'bass': 'bass.ogg'},

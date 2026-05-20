@@ -46,6 +46,14 @@ def _gather_upstream(track_dir: Path, stage: Stage, stem: str | None) -> dict[st
 
 
 def _audio_path_for(track_dir: Path, stage: Stage, stem: str | None) -> Path | None:
+    """Locate the audio file for a stage's engine.
+
+    For S1 (Stage.GRID) we use the full-mix audio at the track root. For
+    stem-scoped stages we accept two layouts:
+      - subfolder: <track_dir>/stems/<stem>/*.ogg|wav (V2 pipeline native)
+      - flat:     <track_dir>/stems/<stem>.ogg|wav   (Tracks service)
+    Returns None if no candidate is found.
+    """
     if stage == Stage.GRID:
         for cand in ['song.ogg', 'song.wav', 'mix.ogg', 'mix.wav']:
             p = track_dir / cand
@@ -54,9 +62,20 @@ def _audio_path_for(track_dir: Path, stage: Stage, stem: str | None) -> Path | N
         return None
     if stem is None:
         return None
+
+    # Subfolder layout first (V2 native).
     sdir = track_dir / 'stems' / stem
     candidates = list(sdir.glob('*.ogg')) + list(sdir.glob('*.wav'))
-    return candidates[0] if candidates else None
+    if candidates:
+        return candidates[0]
+
+    # Flat layout fallback (real Tracks).
+    stems_dir = track_dir / 'stems'
+    for ext in ('.ogg', '.wav', '.mp3', '.flac'):
+        flat = stems_dir / f'{stem}{ext}'
+        if flat.exists():
+            return flat
+    return None
 
 
 def update_state_after_run(
