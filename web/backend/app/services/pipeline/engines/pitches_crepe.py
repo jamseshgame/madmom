@@ -12,8 +12,11 @@ from ..registry import EngineSpec, Stage, register_engine
 
 
 _PARAMS_SCHEMA = {
-    'model_size': {'type': 'enum', 'options': ['tiny', 'small', 'medium', 'large', 'full'],
-                   'default': 'small', 'label': 'CREPE model size'},
+    # Only `tiny.pth` and `full.pth` ship inside torchcrepe — the other
+    # sizes need a manual checkpoint download, so listing them as default
+    # options just traps users. Stick to the two that work out of the box.
+    'model_size': {'type': 'enum', 'options': ['tiny', 'full'],
+                   'default': 'full', 'label': 'CREPE model size'},
     'window_ms': {'type': 'number', 'min': 5, 'max': 100, 'step': 1, 'default': 30,
                   'label': 'Window around onset (ms)'},
 }

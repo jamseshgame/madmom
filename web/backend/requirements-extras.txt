@@ -19,7 +19,11 @@ allin1>=1.0.0
 # - basic-pitch: Spotify's polyphonic note transcription model.
 #   May not install cleanly on Windows due to TensorFlow native deps.
 #   Lazy-loaded on first use; tests use pytest.importorskip.
+#   `pretty_midi` is a runtime dep of basic-pitch.predict that pip doesn't
+#   pull in automatically — listing it explicitly here so a fresh deploy
+#   doesn't crash on the first basic-pitch call.
 basic-pitch>=0.3.0
+pretty_midi>=0.2.10
 
 # - aubio: C-backed audio processing library for fast onset detection.
 #   May not install cleanly on Windows due to C/Cython native deps.

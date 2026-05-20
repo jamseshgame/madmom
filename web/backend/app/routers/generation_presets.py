@@ -140,11 +140,13 @@ BUILTIN_PRESETS: list[dict[str, Any]] = [
     },
     {
         'name': 'v8 — CREPE pitch',
-        'description': 'Higher-accuracy pitch via CREPE (loads a ~30MB torch model on first call)',
+        'description': 'Higher-accuracy pitch via CREPE full (loads a torch model on first call)',
         'builtin': True,
         'generation': {
             'onsets': {'engine': 'librosa-onset', 'params': {}},
-            'pitches': {'engine': 'crepe', 'params': {}},
+            # torchcrepe only ships `tiny.pth` and `full.pth`; pin to full
+            # explicitly so this preset never tries to load a missing size.
+            'pitches': {'engine': 'crepe', 'params': {'model_size': 'full'}},
             'quantized': {'engine': 'metric-weighted', 'params': {}},
             'lanes_expert': {'engine': 'section-sliding', 'params': {}},
             'lanes_filtered': {'engine': 'identity', 'params': {}},
