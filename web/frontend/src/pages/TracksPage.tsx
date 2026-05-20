@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import LyricsButtons from '../components/LyricsButtons'
 import StemPlayer from '../components/StemPlayer.tsx'
@@ -6,6 +6,8 @@ import BeatmapStatsModal, { BeatmapRecord as BeatmapStatsRecord } from '../compo
 import VocalmapButtons from '../components/VocalmapButtons'
 import useInstalledVersion from '../components/useInstalledVersion'
 import { BusyProvider, useExclusiveTask } from '../components/useExclusiveTask'
+import { ParamControl } from '../components/pipeline/ParamControl'
+import type { EngineSpec } from '../api/pipelineClient'
 
 type BeatmapRecord = BeatmapStatsRecord
 
@@ -81,6 +83,27 @@ const FIELD_GROUPS = [
   },
 ]
 
+// V2 pipeline stages exposed in the Generate Beatmap modal. Each maps to a
+// per-stage dropdown of engines (fetched from /api/pipeline/engines) plus the
+// engine-specific numeric/boolean/enum knobs rendered via <ParamControl>.
+type GenerationStage = 'onsets' | 'pitches' | 'quantized' | 'lanes_expert' | 'lanes_filtered'
+
+const GENERATION_STAGE_LABELS: Record<GenerationStage, string> = {
+  onsets: 'Onset detection',
+  pitches: 'Pitch detection',
+  quantized: 'Quantization',
+  lanes_expert: 'Lane mapping',
+  lanes_filtered: 'Playability filter',
+}
+
+const GENERATION_DEFAULTS: Record<GenerationStage, { engine: string; params: Record<string, unknown> }> = {
+  onsets: { engine: 'librosa-onset', params: {} },
+  pitches: { engine: 'yin', params: {} },
+  quantized: { engine: 'metric-weighted', params: {} },
+  lanes_expert: { engine: 'section-sliding', params: {} },
+  lanes_filtered: { engine: 'identity', params: {} },
+}
+
 function BeatmapPanel({
   track,
   stem,
@@ -104,6 +127,10 @@ function BeatmapPanel({
   const [done, setDone] = useState(false)
   const [error, setError] = useState('')
   const [beatmapJobId, setBeatmapJobId] = useState('')
+  // V2 pipeline state — engine catalog (null until /api/pipeline/engines
+  // resolves) and the user's current per-stage engine + params selection.
+  const [engines, setEngines] = useState<Record<string, EngineSpec[]> | null>(null)
+  const [generation, setGeneration] = useState<Record<GenerationStage, { engine: string; params: Record<string, unknown> }>>(GENERATION_DEFAULTS)
 
   useEffect(() => {
     fetch('/api/tracks/schema/song-ini')
@@ -124,6 +151,33 @@ function BeatmapPanel({
       })
   }, [track, stem])
 
+  // Load the pipeline engine catalog and seed each stage's params with its
+  // selected engine's schema defaults. Without this seed the V2 endpoint
+  // would receive '{}' for every stage and run with engine-side defaults
+  // anyway, but surfacing them in the UI keeps the displayed knobs in sync
+  // with what the backend will actually use.
+  useEffect(() => {
+    fetch('/api/pipeline/engines')
+      .then((r) => r.json())
+      .then((catalog: Record<string, EngineSpec[]>) => {
+        setEngines(catalog)
+        setGeneration((prev) => {
+          const next = { ...prev }
+          ;(Object.keys(next) as GenerationStage[]).forEach((stage) => {
+            const spec = catalog[stage]?.find((e) => e.engine_id === next[stage].engine)
+            if (!spec) return
+            const defaults: Record<string, unknown> = {}
+            for (const [k, p] of Object.entries(spec.params_schema || {})) {
+              if ('default' in p && p.default !== undefined) defaults[k] = p.default
+            }
+            next[stage] = { engine: next[stage].engine, params: defaults }
+          })
+          return next
+        })
+      })
+      .catch(console.error)
+  }, [])
+
   const setValue = (key: string, val: unknown) => {
     setValues((prev) => ({ ...prev, [key]: val }))
   }
@@ -139,8 +193,30 @@ function BeatmapPanel({
       formData.append(key, String(val ?? ''))
     }
 
+    // Drums fall back to the single-hit legacy pipeline; everything else
+    // goes through the V2 staged pipeline with the engine selections from
+    // the GENERATION section. Field naming matches the V2 endpoint's
+    // Form(...) parameters — note that `lanes_expert` is sent as `lanes_*`
+    // and `lanes_filtered` as `playability_*`.
+    const useV2 = stem !== 'drums'
+    if (useV2) {
+      for (const stage of Object.keys(GENERATION_STAGE_LABELS) as GenerationStage[]) {
+        const sel = generation[stage]
+        const fieldPrefix =
+          stage === 'lanes_expert' ? 'lanes' :
+          stage === 'lanes_filtered' ? 'playability' :
+          stage
+        formData.append(`${fieldPrefix}_engine`, sel.engine)
+        formData.append(`${fieldPrefix}_params`, JSON.stringify(sel.params))
+      }
+    }
+
+    const endpoint = useV2
+      ? `/api/tracks/${track.id}/generate-beatmap-v2`
+      : `/api/tracks/${track.id}/generate-beatmap`
+
     try {
-      const res = await fetch(`/api/tracks/${track.id}/generate-beatmap`, { method: 'POST', body: formData })
+      const res = await fetch(endpoint, { method: 'POST', body: formData })
       if (!res.ok) {
         const err = await res.json()
         throw new Error(err.detail || 'Failed')
@@ -250,13 +326,74 @@ function BeatmapPanel({
         </div>
 
         <div className="p-5 space-y-5 max-h-[70vh] overflow-y-auto">
-          {FIELD_GROUPS.map((group) => (
-            <div key={group.title}>
-              <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">{group.title}</h4>
-              <div className="grid grid-cols-2 gap-3">
-                {group.fields.map((f) => renderField(f))}
+          {FIELD_GROUPS.map((group, idx) => (
+            <Fragment key={group.title}>
+              <div>
+                <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">{group.title}</h4>
+                <div className="grid grid-cols-2 gap-3">
+                  {group.fields.map((f) => renderField(f))}
+                </div>
               </div>
-            </div>
+              {/* GENERATION section: sits between Metadata (idx 0) and Timing.
+                  Hidden for drums because the drums stem falls back to the
+                  legacy single-hit pipeline which doesn't accept engine knobs.
+                  Also hidden until the engine catalog has loaded. */}
+              {idx === 0 && stem !== 'drums' && engines && (
+                <div>
+                  <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Generation</h4>
+                  <div className="space-y-3">
+                    {(Object.keys(GENERATION_STAGE_LABELS) as GenerationStage[]).map((stage) => {
+                      const stageEngines = engines[stage] || []
+                      const selected = generation[stage]
+                      const spec = stageEngines.find((e) => e.engine_id === selected.engine)
+                      return (
+                        <div key={stage} className="border border-gray-700 rounded-lg p-3 space-y-2">
+                          <label className="block text-xs">
+                            <span className="text-gray-500">{GENERATION_STAGE_LABELS[stage]}</span>
+                            <select
+                              value={selected.engine}
+                              onChange={(e) => {
+                                const nextEngineId = e.target.value
+                                const nextSpec = stageEngines.find((s) => s.engine_id === nextEngineId)
+                                const nextParams: Record<string, unknown> = {}
+                                for (const [k, p] of Object.entries(nextSpec?.params_schema || {})) {
+                                  if ('default' in p && p.default !== undefined) nextParams[k] = p.default
+                                }
+                                setGeneration((prev) => ({
+                                  ...prev,
+                                  [stage]: { engine: nextEngineId, params: nextParams },
+                                }))
+                              }}
+                              className="ml-2 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm"
+                            >
+                              {stageEngines.map((s) => (
+                                <option key={s.engine_id} value={s.engine_id}>{s.display_name}</option>
+                              ))}
+                            </select>
+                          </label>
+                          {spec && Object.keys(spec.params_schema || {}).length > 0 && (
+                            <div className="pl-3 border-l border-gray-700 space-y-2">
+                              {Object.entries(spec.params_schema).map(([key, pspec]) => (
+                                <ParamControl
+                                  key={key}
+                                  keyName={key}
+                                  spec={pspec}
+                                  value={selected.params[key]}
+                                  onChange={(v) => setGeneration((prev) => ({
+                                    ...prev,
+                                    [stage]: { ...prev[stage], params: { ...prev[stage].params, [key]: v } },
+                                  }))}
+                                />
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+            </Fragment>
           ))}
         </div>
 
