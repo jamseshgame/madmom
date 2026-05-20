@@ -20,7 +20,7 @@ Make the "Generate Beatmap" modal drive the V2 pipeline end-to-end with a compac
 
 - New "GENERATION" section in `BeatmapPanel` with 5 engine dropdowns + a handful of numeric knobs.
 - New backend endpoint `POST /api/tracks/{track_id}/generate-beatmap-v2` that orchestrates all V2 stages then builds the chart, writes audio + song.ini, and registers a beatmap record.
-- Refactor extractions: shared `ParamControl` React component; shared `run_stage` Python helper; shared `write_song_ini` helper.
+- Refactor extractions: shared `ParamControl` React component; shared `run_stage` Python helper; shared `write_chart_song_ini` helper.
 - Drums stem keeps using the legacy endpoint (no V2 drum lane engine yet).
 
 ## Non-goals (YAGNI)
@@ -91,7 +91,7 @@ Orchestration (async background task, single job):
 8. **Difficulties (S7)** — `lanes_hard`, `lanes_medium`, `lanes_easy` using the default difficulty engine + default params (no modal knob for these).
 9. **Build chart (S8)** — call `serialize_chart(...)` from `services/pipeline/serialize.py`. Write to job's output_dir as `<artist> - <song_name>/notes.chart` — *not* the per-stem V2 layout. This matches what publish/zip flow expects.
 10. **Audio convert** — `convert_to_ogg(stem_path, out_dir / 'song.ogg')`.
-11. **song.ini** — call extracted helper `write_song_ini(out_dir, song_name, artist, album, genre, year, ini_overrides, chart_path)`.
+11. **song.ini** — call extracted helper `write_chart_song_ini(out_dir, song_name, artist, album, genre, year, ini_overrides, chart_path)`.
 12. **Register beatmap** — `add_beatmap_record(..., model='madmom', model_version=f'{madmom_pkg_version}+v2')`. The existing function signature only has `model` and `model_version` (see `services/tracks.py:196`), so the `+v2` suffix in `model_version` is how we encode pipeline provenance. The picker badge logic in `BEATMAP_MODEL_BADGE` still matches on `model='madmom'`, so the badge color is unchanged; the suffix is visible in the version label tooltip.
 
 SSE progress (single job, same envelope as legacy):
@@ -126,7 +126,7 @@ Body extracts the per-stage execution loop currently inside `_make_stage_subrout
 
 Both the existing per-stage POST handlers and the new V2 endpoint then call `run_stage`.
 
-**Refactor extraction — `write_song_ini(...)`** in `web/backend/app/services/chart_generator.py`:
+**Refactor extraction — `write_chart_song_ini(...)`** in `web/backend/app/services/chart_generator.py`:
 
 Move the song.ini writing block currently at `chart_generator.py:413-468` into a public helper. Both `generate_full_chart` and the new V2 endpoint call it.
 
@@ -139,7 +139,7 @@ Drums stem goes to legacy endpoint. The V2 lanes engines bin onsets by MIDI perc
 ## Testing
 
 **Unit:**
-- `test_write_song_ini` — round-trip the existing legacy output through the extracted helper; assert byte-for-byte match against a captured fixture.
+- `test_write_chart_song_ini` — round-trip the existing legacy output through the extracted helper; assert byte-for-byte match against a captured fixture.
 - `test_run_stage` — feed a minimal fake `_REGISTRY` and assert it writes to the right path and updates state correctly.
 
 **Integration:**
@@ -164,7 +164,7 @@ Drums stem goes to legacy endpoint. The V2 lanes engines bin onsets by MIDI perc
 - [ ] Drums stem keeps using legacy endpoint and produces unchanged output.
 - [ ] Legacy `/generate-beatmap` endpoint still works for non-drum stems if invoked directly.
 - [ ] `ParamControl` is shared between `StageCard` and `BeatmapPanel`.
-- [ ] `write_song_ini` and `run_stage` are extracted helpers, each with a unit test.
+- [ ] `write_chart_song_ini` and `run_stage` are extracted helpers, each with a unit test.
 - [ ] Beatmap records produced by V2 have `model_version` ending in `+v2` (so the picker can distinguish them in the version-label tooltip).
 
 ## Risks
