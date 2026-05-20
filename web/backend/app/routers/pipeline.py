@@ -19,6 +19,7 @@ from fastapi import APIRouter, Body, HTTPException, Query
 from ..config import settings
 from ..services.jobs import JobKind, create_job, get_job
 from ..services.pipeline.registry import Stage, engines_catalog, get_engine
+from ..services.pipeline.runner import _update_state_after_run, run_stage as _run_stage
 
 _S7_STAGES = {Stage.LANES_HARD, Stage.LANES_MEDIUM, Stage.LANES_EASY}
 from ..services.pipeline.state import (
@@ -157,43 +158,21 @@ def _make_stage_subrouter(stage: Stage) -> APIRouter:
                     asyncio.run_coroutine_threadsafe(job.send(step, pct, msg), loop)
 
                 def _do_run():
-                    upstream = _gather_upstream(td, stage, stem_ or None)
-                    return spec.runner(
-                        audio_path=_audio_path_for(td, stage, stem_ or None),
-                        upstream=upstream,
+                    return _run_stage(
+                        stage=stage,
+                        track_dir=td,
+                        stem=stem_ or None,
+                        engine_id=engine_id,
                         params=params,
                         on_progress=on_progress,
                     )
 
-                payload = await loop.run_in_executor(None, _do_run)
-                payload.setdefault('engine', engine_id)
-                payload.setdefault('params', params)
-                payload.setdefault('generated_at',
-                                   __import__('datetime').datetime.utcnow().isoformat() + 'Z')
+                await loop.run_in_executor(None, _do_run)
 
-                # S7 engines return {'by_difficulty': {'easy': {...}, 'medium': {...}, 'hard': {...}}}
-                # Write each as a separate stage's active file.
-                if stage in _S7_STAGES and 'by_difficulty' in payload:
-                    bd = payload['by_difficulty']
-                    for diff_key, diff_stage in (
-                        ('hard', Stage.LANES_HARD), ('medium', Stage.LANES_MEDIUM), ('easy', Stage.LANES_EASY)
-                    ):
-                        if diff_key in bd:
-                            diff_payload = dict(bd[diff_key])
-                            diff_payload.setdefault('engine', engine_id)
-                            diff_payload.setdefault('params', params)
-                            save_version_and_activate(td, diff_stage, stem_ or None, diff_payload)
-                            _update_state_after_run(td, diff_stage, stem_ or None,
-                                                    diff_payload.get('engine', 'unknown'), diff_payload)
-                    mark_downstream_stale(td, changed_stage=stage, stem=stem_ or None)
+                if stage in _S7_STAGES:
                     await job.send_done({'stage': 'lanes_(hard|medium|easy)', 'engine': engine_id})
-                    return
-
-                save_version_and_activate(td, stage, stem_ or None, payload)
-                _update_state_after_run(td, stage, stem_ or None, engine_id, payload)
-                mark_downstream_stale(td, changed_stage=stage, stem=stem_ or None)
-
-                await job.send_done({'stage': stage_id, 'engine': engine_id})
+                else:
+                    await job.send_done({'stage': stage_id, 'engine': engine_id})
             except Exception as e:  # noqa: BLE001
                 if not job.cancelled:
                     await job.send_error(str(e) or 'pipeline stage failed')
@@ -238,7 +217,7 @@ def _make_stage_subrouter(stage: Stage) -> APIRouter:
         dst.write_text(src.read_text())
         payload = json.loads(src.read_text())
         _update_state_after_run(td, stage, stem_ or None,
-                                payload.get('engine', 'unknown'), payload)
+                                payload.get('engine', 'unknown'))
         mark_downstream_stale(td, changed_stage=stage, stem=stem_ or None)
         return {'ok': True}
 
@@ -256,74 +235,6 @@ def _make_stage_subrouter(stage: Stage) -> APIRouter:
         return {'ok': True}
 
     return sub
-
-
-# -------------------- helpers used by the factory --------------------
-
-def _gather_upstream(track_dir: Path, stage: Stage, stem: str | None) -> dict[str, dict]:
-    """Load active JSONs for every upstream stage the given stage may need.
-
-    Engines are free to ignore keys they don't use. Returns {} for stages
-    that have no upstream (Stage.GRID).
-    """
-    if stage == Stage.GRID:
-        return {}
-    upstream: dict[str, dict] = {}
-    grid_p = stage_path(track_dir, Stage.GRID, None)
-    if grid_p.exists():
-        upstream['grid'] = json.loads(grid_p.read_text())
-    if stem is None:
-        return upstream
-    # Each downstream stage gets every prior stem-scoped stage too.
-    from .pipeline_order import upstream_for
-    for s in upstream_for(stage):
-        p = stage_path(track_dir, s, stem)
-        if p.exists():
-            upstream[s.value] = json.loads(p.read_text())
-    return upstream
-
-
-def _audio_path_for(track_dir: Path, stage: Stage, stem: str | None) -> Path | None:
-    """For S1 the engine reads the full mix; for stem stages it reads
-    the stem audio. Returns None if the file isn't available — engines
-    that need audio raise downstream."""
-    if stage == Stage.GRID:
-        for cand in ['song.ogg', 'song.wav', 'mix.ogg', 'mix.wav']:
-            p = track_dir / cand
-            if p.exists():
-                return p
-        return None
-    if stem is None:
-        return None
-    sdir = track_dir / 'stems' / stem
-    candidates = list(sdir.glob('*.ogg')) + list(sdir.glob('*.wav'))
-    return candidates[0] if candidates else None
-
-
-def _update_state_after_run(
-    track_dir: Path,
-    stage: Stage,
-    stem: str | None,
-    engine_id: str,
-    payload: dict,
-) -> None:
-    state = load_pipeline_state(track_dir)
-    new_state = StageState(
-        active_version=None,
-        engine=engine_id,
-        stale=False,
-    )
-    versions = list_versions(track_dir, stage, stem)
-    if versions:
-        new_state.active_version = versions[0]['filename']
-    if stage == Stage.GRID:
-        state.grid = new_state
-    else:
-        if stem is None:
-            raise ValueError('stem required for non-grid stage')
-        ss = state.stems.setdefault(stem, StemState())
-        setattr(ss, stage.value, new_state)
-    save_pipeline_state(track_dir, state)
 
 
 # -------------------- mount one sub-router per stage --------------------
