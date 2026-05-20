@@ -140,13 +140,16 @@ BUILTIN_PRESETS: list[dict[str, Any]] = [
     },
     {
         'name': 'v8 — CREPE pitch',
-        'description': 'Higher-accuracy pitch via CREPE full (loads a torch model on first call)',
+        'description': 'Deep-learning pitch via CREPE tiny (full is too slow on CPU for a song-length run)',
         'builtin': True,
         'generation': {
             'onsets': {'engine': 'librosa-onset', 'params': {}},
-            # torchcrepe only ships `tiny.pth` and `full.pth`; pin to full
-            # explicitly so this preset never tries to load a missing size.
-            'pitches': {'engine': 'crepe', 'params': {'model_size': 'full'}},
+            # torchcrepe ships `tiny.pth` + `full.pth`; full is great in
+            # accuracy but CPU inference on a 3-min song takes >10 min, so
+            # the default preset pins tiny — which is still real CREPE and
+            # finishes in a comparable time to YIN. Users can switch to
+            # full in the Custom view if they want the heavyweight model.
+            'pitches': {'engine': 'crepe', 'params': {'model_size': 'tiny'}},
             'quantized': {'engine': 'metric-weighted', 'params': {}},
             'lanes_expert': {'engine': 'section-sliding', 'params': {}},
             'lanes_filtered': {'engine': 'identity', 'params': {}},
