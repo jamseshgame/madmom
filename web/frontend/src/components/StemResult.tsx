@@ -1066,6 +1066,11 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
             // `modalStem && trackId &&` already proved it non-null.
             const stem = modalStem
             if (!stem) return
+            // Acquire the same per-stem lock the main button uses so the user
+            // can't kick off a parallel generation on this row while the
+            // modal-started one is in flight. The existing StemBeatmapTracker
+            // SSE callbacks (done/error/cancelled) release the lock.
+            lock.acquire(`beatmap:${stem}`)
             setBeatmaps((prev) => ({
               ...prev,
               [stem]: { jobId: beatmapJobId, state: 'generating' },

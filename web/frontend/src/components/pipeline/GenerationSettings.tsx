@@ -87,18 +87,27 @@ export default function GenerationSettings({
   }, [])
 
   // When the presets list updates (initial load, or after save/delete),
-  // snap activePreset to v1 if it's empty OR points at a preset that
-  // doesn't exist (e.g. deleted by another session, or stale localStorage
-  // state). Decoupled from the fetch itself so editing engine/params
-  // doesn't trigger a refetch.
+  // snap activePreset AND generation to v1 if the current activePreset is
+  // empty OR points at a preset that doesn't exist (e.g. deleted by
+  // another session, or stale localStorage state). Resetting generation
+  // alongside the label keeps the underlying engine selection in sync —
+  // without it, the dropdown would lie about what the engines are doing.
   useEffect(() => {
     if (presets.length === 0) return
     if (!activePreset || !presets.find((p) => p.name === activePreset)) {
-      if (presets.find((p) => p.name === 'v1')) onActivePresetChange('v1')
+      const v1 = presets.find((p) => p.name === 'v1')
+      if (v1) {
+        onActivePresetChange('v1')
+        const next: GenerationState = structuredClone(GENERATION_DEFAULTS)
+        ;(Object.keys(GENERATION_STAGE_LABELS) as GenerationStage[]).forEach((stage) => {
+          const s = v1.generation[stage]
+          if (s) next[stage] = { engine: s.engine, params: structuredClone(s.params) }
+        })
+        onGenerationChange(next)
+      }
     }
-    // onActivePresetChange is a stable parent setter — intentionally omitted
-    // from deps; this effect should only re-run when the presets list or the
-    // active selection changes, not when the setter reference changes.
+    // onActivePresetChange and onGenerationChange are stable parent setters —
+    // omitted intentionally so the effect only re-runs on presets/activePreset.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [presets, activePreset])
 

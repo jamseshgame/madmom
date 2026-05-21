@@ -13,6 +13,7 @@ import {
   type GenerationState,
 } from '../components/pipeline/generationTypes'
 import GenerationSettings from '../components/pipeline/GenerationSettings'
+import { STEM_COLORS, STEM_LABELS } from '../components/stemDisplay'
 
 type BeatmapRecord = BeatmapStatsRecord
 
@@ -35,28 +36,6 @@ interface SongIniField {
   type: string
   default: unknown
   label: string
-}
-
-const STEM_COLORS: Record<string, string> = {
-  vocals: 'text-pink-400',
-  drums: 'text-amber-400',
-  bass: 'text-green-400',
-  rhythm: 'text-green-400',
-  guitar: 'text-orange-400',
-  piano: 'text-violet-400',
-  other: 'text-blue-400',
-  song: 'text-gray-300',
-}
-
-const STEM_LABELS: Record<string, string> = {
-  vocals: 'Vocals',
-  drums: 'Drums',
-  bass: 'Bass',
-  rhythm: 'Bass',
-  guitar: 'Guitar',
-  piano: 'Piano',
-  other: 'Other',
-  song: 'Master Mix',
 }
 
 // Mirrors LyricsButtons / VocalmapButtons SOURCE_BADGE: short uppercase badge
