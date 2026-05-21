@@ -9,7 +9,9 @@ class Settings(BaseSettings):
     port: int = 8000
     allowed_origins: str = 'https://beatmap.jamsesh.co,http://localhost:5173'
 
-    upload_dir: str = '/tmp/beatmap-uploads'
+    # Persistent path is required — never default to /tmp/* because Linux
+    # distros wipe /tmp on reboot (see web/.env.example for the full note).
+    upload_dir: str = './beatmap-uploads'
     max_upload_mb: int = 200
     job_ttl_minutes: int = 60
 
