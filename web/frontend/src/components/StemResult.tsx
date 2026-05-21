@@ -7,7 +7,11 @@ import VocalmapButtons from './VocalmapButtons'
 import useInstalledVersion from './useInstalledVersion'
 import { useExclusiveTask } from './useExclusiveTask'
 import StemGenerationModal from './StemGenerationModal'
-import { type GenerationState } from './pipeline/generationTypes'
+import {
+  GENERATION_STAGE_LABELS,
+  type GenerationStage,
+  type GenerationState,
+} from './pipeline/generationTypes'
 import { loadStoredGeneration, saveStoredGeneration } from './pipeline/generationStorage'
 import { STEM_COLORS, STEM_LABELS } from './stemDisplay'
 
@@ -188,10 +192,16 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
   // to localStorage so the user's preset/engine choices survive reloads.
   // Stays in sync with the cog modal: edits via the modal update this state
   // and the next click of the green main button picks them up.
+  //
+  // useState lazy-init runs the loader twice on mount (once per useState),
+  // but JSON.parse on a tiny stored object is negligible.
   const [generation, setGeneration] = useState<GenerationState>(() => loadStoredGeneration().generation)
   const [activePreset, setActivePreset] = useState<string>(() => loadStoredGeneration().activePreset)
   const [modalStem, setModalStem] = useState<string | null>(null)
 
+  // Persist on every change. Note: this also fires on the initial mount,
+  // writing the just-loaded values back to localStorage. Harmless but
+  // unavoidable with this pattern — the write is synchronous and tiny.
   useEffect(() => {
     saveStoredGeneration(generation, activePreset)
   }, [generation, activePreset])
@@ -411,22 +421,47 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
     const label = STEM_LABELS[stem] || stem
     setBeatmaps((prev) => ({ ...prev, [stem]: { jobId: '', state: 'generating' } }))
 
-    const formData = new FormData()
-    formData.append('stem_job_id', jobId)
-    formData.append('stem', stem)
-    formData.append('title', `${trackName} (${label})`)
-
+    // Drums uses the legacy single-shot endpoint — V2 doesn't support drums
+    // yet (separate follow-up project). Everything else gets the V2 staged
+    // pipeline with whatever preset/engine settings the user has set on
+    // this page (defaults to v1).
+    const useV2 = stem !== 'drums' && !!trackId
     try {
-      const res = await fetch('/api/beatmap/from-stem', { method: 'POST', body: formData })
+      let res: Response
+      if (useV2) {
+        const formData = new FormData()
+        formData.append('stem', stem)
+        for (const [key, val] of Object.entries(songIni)) {
+          formData.append(key, String(val ?? ''))
+        }
+        for (const stage of Object.keys(GENERATION_STAGE_LABELS) as GenerationStage[]) {
+          const sel = generation[stage]
+          const fieldPrefix =
+            stage === 'lanes_expert' ? 'lanes' :
+            stage === 'lanes_filtered' ? 'playability' :
+            stage
+          formData.append(`${fieldPrefix}_engine`, sel.engine)
+          formData.append(`${fieldPrefix}_params`, JSON.stringify(sel.params))
+        }
+        if (activePreset) formData.append('preset', activePreset)
+        res = await fetch(`/api/tracks/${trackId}/generate-beatmap-v2`, { method: 'POST', body: formData })
+      } else {
+        const formData = new FormData()
+        formData.append('stem_job_id', jobId)
+        formData.append('stem', stem)
+        formData.append('title', `${trackName} (${label})`)
+        res = await fetch('/api/beatmap/from-stem', { method: 'POST', body: formData })
+      }
       if (!res.ok) {
-        const err = await res.json()
+        const err = await res.json().catch(() => ({}))
         throw new Error(err.detail || 'Failed to start beatmap generation')
       }
       const { job_id } = await res.json()
       setBeatmaps((prev) => ({ ...prev, [stem]: { jobId: job_id, state: 'generating' } }))
     } catch (e) {
-      lock.release()
       setBeatmaps((prev) => ({ ...prev, [stem]: { jobId: '', state: 'error' } }))
+      setBatchError((e as Error).message)
+      lock.release()
     }
   }
 
@@ -568,6 +603,15 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                         )
                       )}
                     </div>
+                  )}
+
+                  {stem !== 'vocals' && stem !== 'drums' && stem !== 'song' && !bm && activePreset && activePreset !== 'v1' && (
+                    <span
+                      className="self-center text-[10px] text-gray-500 italic mt-0.5"
+                      title={`Generation preset: ${activePreset}`}
+                    >
+                      preset: {activePreset}
+                    </span>
                   )}
 
                   {/* Skip beat detection — open the editor with an empty chart.
