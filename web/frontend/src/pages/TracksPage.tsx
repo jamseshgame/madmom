@@ -7,6 +7,13 @@ import VocalmapButtons from '../components/VocalmapButtons'
 import useInstalledVersion from '../components/useInstalledVersion'
 import { BusyProvider, useExclusiveTask } from '../components/useExclusiveTask'
 import { ParamControl } from '../components/pipeline/ParamControl'
+import {
+  GENERATION_DEFAULTS,
+  GENERATION_STAGE_LABELS,
+  type GenerationPreset,
+  type GenerationStage,
+  type GenerationState,
+} from '../components/pipeline/generationTypes'
 import type { EngineSpec } from '../api/pipelineClient'
 
 type BeatmapRecord = BeatmapStatsRecord
@@ -83,36 +90,6 @@ const FIELD_GROUPS = [
   },
 ]
 
-// V2 pipeline stages exposed in the Generate Beatmap modal. Each maps to a
-// per-stage dropdown of engines (fetched from /api/pipeline/engines) plus the
-// engine-specific numeric/boolean/enum knobs rendered via <ParamControl>.
-type GenerationStage = 'onsets' | 'pitches' | 'quantized' | 'lanes_expert' | 'lanes_filtered'
-
-const GENERATION_STAGE_LABELS: Record<GenerationStage, string> = {
-  onsets: 'Onset detection',
-  pitches: 'Pitch detection',
-  quantized: 'Quantization',
-  lanes_expert: 'Lane mapping',
-  lanes_filtered: 'Playability filter',
-}
-
-const GENERATION_DEFAULTS: Record<GenerationStage, { engine: string; params: Record<string, unknown> }> = {
-  onsets: { engine: 'librosa-onset', params: {} },
-  pitches: { engine: 'yin', params: {} },
-  quantized: { engine: 'metric-weighted', params: {} },
-  lanes_expert: { engine: 'section-sliding', params: {} },
-  lanes_filtered: { engine: 'identity', params: {} },
-}
-
-// A saved bundle of {engine, params} choices for each V2 stage. Built-in
-// presets ship with the backend; user-saved ones live in
-// <upload_dir>/generation_presets.json. The picker on the modal lists both.
-interface GenerationPreset {
-  name: string
-  description?: string
-  builtin?: boolean
-  generation: Record<GenerationStage, { engine: string; params: Record<string, unknown> }>
-}
 
 function BeatmapPanel({
   track,
@@ -140,7 +117,7 @@ function BeatmapPanel({
   // V2 pipeline state — engine catalog (null until /api/pipeline/engines
   // resolves) and the user's current per-stage engine + params selection.
   const [engines, setEngines] = useState<Record<string, EngineSpec[]> | null>(null)
-  const [generation, setGeneration] = useState<Record<GenerationStage, { engine: string; params: Record<string, unknown> }>>(GENERATION_DEFAULTS)
+  const [generation, setGeneration] = useState<GenerationState>(GENERATION_DEFAULTS)
   // Generation presets — loaded from /api/generation-presets. `activePreset`
   // is the currently selected preset name; '' means the user has edited away
   // from any preset (the dropdown shows "Custom"). The active name is sent
