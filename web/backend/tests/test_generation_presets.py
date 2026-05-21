@@ -6,7 +6,6 @@ and save/delete protections.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -29,7 +28,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """Point the user-presets file at a fresh tmp dir so tests don't touch
     the real generation_presets.json."""
     from app import config
-    monkeypatch.setattr(config.settings, 'upload_dir', tmp_path)
+    monkeypatch.setattr(config.settings, 'upload_dir', str(tmp_path))
     return TestClient(app)
 
 
@@ -73,8 +72,13 @@ def test_drums_v1_uses_centroid_pitch_engine(client: TestClient):
     r = client.get('/api/generation-presets?stem=drums')
     drums_v1 = next(p for p in r.json() if p['name'] == 'drums-v1')
     assert drums_v1['stems'] == ['drums']
-    assert drums_v1['generation']['pitches']['engine'] == 'centroid'
-    assert drums_v1['generation']['lanes_expert']['params'].get('chord_polyphony_threshold') == 6
+    gen = drums_v1['generation']
+    assert gen['onsets']['engine'] == 'librosa-onset'
+    assert gen['pitches']['engine'] == 'centroid'
+    assert gen['quantized']['engine'] == 'metric-weighted'
+    assert gen['lanes_expert']['engine'] == 'section-sliding'
+    assert gen['lanes_expert']['params'].get('chord_polyphony_threshold') == 6
+    assert gen['lanes_filtered']['engine'] == 'identity'
 
 
 def test_user_saved_preset_appears_in_all_filtered_lists(client: TestClient):
@@ -91,6 +95,7 @@ def test_user_saved_preset_appears_in_all_filtered_lists(client: TestClient):
         },
     })
     assert save.status_code == 200
+    assert 'stems' not in save.json()  # user-saved presets never carry a stems field
 
     for stem in ('drums', 'guitar', 'bass'):
         r = client.get(f'/api/generation-presets?stem={stem}')
