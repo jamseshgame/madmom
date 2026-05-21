@@ -26,6 +26,8 @@ from . import pitches_passthrough  # noqa: F401
 
 from . import pitches_yin  # noqa: F401
 
+from . import pitches_centroid  # noqa: F401
+
 try:
     from . import pitches_crepe  # noqa: F401
 except ImportError:
