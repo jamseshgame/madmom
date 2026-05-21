@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, HTTPException, Query
 
 from ..config import settings
 
@@ -191,6 +191,27 @@ BUILTIN_PRESETS: list[dict[str, Any]] = [
             'lanes_filtered': {'engine': 'chain', 'params': {}},
         },
     },
+    {
+        'name': 'drums-v1',
+        'description': 'Drum-friendly defaults — spectral centroid pitch + raised chord threshold',
+        'builtin': True,
+        # The `stems` field restricts which stem rows show this preset.
+        # Omit or set to None for universal presets (everything above).
+        'stems': ['drums'],
+        'generation': {
+            'onsets': {'engine': 'librosa-onset', 'params': {}},
+            # Centroid engine matches what the legacy drum pipeline does:
+            # spectral centroid → fake-MIDI, so kick/snare/cymbal get spread
+            # across frets via the lane engine's percentile binning.
+            'pitches': {'engine': 'centroid', 'params': {}},
+            'quantized': {'engine': 'metric-weighted', 'params': {}},
+            # Drum hits are almost always single events; raise the chord
+            # threshold above where the centroid distribution would push
+            # the lane engine into 2-fret chords.
+            'lanes_expert': {'engine': 'section-sliding', 'params': {'chord_polyphony_threshold': 6}},
+            'lanes_filtered': {'engine': 'identity', 'params': {}},
+        },
+    },
 ]
 
 
@@ -210,9 +231,18 @@ def _validate_generation(payload: Any) -> dict[str, Any]:
 
 
 @router.get('')
-async def list_presets() -> list[dict[str, Any]]:
-    """Built-ins first, then user-saved presets."""
-    return list(BUILTIN_PRESETS) + _load_user_presets()
+async def list_presets(stem: str | None = Query(default=None)) -> list[dict[str, Any]]:
+    """Built-ins first, then user-saved presets.
+
+    Optional `stem` query param filters presets to those applicable to the
+    given stem — a preset is included when it has no `stems` field
+    (universal) OR its `stems` list contains the requested stem. User-saved
+    presets are always universal in this scope.
+    """
+    all_presets = list(BUILTIN_PRESETS) + _load_user_presets()
+    if stem is None:
+        return all_presets
+    return [p for p in all_presets if not p.get('stems') or stem in p['stems']]
 
 
 @router.post('')
