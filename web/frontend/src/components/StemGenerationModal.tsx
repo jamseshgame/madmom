@@ -5,27 +5,12 @@ import {
   type GenerationStage,
   type GenerationState,
 } from './pipeline/generationTypes'
-
-const STEM_COLORS: Record<string, string> = {
-  bass: 'text-green-400',
-  rhythm: 'text-green-400',
-  guitar: 'text-orange-400',
-  piano: 'text-violet-400',
-  other: 'text-blue-400',
-}
-
-const STEM_LABELS: Record<string, string> = {
-  bass: 'Bass',
-  rhythm: 'Bass',
-  guitar: 'Guitar',
-  piano: 'Piano',
-  other: 'Other',
-}
+import { STEM_COLORS, STEM_LABELS } from './stemDisplay'
 
 interface StemGenerationModalProps {
   trackId: string
   stem: string
-  songIni: Record<string, unknown>
+  songIni: Record<string, string>
   generation: GenerationState
   activePreset: string
   onGenerationChange: (next: GenerationState) => void

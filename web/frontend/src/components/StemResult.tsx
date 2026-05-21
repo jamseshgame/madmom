@@ -6,46 +6,14 @@ import LyricsButtons from './LyricsButtons'
 import VocalmapButtons from './VocalmapButtons'
 import useInstalledVersion from './useInstalledVersion'
 import { useExclusiveTask } from './useExclusiveTask'
+import StemGenerationModal from './StemGenerationModal'
+import { type GenerationState } from './pipeline/generationTypes'
+import { loadStoredGeneration, saveStoredGeneration } from './pipeline/generationStorage'
+import { STEM_COLORS, STEM_LABELS } from './stemDisplay'
 
 interface StemResultProps {
   jobId: string
   metadata: Record<string, unknown>
-}
-
-const STEM_COLORS: Record<string, string> = {
-  vocals: 'text-pink-400',
-  drums: 'text-amber-400',
-  bass: 'text-green-400',
-  rhythm: 'text-green-400',
-  guitar: 'text-orange-400',
-  piano: 'text-violet-400',
-  other: 'text-blue-400',
-  crowd: 'text-blue-400',
-  song: 'text-gray-300',
-  no_vocals: 'text-cyan-400',
-  no_drums: 'text-cyan-400',
-  no_bass: 'text-cyan-400',
-  no_guitar: 'text-cyan-400',
-  no_piano: 'text-cyan-400',
-  no_other: 'text-cyan-400',
-}
-
-const STEM_LABELS: Record<string, string> = {
-  vocals: 'Vocals',
-  drums: 'Drums',
-  bass: 'Bass',
-  rhythm: 'Bass',
-  guitar: 'Guitar',
-  piano: 'Piano',
-  other: 'Other',
-  crowd: 'Crowd',
-  song: 'Master Mix',
-  no_vocals: 'Instrumental',
-  no_drums: 'No Drums',
-  no_bass: 'No Bass',
-  no_guitar: 'No Guitar',
-  no_piano: 'No Piano',
-  no_other: 'No Other',
 }
 
 // Keys that historically appeared in the stems map but aren't actual audio
@@ -215,6 +183,19 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
   const [hasVocalNotes, setHasVocalNotes] = useState(false)
   const [batchError, setBatchError] = useState('')
   const [existingBeatmaps, setExistingBeatmaps] = useState<BeatmapRecord[]>([])
+
+  // Shared generation state for all non-drums stems on this page. Persisted
+  // to localStorage so the user's preset/engine choices survive reloads.
+  // Stays in sync with the cog modal: edits via the modal update this state
+  // and the next click of the green main button picks them up.
+  const [generation, setGeneration] = useState<GenerationState>(() => loadStoredGeneration().generation)
+  const [activePreset, setActivePreset] = useState<string>(() => loadStoredGeneration().activePreset)
+  const [modalStem, setModalStem] = useState<string | null>(null)
+
+  useEffect(() => {
+    saveStoredGeneration(generation, activePreset)
+  }, [generation, activePreset])
+
   const installedMadmom = useInstalledVersion('madmom')
   const lock = useExclusiveTask()
   const beatmapBtnLabel = installedMadmom
@@ -563,14 +544,27 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                         </a>
                       ) : (
                         !bm && (
-                          <button
-                            onClick={() => generateBeatmap(stem)}
-                            disabled={lock.lockedByOther(`beatmap:${stem}`)}
-                            className="flex-1 px-3 py-1.5 bg-green-700/60 hover:bg-green-600/70 disabled:opacity-50 disabled:cursor-not-allowed text-green-100 rounded text-xs font-medium transition-colors"
-                            title={lock.lockedByOther(`beatmap:${stem}`) ? 'Another task is running' : 'Generate beatmap with the installed madmom model'}
-                          >
-                            {beatmapBtnLabel}
-                          </button>
+                          <>
+                            <button
+                              onClick={() => generateBeatmap(stem)}
+                              disabled={lock.lockedByOther(`beatmap:${stem}`)}
+                              className="flex-1 px-3 py-1.5 bg-green-700/60 hover:bg-green-600/70 disabled:opacity-50 disabled:cursor-not-allowed text-green-100 rounded text-xs font-medium transition-colors"
+                              title={lock.lockedByOther(`beatmap:${stem}`) ? 'Another task is running' : 'Generate beatmap with the installed madmom model'}
+                            >
+                              {beatmapBtnLabel}
+                            </button>
+                            {stem !== 'drums' && trackId && (
+                              <button
+                                type="button"
+                                onClick={() => setModalStem(stem)}
+                                className="px-2 bg-gray-700 hover:bg-gray-600 text-gray-200 rounded text-xs transition-colors"
+                                title="Change preset / engine settings"
+                                aria-label={`Open generation settings for ${STEM_LABELS[stem] || stem}`}
+                              >
+                                ⚙
+                              </button>
+                            )}
+                          </>
                         )
                       )}
                     </div>
@@ -1008,6 +1002,30 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
           onCloned={(cloned) => {
             setStatsBeatmap(null)
             navigate(`/edit/${trackId}/${cloned.id}`)
+          }}
+        />
+      )}
+
+      {modalStem && trackId && (
+        <StemGenerationModal
+          trackId={trackId}
+          stem={modalStem}
+          songIni={songIni}
+          generation={generation}
+          activePreset={activePreset}
+          onGenerationChange={setGeneration}
+          onActivePresetChange={setActivePreset}
+          onClose={() => setModalStem(null)}
+          onGenerated={(beatmapJobId) => {
+            // Capture modalStem inside the callback — TS doesn't narrow
+            // through closure boundaries even though the surrounding
+            // `modalStem && trackId &&` already proved it non-null.
+            const stem = modalStem
+            if (!stem) return
+            setBeatmaps((prev) => ({
+              ...prev,
+              [stem]: { jobId: beatmapJobId, state: 'generating' },
+            }))
           }}
         />
       )}
