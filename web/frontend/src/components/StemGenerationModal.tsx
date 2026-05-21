@@ -82,6 +82,7 @@ export default function StemGenerationModal({
             activePreset={activePreset}
             onGenerationChange={onGenerationChange}
             onActivePresetChange={onActivePresetChange}
+            stem={stem}
           />
         </div>
 

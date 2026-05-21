@@ -14,6 +14,10 @@ interface GenerationSettingsProps {
   activePreset: string
   onGenerationChange: (next: GenerationState) => void
   onActivePresetChange: (name: string) => void
+  // The stem this settings panel is generating for. Threaded into the
+  // presets fetch URL so the backend's stem filter narrows the dropdown
+  // to applicable presets.
+  stem: string
 }
 
 export default function GenerationSettings({
@@ -21,6 +25,7 @@ export default function GenerationSettings({
   activePreset,
   onGenerationChange,
   onActivePresetChange,
+  stem,
 }: GenerationSettingsProps) {
   const [engines, setEngines] = useState<Record<string, EngineSpec[]> | null>(null)
   const [presets, setPresets] = useState<GenerationPreset[]>([])
@@ -70,21 +75,28 @@ export default function GenerationSettings({
   // dropdown reflects the new list immediately. Does NOT run the v1-fallback;
   // that lives in its own effect below to avoid coupling.
   const refreshPresets = useCallback(() => {
-    fetch('/api/generation-presets')
+    const url = stem
+      ? `/api/generation-presets?stem=${encodeURIComponent(stem)}`
+      : '/api/generation-presets'
+    fetch(url)
       .then((r) => r.json())
       .then((list: GenerationPreset[]) => setPresets(list))
       .catch(console.error)
-  }, [])
+  }, [stem])
 
   // Initial presets load — aborts if the component unmounts before resolving.
+  // Re-runs when `stem` changes so the dropdown narrows to applicable presets.
   useEffect(() => {
     const ctrl = new AbortController()
-    fetch('/api/generation-presets', { signal: ctrl.signal })
+    const url = stem
+      ? `/api/generation-presets?stem=${encodeURIComponent(stem)}`
+      : '/api/generation-presets'
+    fetch(url, { signal: ctrl.signal })
       .then((r) => r.json())
       .then((list: GenerationPreset[]) => setPresets(list))
       .catch((e) => { if (e?.name !== 'AbortError') console.error(e) })
     return () => ctrl.abort()
-  }, [])
+  }, [stem])
 
   // When the presets list updates (initial load, or after save/delete),
   // snap activePreset AND generation to v1 if the current activePreset is

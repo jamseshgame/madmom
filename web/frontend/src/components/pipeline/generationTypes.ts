@@ -29,5 +29,10 @@ export interface GenerationPreset {
   name: string
   description?: string
   builtin?: boolean
+  // Optional stem allow-list. Omitted/undefined = universal (preset
+  // appears for every stem). When set, the backend filters this preset
+  // out of GET /api/generation-presets?stem=... responses whose stem
+  // isn't in the list.
+  stems?: string[]
   generation: GenerationState
 }

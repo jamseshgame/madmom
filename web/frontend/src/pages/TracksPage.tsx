@@ -132,12 +132,11 @@ function BeatmapPanel({
       formData.append(key, String(val ?? ''))
     }
 
-    // Drums fall back to the single-hit legacy pipeline; everything else
-    // goes through the V2 staged pipeline with the engine selections from
-    // the GENERATION section. Field naming matches the V2 endpoint's
+    // All stems go through the V2 staged pipeline with the engine selections
+    // from the GENERATION section. Field naming matches the V2 endpoint's
     // Form(...) parameters — note that `lanes_expert` is sent as `lanes_*`
     // and `lanes_filtered` as `playability_*`.
-    const useV2 = stem !== 'drums'
+    const useV2 = true
     if (useV2) {
       for (const stage of Object.keys(GENERATION_STAGE_LABELS) as GenerationStage[]) {
         const sel = generation[stage]
@@ -276,15 +275,14 @@ function BeatmapPanel({
                   {group.fields.map((f) => renderField(f))}
                 </div>
               </div>
-              {/* GENERATION section: sits between Metadata (idx 0) and Timing.
-                  Hidden for drums because the drums stem falls back to the
-                  legacy single-hit pipeline which doesn't accept engine knobs. */}
-              {idx === 0 && stem !== 'drums' && (
+              {/* GENERATION section: sits between Metadata (idx 0) and Timing. */}
+              {idx === 0 && (
                 <GenerationSettings
                   generation={generation}
                   activePreset={activePreset}
                   onGenerationChange={setGeneration}
                   onActivePresetChange={setActivePreset}
+                  stem={stem}
                 />
               )}
             </Fragment>

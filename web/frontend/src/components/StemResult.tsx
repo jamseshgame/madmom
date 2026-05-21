@@ -421,11 +421,9 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
     const label = STEM_LABELS[stem] || stem
     setBeatmaps((prev) => ({ ...prev, [stem]: { jobId: '', state: 'generating' } }))
 
-    // Drums uses the legacy single-shot endpoint — V2 doesn't support drums
-    // yet (separate follow-up project). Everything else gets the V2 staged
-    // pipeline with whatever preset/engine settings the user has set on
-    // this page (defaults to v1).
-    const useV2 = stem !== 'drums' && !!trackId
+    // All stems get the V2 staged pipeline with whatever preset/engine
+    // settings the user has set on this page (defaults to v1).
+    const useV2 = !!trackId
     try {
       let res: Response
       if (useV2) {
@@ -588,7 +586,7 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                             >
                               {beatmapBtnLabel}
                             </button>
-                            {stem !== 'drums' && trackId && (
+                            {trackId && (
                               <button
                                 type="button"
                                 onClick={() => setModalStem(stem)}
@@ -605,7 +603,7 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                     </div>
                   )}
 
-                  {stem !== 'vocals' && stem !== 'drums' && stem !== 'song' && !bm && activePreset && activePreset !== 'v1' && (
+                  {stem !== 'vocals' && stem !== 'song' && !bm && activePreset && activePreset !== 'v1' && (
                     <span
                       className="self-center text-[10px] text-gray-500 italic mt-0.5"
                       title={`Generation preset: ${activePreset}`}
