@@ -132,29 +132,25 @@ function BeatmapPanel({
       formData.append(key, String(val ?? ''))
     }
 
-    // All stems go through the V2 staged pipeline with the engine selections
-    // from the GENERATION section. Field naming matches the V2 endpoint's
-    // Form(...) parameters — note that `lanes_expert` is sent as `lanes_*`
-    // and `lanes_filtered` as `playability_*`.
-    const useV2 = true
-    if (useV2) {
-      for (const stage of Object.keys(GENERATION_STAGE_LABELS) as GenerationStage[]) {
-        const sel = generation[stage]
-        const fieldPrefix =
-          stage === 'lanes_expert' ? 'lanes' :
-          stage === 'lanes_filtered' ? 'playability' :
-          stage
-        formData.append(`${fieldPrefix}_engine`, sel.engine)
-        formData.append(`${fieldPrefix}_params`, JSON.stringify(sel.params))
-      }
-      // Record which preset (if any) drove this generation so the picker
-      // can show a badge on the result.
-      if (activePreset) formData.append('preset', activePreset)
+    // All stems go through V2 — the legacy single-shot endpoint was retired
+    // when drums got V2 support (centroid pitch engine + single-hit lane
+    // engine semantics handle drums identically to other stems).
+    // Field naming matches the V2 endpoint's Form(...) parameters — note that
+    // `lanes_expert` is sent as `lanes_*` and `lanes_filtered` as `playability_*`.
+    for (const stage of Object.keys(GENERATION_STAGE_LABELS) as GenerationStage[]) {
+      const sel = generation[stage]
+      const fieldPrefix =
+        stage === 'lanes_expert' ? 'lanes' :
+        stage === 'lanes_filtered' ? 'playability' :
+        stage
+      formData.append(`${fieldPrefix}_engine`, sel.engine)
+      formData.append(`${fieldPrefix}_params`, JSON.stringify(sel.params))
     }
+    // Record which preset (if any) drove this generation so the picker
+    // can show a badge on the result.
+    if (activePreset) formData.append('preset', activePreset)
 
-    const endpoint = useV2
-      ? `/api/tracks/${track.id}/generate-beatmap-v2`
-      : `/api/tracks/${track.id}/generate-beatmap`
+    const endpoint = `/api/tracks/${track.id}/generate-beatmap-v2`
 
     try {
       const res = await fetch(endpoint, { method: 'POST', body: formData })
