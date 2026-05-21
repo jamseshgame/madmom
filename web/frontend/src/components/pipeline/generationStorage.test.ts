@@ -67,7 +67,7 @@ describe('generationStorage', () => {
   })
 
   it('save followed by clear-and-reload returns defaults', () => {
-    saveStoredGeneration(GENERATION_DEFAULTS, 'v1')
+    saveStoredGeneration(GENERATION_DEFAULTS, 'v2 — tonal (key-relative)')
     localStorage.clear()
     const { generation, activePreset } = loadStoredGeneration()
     expect(generation).toEqual(GENERATION_DEFAULTS)

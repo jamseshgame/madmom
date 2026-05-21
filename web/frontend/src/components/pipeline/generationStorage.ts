@@ -18,7 +18,7 @@ export function loadStoredGeneration(): StoredShape {
     const parsed = JSON.parse(raw) as Partial<StoredShape>
     // Merge stored stages over defaults so a partial shape from an older
     // version of the app still produces a valid state object.
-    const generation = { ...structuredClone(GENERATION_DEFAULTS) }
+    const generation = structuredClone(GENERATION_DEFAULTS)
     if (parsed.generation && typeof parsed.generation === 'object') {
       for (const stage of Object.keys(generation) as (keyof GenerationState)[]) {
         const stored = parsed.generation[stage]
