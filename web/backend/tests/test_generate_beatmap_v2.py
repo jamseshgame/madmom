@@ -123,20 +123,3 @@ def test_generate_beatmap_v2_runs_all_stages(client, fake_track):
     ini = (out / 'song.ini').read_text()
     assert 'name = Bass Test' in ini
 
-
-def test_generate_beatmap_v2_rejects_drums(client, fake_track):
-    """Drums stem must be rejected — drums use legacy endpoint."""
-    r = client.post(
-        f'/api/tracks/{fake_track}/generate-beatmap-v2',
-        data={
-            'stem': 'drums',
-            'name': 'D', 'artist': 'A', 'album': 'B', 'genre': 'G', 'year': '2026',
-            'onsets_engine': 'librosa-onset', 'onsets_params': '{}',
-            'pitches_engine': 'yin', 'pitches_params': '{}',
-            'quantized_engine': 'metric-weighted', 'quantized_params': '{}',
-            'lanes_engine': 'section-sliding', 'lanes_params': '{}',
-            'playability_engine': 'identity', 'playability_params': '{}',
-        },
-    )
-    assert r.status_code == 400
-    assert 'drum' in r.json()['detail'].lower()

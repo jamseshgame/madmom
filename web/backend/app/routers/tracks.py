@@ -475,13 +475,12 @@ async def generate_beatmap_v2(
 
     Unlike `/generate-beatmap` (legacy), this endpoint runs each V2 stage in
     sequence with the caller-selected engines and writes the final
-    notes.chart via the V2 serializer. Drums stem is rejected — drums use
-    the legacy endpoint for single-hit output.
+    notes.chart via the V2 serializer. All stems including drums go through
+    V2 with single-hit semantics — V2 lane engines emit sustain=0 and no
+    slide notes by design, matching what the legacy single_hits_only flag
+    produced for drums.
     """
     import json as _json
-
-    if stem == 'drums':
-        raise HTTPException(400, 'Drums stem is not supported by V2 pipeline; use /generate-beatmap')
 
     track = get_track(track_id)
     if not track:
