@@ -6,15 +6,13 @@ import BeatmapStatsModal, { BeatmapRecord as BeatmapStatsRecord } from '../compo
 import VocalmapButtons from '../components/VocalmapButtons'
 import useInstalledVersion from '../components/useInstalledVersion'
 import { BusyProvider, useExclusiveTask } from '../components/useExclusiveTask'
-import { ParamControl } from '../components/pipeline/ParamControl'
 import {
   GENERATION_DEFAULTS,
   GENERATION_STAGE_LABELS,
-  type GenerationPreset,
   type GenerationStage,
   type GenerationState,
 } from '../components/pipeline/generationTypes'
-import type { EngineSpec } from '../api/pipelineClient'
+import GenerationSettings from '../components/pipeline/GenerationSettings'
 
 type BeatmapRecord = BeatmapStatsRecord
 
@@ -114,18 +112,11 @@ function BeatmapPanel({
   const [done, setDone] = useState(false)
   const [error, setError] = useState('')
   const [beatmapJobId, setBeatmapJobId] = useState('')
-  // V2 pipeline state — engine catalog (null until /api/pipeline/engines
-  // resolves) and the user's current per-stage engine + params selection.
-  const [engines, setEngines] = useState<Record<string, EngineSpec[]> | null>(null)
+  // V2 pipeline state — user's current per-stage engine + params selection,
+  // and the name of the active preset ('' = Custom). Both are passed down to
+  // GenerationSettings as controlled props and read by handleGenerate.
   const [generation, setGeneration] = useState<GenerationState>(GENERATION_DEFAULTS)
-  // Generation presets — loaded from /api/generation-presets. `activePreset`
-  // is the currently selected preset name; '' means the user has edited away
-  // from any preset (the dropdown shows "Custom"). The active name is sent
-  // as the `preset` form field so the picker badge stays accurate.
-  const [presets, setPresets] = useState<GenerationPreset[]>([])
   const [activePreset, setActivePreset] = useState<string>('')
-  const [presetSaving, setPresetSaving] = useState(false)
-  const [presetError, setPresetError] = useState('')
 
   useEffect(() => {
     fetch('/api/tracks/schema/song-ini')
@@ -146,117 +137,6 @@ function BeatmapPanel({
       })
   }, [track, stem])
 
-  // Load the pipeline engine catalog and seed each stage's params with its
-  // selected engine's schema defaults. Without this seed the V2 endpoint
-  // would receive '{}' for every stage and run with engine-side defaults
-  // anyway, but surfacing them in the UI keeps the displayed knobs in sync
-  // with what the backend will actually use.
-  useEffect(() => {
-    fetch('/api/pipeline/engines')
-      .then((r) => r.json())
-      .then((catalog: Record<string, EngineSpec[]>) => {
-        setEngines(catalog)
-        setGeneration((prev) => {
-          const next = { ...prev }
-          ;(Object.keys(next) as GenerationStage[]).forEach((stage) => {
-            const spec = catalog[stage]?.find((e) => e.engine_id === next[stage].engine)
-            if (!spec) return
-            const defaults: Record<string, unknown> = {}
-            for (const [k, p] of Object.entries(spec.params_schema || {})) {
-              if ('default' in p && p.default !== undefined) defaults[k] = p.default
-            }
-            next[stage] = { engine: next[stage].engine, params: defaults }
-          })
-          return next
-        })
-      })
-      .catch(console.error)
-  }, [])
-
-  const refreshPresets = useCallback(() => {
-    fetch('/api/generation-presets')
-      .then((r) => r.json())
-      .then((list: GenerationPreset[]) => {
-        setPresets(list)
-        // Pick v1 (the default) on first load so the dropdown isn't blank
-        // and the modal's initial state actually matches the labelled preset.
-        if (!activePreset && list.find((p) => p.name === 'v1')) {
-          setActivePreset('v1')
-        }
-      })
-      .catch(console.error)
-  }, [activePreset])
-
-  useEffect(() => { refreshPresets() }, [refreshPresets])
-
-  const applyPreset = (name: string) => {
-    setActivePreset(name)
-    if (!name) return
-    const p = presets.find((x) => x.name === name)
-    if (!p) return
-    // Deep-copy the params so subsequent edits don't mutate the stored preset.
-    const next: typeof generation = { ...GENERATION_DEFAULTS }
-    ;(Object.keys(GENERATION_STAGE_LABELS) as GenerationStage[]).forEach((stage) => {
-      const s = p.generation[stage]
-      if (s) next[stage] = { engine: s.engine, params: { ...s.params } }
-    })
-    setGeneration(next)
-  }
-
-  // Any manual edit to engine/params drops us out of "v1 — selected" into
-  // a Custom state so the dropdown doesn't lie about what's running.
-  const markCustom = () => { if (activePreset) setActivePreset('') }
-
-  const savePresetAs = async () => {
-    setPresetError('')
-    // Suggest the next free vN slot so the user doesn't have to invent a name.
-    const usedV = new Set(presets.filter((p) => /^v\d+/i.test(p.name)).map((p) => p.name))
-    let suggestion = ''
-    for (let i = 12; i < 200; i++) {
-      const candidate = `v${i}`
-      if (!usedV.has(candidate)) { suggestion = candidate; break }
-    }
-    const name = window.prompt('Save current settings as preset (name):', suggestion)
-    if (!name) return
-    setPresetSaving(true)
-    try {
-      const res = await fetch('/api/generation-presets', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: name.trim(), generation }),
-      })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.detail || `HTTP ${res.status}`)
-      }
-      setActivePreset(name.trim())
-      refreshPresets()
-    } catch (e) {
-      setPresetError((e as Error).message)
-    } finally {
-      setPresetSaving(false)
-    }
-  }
-
-  const deleteActivePreset = async () => {
-    if (!activePreset) return
-    const target = presets.find((p) => p.name === activePreset)
-    if (!target || target.builtin) return
-    if (!window.confirm(`Delete preset "${activePreset}"?`)) return
-    try {
-      const res = await fetch(`/api/generation-presets/${encodeURIComponent(activePreset)}`, {
-        method: 'DELETE',
-      })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.detail || `HTTP ${res.status}`)
-      }
-      setActivePreset('')
-      refreshPresets()
-    } catch (e) {
-      setPresetError((e as Error).message)
-    }
-  }
 
   const setValue = (key: string, val: unknown) => {
     setValues((prev) => ({ ...prev, [key]: val }))
@@ -419,108 +299,14 @@ function BeatmapPanel({
               </div>
               {/* GENERATION section: sits between Metadata (idx 0) and Timing.
                   Hidden for drums because the drums stem falls back to the
-                  legacy single-hit pipeline which doesn't accept engine knobs.
-                  Also hidden until the engine catalog has loaded. */}
-              {idx === 0 && stem !== 'drums' && engines && (
-                <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Generation</h4>
-                    <div className="flex items-center gap-2">
-                      <select
-                        value={activePreset}
-                        onChange={(e) => applyPreset(e.target.value)}
-                        className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs"
-                        title="Apply a saved preset"
-                      >
-                        <option value="">Custom</option>
-                        {presets.map((p) => (
-                          <option key={p.name} value={p.name}>
-                            {p.builtin ? p.name : `★ ${p.name}`}
-                          </option>
-                        ))}
-                      </select>
-                      <button
-                        type="button"
-                        onClick={savePresetAs}
-                        disabled={presetSaving}
-                        className="px-2 py-1 text-xs bg-gray-800 hover:bg-gray-700 disabled:opacity-50 border border-gray-700 rounded"
-                        title="Save current settings as a new preset"
-                      >
-                        Save as…
-                      </button>
-                      {activePreset && !presets.find((p) => p.name === activePreset)?.builtin && (
-                        <button
-                          type="button"
-                          onClick={deleteActivePreset}
-                          className="px-2 py-1 text-xs bg-red-900/40 hover:bg-red-800/60 border border-red-800 text-red-300 rounded"
-                          title={`Delete preset "${activePreset}"`}
-                        >
-                          Delete
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                  {presetError && <div className="mb-2 text-xs text-red-400">{presetError}</div>}
-                  {activePreset && (
-                    <p className="text-[11px] text-gray-500 italic mb-2">
-                      {presets.find((p) => p.name === activePreset)?.description || ''}
-                    </p>
-                  )}
-                  <div className="space-y-3">
-                    {(Object.keys(GENERATION_STAGE_LABELS) as GenerationStage[]).map((stage) => {
-                      const stageEngines = engines[stage] || []
-                      const selected = generation[stage]
-                      const spec = stageEngines.find((e) => e.engine_id === selected.engine)
-                      return (
-                        <div key={stage} className="border border-gray-700 rounded-lg p-3 space-y-2">
-                          <label className="block text-xs">
-                            <span className="text-gray-500">{GENERATION_STAGE_LABELS[stage]}</span>
-                            <select
-                              value={selected.engine}
-                              onChange={(e) => {
-                                markCustom()
-                                const nextEngineId = e.target.value
-                                const nextSpec = stageEngines.find((s) => s.engine_id === nextEngineId)
-                                const nextParams: Record<string, unknown> = {}
-                                for (const [k, p] of Object.entries(nextSpec?.params_schema || {})) {
-                                  if ('default' in p && p.default !== undefined) nextParams[k] = p.default
-                                }
-                                setGeneration((prev) => ({
-                                  ...prev,
-                                  [stage]: { engine: nextEngineId, params: nextParams },
-                                }))
-                              }}
-                              className="ml-2 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm"
-                            >
-                              {stageEngines.map((s) => (
-                                <option key={s.engine_id} value={s.engine_id}>{s.display_name}</option>
-                              ))}
-                            </select>
-                          </label>
-                          {spec && Object.keys(spec.params_schema || {}).length > 0 && (
-                            <div className="pl-3 border-l border-gray-700 space-y-2">
-                              {Object.entries(spec.params_schema).map(([key, pspec]) => (
-                                <ParamControl
-                                  key={key}
-                                  keyName={key}
-                                  spec={pspec}
-                                  value={selected.params[key]}
-                                  onChange={(v) => {
-                                    markCustom()
-                                    setGeneration((prev) => ({
-                                      ...prev,
-                                      [stage]: { ...prev[stage], params: { ...prev[stage].params, [key]: v } },
-                                    }))
-                                  }}
-                                />
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      )
-                    })}
-                  </div>
-                </div>
+                  legacy single-hit pipeline which doesn't accept engine knobs. */}
+              {idx === 0 && stem !== 'drums' && (
+                <GenerationSettings
+                  generation={generation}
+                  activePreset={activePreset}
+                  onGenerationChange={setGeneration}
+                  onActivePresetChange={setActivePreset}
+                />
               )}
             </Fragment>
           ))}
