@@ -13,6 +13,11 @@ primary use case.
 The spectral-centroid computation mirrors compute_spectral_centroids /
 compute_onset_centroids in bin/JamseshChartGenerator (same algorithm,
 inlined here to avoid the bin/ import path being environment-dependent).
+
+The madmom import is deferred to call time (inside run_centroid) so the
+engines package can be loaded even on environments where madmom isn't
+present. Registration happens at module import; the audio analysis only
+runs when the engine is actually invoked.
 """
 from __future__ import annotations
 
@@ -31,8 +36,6 @@ _PARAMS_SCHEMA = {
                         'label': 'Min expected centroid (Hz)'},
     'max_centroid_hz': {'type': 'number', 'min': 2000, 'max': 12000, 'step': 100, 'default': 8000,
                         'label': 'Max expected centroid (Hz)'},
-    'window_ms': {'type': 'number', 'min': 5, 'max': 200, 'step': 5, 'default': 30,
-                  'label': 'Window around onset (ms)'},
 }
 
 # Centroids below this fraction of min_centroid_hz are considered silent
@@ -40,10 +43,18 @@ _PARAMS_SCHEMA = {
 _SILENCE_FRACTION = 0.5
 
 
-def _compute_spectral_centroids(spec_array: np.ndarray, bin_frequencies: np.ndarray):
-    """Compute per-frame spectral centroid (Hz) and spread.
+def _compute_spectral_centroids(spec_array: np.ndarray, bin_frequencies: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per-frame spectral centroid and spread.
 
     Mirrors compute_spectral_centroids in bin/JamseshChartGenerator.
+
+    Memory note: this holds the full spectrogram (~245 MB for a 5-min song
+    at 100 fps with 2049 bins) plus the ``power`` and spread-intermediate
+    arrays in memory simultaneously, peaking around 750 MB. Matches the
+    legacy chart_generator behavior — but if multiple concurrent V2
+    pipeline jobs run this engine at once on a constrained droplet, watch
+    for OOM. A chunked/streaming implementation is a follow-up if it
+    becomes a real problem in production.
 
     Parameters
     ----------
@@ -114,13 +125,16 @@ def run_centroid(
     if onsets_payload is None:
         raise ValueError('S3 requires upstream onsets')
 
-    # upstream['onsets'] may be the raw list of onset dicts (as in tests/direct
-    # calls) or the full stage-output dict {'onsets': [...], 'engine': ...} (as
-    # loaded from disk by the pipeline runner). Normalise to a list.
-    if isinstance(onsets_payload, dict):
+    # Pipeline runner wraps each upstream stage in its full engine-output
+    # dict ({'engine': ..., 'onsets': [...]}), so unwrap if we see that
+    # shape. Direct test callers may pass a bare list or a {'onsets': [...]}
+    # dict; handle all three.
+    if isinstance(onsets_payload, dict) and 'onsets' in onsets_payload:
         onsets_list = onsets_payload['onsets']
-    else:
+    elif isinstance(onsets_payload, list):
         onsets_list = onsets_payload
+    else:
+        raise ValueError(f'Unexpected onsets payload shape: {type(onsets_payload)}')
     onset_times = [float(o['time_s']) for o in onsets_list]
 
     if not onset_times:
@@ -136,12 +150,13 @@ def run_centroid(
         max_hz = min_hz + 1.0
     # Silence threshold: centroids below this are treated as effectively silent.
     silence_threshold = min_hz * _SILENCE_FRACTION
-    # window_ms is informational for the schema; the legacy helpers compute
-    # centroids per frame at 100 fps so the effective window is one frame
-    # (~10 ms). Keeping the param for forward compatibility.
 
     on_progress('analyse', 30, 'Computing spectral centroids...')
 
+    # Use madmom.Spectrogram directly rather than the project's audio_io
+    # wrapper (which goes through librosa) — we need the bin_frequencies
+    # metadata madmom exposes, which would require manual STFT reconstruction
+    # on a librosa STFT.
     from madmom.audio.spectrogram import Spectrogram
 
     spec = Spectrogram(str(audio_path), frame_size=4096, fps=100, num_channels=1, sample_rate=44100)
@@ -156,7 +171,7 @@ def run_centroid(
 
     per_onset = []
     for i, t in enumerate(onset_times):
-        c = float(onset_centroids[i]) if i < len(onset_centroids) else float('nan')
+        c = float(onset_centroids[i])
         if not math.isfinite(c) or c <= 0 or c < silence_threshold:
             per_onset.append({
                 'time_s': t, 'dominant_midi': None,
@@ -166,7 +181,7 @@ def run_centroid(
         midi = _centroid_to_fake_midi(c, min_hz, max_hz)
         # Spread (variance) inversely correlates with confidence: a peaky
         # centroid distribution = high confidence in the centroid value.
-        spread = float(onset_spreads[i]) if i < len(onset_spreads) else 1.0
+        spread = float(onset_spreads[i])
         conf = float(1.0 / (1.0 + spread))
         per_onset.append({
             'time_s': t, 'dominant_midi': midi,

@@ -126,6 +126,27 @@ def test_audio_path_none_raises(tmp_audio):
         run_centroid(None, _onsets_payload([0.1]), {}, lambda *a: None)
 
 
+def test_accepts_pipeline_runner_upstream_format(tmp_audio):
+    """Pipeline runner passes upstream['onsets'] as the FULL onsets engine
+    output dict ({'engine': ..., 'onsets': [...]}), not just the bare list.
+    The engine must unwrap this correctly."""
+    signal = _sine_pulses([440.0, 440.0, 440.0])
+    path = tmp_audio(signal)
+    # Mirror what runner._gather_upstream produces — a nested dict.
+    upstream = {
+        'onsets': {
+            'engine': 'librosa-onset',
+            'params': {},
+            'generated_at': '2026-05-21T00:00:00Z',
+            'onsets': [{'time_s': t} for t in _pulse_onset_times(3)],
+        },
+    }
+    out = run_centroid(path, upstream, {}, lambda *a: None)
+    assert len(out['per_onset']) == 3
+    midis = [e['dominant_midi'] for e in out['per_onset'] if e['dominant_midi'] is not None]
+    assert len(midis) >= 2
+
+
 def test_engine_registers_for_pitches_stage():
     """Importing the engine module side-registers it for the PITCHES stage."""
     from app.services.pipeline.registry import Stage, get_engine
@@ -136,4 +157,4 @@ def test_engine_registers_for_pitches_stage():
     assert spec.display_name == 'Spectral centroid (drum-friendly)'
     assert 'min_centroid_hz' in spec.params_schema
     assert 'max_centroid_hz' in spec.params_schema
-    assert 'window_ms' in spec.params_schema
+    assert 'window_ms' not in spec.params_schema
