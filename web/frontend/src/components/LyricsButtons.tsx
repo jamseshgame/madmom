@@ -101,16 +101,22 @@ export default function LyricsButtons({ scope, hasVocals, meta, onLyricsChange }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [JSON.stringify(scope)])
 
-  // Hydrate active lyrics + versions on mount.
+  // Hydrate active lyrics + versions on mount. Probe /exists first so the
+  // common no-lyrics-yet case doesn't log a 404 in the console.
   useEffect(() => {
     let cancelled = false
-    fetch(`/api/lyrics?${scopeQuery(scope)}`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (cancelled) return
+    ;(async () => {
+      try {
+        const probe = await fetch(`/api/lyrics/exists?${scopeQuery(scope)}`)
+        if (!probe.ok) return
+        const { exists } = await probe.json()
+        if (!exists || cancelled) return
+        const r = await fetch(`/api/lyrics?${scopeQuery(scope)}`)
+        if (!r.ok || cancelled) return
+        const data = await r.json()
         if (data && data.words) onLyricsChange?.(data)
-      })
-      .catch(() => {})
+      } catch { /* ignore */ }
+    })()
     refreshVersions()
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps

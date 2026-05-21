@@ -252,8 +252,10 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
   const refetchHasVocalNotes = useCallback(async () => {
     if (!jobId) { setHasVocalNotes(false); return }
     try {
-      const r = await fetch(`/api/vocals?job_id=${jobId}`)
-      setHasVocalNotes(r.ok)
+      const r = await fetch(`/api/vocals/exists?job_id=${jobId}`)
+      if (!r.ok) { setHasVocalNotes(false); return }
+      const { exists } = await r.json()
+      setHasVocalNotes(!!exists)
     } catch {
       setHasVocalNotes(false)
     }
@@ -291,18 +293,29 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
   // Detect vocal_notes.json staleness vs current lyrics.json. The browser
   // computes sha1 over a canonical JSON projection that mirrors the
   // backend's hashlib.sha1(json.dumps(lyrics, sort_keys=True, ensure_ascii=False)).
+  // Probe /exists first — the staleness comparison is meaningless when either
+  // side is missing, and skipping the data fetch avoids 404s in the console
+  // for the common fresh-job case where neither file has been generated yet.
   useEffect(() => {
     if (!jobId) return
     const ctrl = new AbortController()
-    Promise.all([
-      fetch(`/api/lyrics?job_id=${jobId}`, { signal: ctrl.signal })
-        .then((r) => (r.ok ? r.json() : null))
-        .catch(() => null),
-      fetch(`/api/vocals?job_id=${jobId}`, { signal: ctrl.signal })
-        .then((r) => (r.ok ? r.json() : null))
-        .catch(() => null),
-    ])
-      .then(async ([lyrics, notes]) => {
+    ;(async () => {
+      try {
+        const [lProbe, vProbe] = await Promise.all([
+          fetch(`/api/lyrics/exists?job_id=${jobId}`, { signal: ctrl.signal })
+            .then((r) => (r.ok ? r.json() : { exists: false }))
+            .catch(() => ({ exists: false })),
+          fetch(`/api/vocals/exists?job_id=${jobId}`, { signal: ctrl.signal })
+            .then((r) => (r.ok ? r.json() : { exists: false }))
+            .catch(() => ({ exists: false })),
+        ])
+        if (!lProbe.exists || !vProbe.exists) return
+        const [lyrics, notes] = await Promise.all([
+          fetch(`/api/lyrics?job_id=${jobId}`, { signal: ctrl.signal })
+            .then((r) => (r.ok ? r.json() : null)),
+          fetch(`/api/vocals?job_id=${jobId}`, { signal: ctrl.signal })
+            .then((r) => (r.ok ? r.json() : null)),
+        ])
         if (lyrics && notes?.lyrics_etag) {
           const canonical = JSON.stringify(lyrics, Object.keys(lyrics).sort())
           const buf = new TextEncoder().encode(canonical)
@@ -312,8 +325,8 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
             .join('')
           setVocalsStale(hex !== notes.lyrics_etag)
         }
-      })
-      .catch(() => { /* ignore */ })
+      } catch { /* ignore — aborted or transient */ }
+    })()
     return () => ctrl.abort()
   }, [jobId])
   const updateIni = (key: string, value: string) =>
