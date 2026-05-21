@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { ParamControl } from './ParamControl'
 import type { EngineSpec } from '../../api/pipelineClient'
 import {
@@ -27,15 +27,23 @@ export default function GenerationSettings({
   const [presetSaving, setPresetSaving] = useState(false)
   const [presetError, setPresetError] = useState('')
 
+  // Always-latest snapshot of `generation` so the async engines-fetch
+  // callback below seeds against current props, not the value captured at
+  // mount. Without this, a parent update arriving before the fetch resolves
+  // would be silently clobbered when the seeding runs.
+  const generationRef = useRef(generation)
+  generationRef.current = generation
+
   // Load engine catalog; seed default params for any stage that's currently
   // empty {} so the displayed knobs match what the backend will use. Stages
   // with non-empty params (e.g. restored from localStorage) are left alone.
   useEffect(() => {
-    fetch('/api/pipeline/engines')
+    const ctrl = new AbortController()
+    fetch('/api/pipeline/engines', { signal: ctrl.signal })
       .then((r) => r.json())
       .then((catalog: Record<string, EngineSpec[]>) => {
         setEngines(catalog)
-        const next: GenerationState = { ...generation }
+        const next: GenerationState = { ...generationRef.current }
         let dirty = false
         ;(Object.keys(next) as GenerationStage[]).forEach((stage) => {
           if (Object.keys(next[stage].params).length > 0) return
@@ -51,42 +59,60 @@ export default function GenerationSettings({
         })
         if (dirty) onGenerationChange(next)
       })
-      .catch(console.error)
-    // Intentionally only on mount — re-firing on every generation change would
-    // loop the seeding logic.
+      .catch((e) => { if (e?.name !== 'AbortError') console.error(e) })
+    return () => ctrl.abort()
+    // onGenerationChange is a setter from useState in the parent — always
+    // stable; intentionally omitted from deps to keep this effect mount-only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // Imperative refetch helper — called after save/delete operations so the
+  // dropdown reflects the new list immediately. Does NOT run the v1-fallback;
+  // that lives in its own effect below to avoid coupling.
   const refreshPresets = useCallback(() => {
     fetch('/api/generation-presets')
       .then((r) => r.json())
-      .then((list: GenerationPreset[]) => {
-        setPresets(list)
-        // First-time bootstrap: when no preset is selected, fall back to v1
-        // so the dropdown isn't empty and the modal state matches the
-        // label. Also covers the recovery case where the stored preset
-        // was deleted by another session.
-        if (!activePreset || !list.find((p) => p.name === activePreset)) {
-          const v1 = list.find((p) => p.name === 'v1')
-          if (v1) onActivePresetChange('v1')
-        }
-      })
+      .then((list: GenerationPreset[]) => setPresets(list))
       .catch(console.error)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activePreset])
+  }, [])
 
-  useEffect(() => { refreshPresets() }, [refreshPresets])
+  // Initial presets load — aborts if the component unmounts before resolving.
+  useEffect(() => {
+    const ctrl = new AbortController()
+    fetch('/api/generation-presets', { signal: ctrl.signal })
+      .then((r) => r.json())
+      .then((list: GenerationPreset[]) => setPresets(list))
+      .catch((e) => { if (e?.name !== 'AbortError') console.error(e) })
+    return () => ctrl.abort()
+  }, [])
+
+  // When the presets list updates (initial load, or after save/delete),
+  // snap activePreset to v1 if it's empty OR points at a preset that
+  // doesn't exist (e.g. deleted by another session, or stale localStorage
+  // state). Decoupled from the fetch itself so editing engine/params
+  // doesn't trigger a refetch.
+  useEffect(() => {
+    if (presets.length === 0) return
+    if (!activePreset || !presets.find((p) => p.name === activePreset)) {
+      if (presets.find((p) => p.name === 'v1')) onActivePresetChange('v1')
+    }
+    // onActivePresetChange is a stable parent setter — intentionally omitted
+    // from deps; this effect should only re-run when the presets list or the
+    // active selection changes, not when the setter reference changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [presets, activePreset])
 
   const applyPreset = (name: string) => {
     onActivePresetChange(name)
     if (!name) return
     const p = presets.find((x) => x.name === name)
     if (!p) return
-    // Deep-copy params so subsequent edits don't mutate the stored preset.
-    const next: GenerationState = { ...structuredClone(GENERATION_DEFAULTS) }
+    // Deep-copy both the base defaults and every preset's params so
+    // subsequent edits don't mutate the stored preset object.
+    const next: GenerationState = structuredClone(GENERATION_DEFAULTS)
     ;(Object.keys(GENERATION_STAGE_LABELS) as GenerationStage[]).forEach((stage) => {
       const s = p.generation[stage]
-      if (s) next[stage] = { engine: s.engine, params: { ...s.params } }
+      if (s) next[stage] = { engine: s.engine, params: structuredClone(s.params) }
     })
     onGenerationChange(next)
   }
