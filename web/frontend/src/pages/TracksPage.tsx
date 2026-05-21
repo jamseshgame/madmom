@@ -1747,7 +1747,7 @@ function TracksPageInner() {
                   </div>
 
                   {/* Actions column */}
-                  <div className="md:w-80 md:shrink-0 flex flex-col gap-1.5">
+                  <div className="md:w-[26rem] md:shrink-0 flex flex-col gap-1.5">
                   {stem === 'vocals' && (
                     <>
                       <LyricsButtons
