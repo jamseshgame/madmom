@@ -224,7 +224,9 @@ def test_beatmaps_block_escapes_quote_and_newline(tmp_path: Path):
 def test_empty_input_returns_empty_result(tmp_path: Path):
     out = tmp_path / 'merged.chart'
     result = merge_beatmap_charts([], str(out))
-    assert result == {'included': [], 'skipped': []}
+    assert result['included'] == []
+    assert result['skipped'] == []
+    assert result['sections_by_beatmap'] == []
     # No file written.
     assert not out.exists()
 
@@ -277,3 +279,29 @@ def test_unknown_stem_is_skipped(tmp_path: Path):
     # 'other' has no STEM_TO_SECTION_SUFFIX entry — skipped entirely; no file written.
     assert result['included'] == []
     assert result['skipped'] == ['other']
+
+
+def test_returns_sections_by_beatmap_for_song_ini(tmp_path: Path):
+    in1 = tmp_path / 'g1.chart'
+    in2 = tmp_path / 'g2.chart'
+    _write_chart(in1)
+    _write_chart(in2)
+    out = tmp_path / 'merged.chart'
+
+    result = merge_beatmap_charts(
+        [
+            (str(in1), 'guitar', _meta('v1', 'bm-1', True)),
+            (str(in2), 'guitar', _meta('v2', 'bm-2', False)),
+        ],
+        str(out),
+    )
+
+    sb = result['sections_by_beatmap']
+    assert len(sb) == 2
+    primary, alt = sb
+    assert primary['is_active'] is True
+    assert primary['preset'] == 'v1'
+    assert primary['sections'] == ['ExpertSingle', 'HardSingle', 'MediumSingle', 'EasySingle']
+    assert alt['is_active'] is False
+    assert alt['preset'] == 'v2'
+    assert alt['sections'] == ['ExpertSingle2', 'HardSingle2', 'MediumSingle2', 'EasySingle2']

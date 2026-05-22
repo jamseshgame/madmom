@@ -1292,9 +1292,18 @@ async def publish_track_to_game(
                         'source': f'{len(merge_result["included"])}-stem merge',
                         'selected_beatmaps': beatmap_selection,
                     }
+                    # Carry the per-beatmap section names emitted by
+                    # merge_beatmap_charts so write_song_ini below can mirror
+                    # them into [beatmap_N] blocks for Unity's variant picker.
+                    song_ini_beatmaps = merge_result.get('sections_by_beatmap', [])
+                else:
+                    song_ini_beatmaps = []
+            else:
+                song_ini_beatmaps = []
         else:
             charts_to_merge: list[tuple[str, str, dict]] = []
             beatmap_selection: dict[str, str] = {}
+            song_ini_beatmaps = []
 
         # Vocals (preferred) / lyrics (fallback): if vocal_notes.json exists,
         # write a [JamseshVocals] block (and clear stale [Events] lyric/phrase
@@ -1354,7 +1363,7 @@ async def publish_track_to_game(
         realnotes_status = _bundle_realnotes(chart_path, tmp_dir, ini_fields)
 
         # Write song.ini (after tutorial / realnotes fields may have been added)
-        write_song_ini(tmp_dir, ini_fields)
+        write_song_ini(tmp_dir, ini_fields, beatmaps=song_ini_beatmaps)
 
         # Publish to GitHub
         commit_url = await publish_song_folder(tmp_dir, folder_name)

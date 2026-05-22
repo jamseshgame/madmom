@@ -133,6 +133,12 @@ def merge_beatmap_charts(
     included: list[str] = []
     skipped: list[str] = []
 
+    # Parallel to sections_out — one record per beatmap that contributed
+    # sections. Carries the same identifiers as the [Beatmaps] rows in the
+    # chart so the caller (publish_track_to_game → write_song_ini) can mirror
+    # them into song.ini's [beatmap_N] blocks for Unity's variant picker.
+    beatmap_records: list[dict] = []
+
     # Per-stem counter — advances only when the beatmap actually contributed
     # one or more sections (so a beatmap with zero usable difficulties
     # doesn't burn the next N slot).
@@ -169,6 +175,7 @@ def merge_beatmap_charts(
         preset = _esc(meta.get('preset', '') or '')
         bid = _esc(meta.get('beatmap_id', '') or '')
         name_tag = 'active' if meta.get('is_active') else 'alt'
+        contributed_sections: list[str] = []
 
         for difficulty in ('Expert', 'Hard', 'Medium', 'Easy'):
             m = re.search(
@@ -185,11 +192,21 @@ def merge_beatmap_charts(
                 f'  {section_name} = preset="{preset}" name="{name_tag}" beatmap_id="{bid}"'
             )
             sections_out.append((section_name, m.group(1), suffix, candidate_n, row_text))
+            contributed_sections.append(section_name)
             any_section = True
 
         if any_section:
             beatmap_index_per_stem[stem] = candidate_n
             included.append(stem)
+            beatmap_records.append({
+                'id': meta.get('beatmap_id', '') or '',
+                'name': meta.get('preset', '') or '',  # display name = preset for v1
+                'preset': meta.get('preset', '') or '',
+                'stem': stem,
+                'is_active': bool(meta.get('is_active')),
+                '_n': candidate_n,  # internal — stripped before return
+                'sections': contributed_sections,
+            })
         else:
             skipped.append(stem)
 
@@ -197,7 +214,7 @@ def merge_beatmap_charts(
         # Empty input or no usable sections — return without writing.
         # Preserves the test expectation that no file is written for empty
         # input or all-unknown-stems input.
-        return {'included': included, 'skipped': skipped}
+        return {'included': included, 'skipped': skipped, 'sections_by_beatmap': []}
 
     # Difficulty order inside one beatmap: Expert → Hard → Medium → Easy.
     diff_order = {'Expert': 0, 'Hard': 1, 'Medium': 2, 'Easy': 3}
@@ -220,6 +237,26 @@ def merge_beatmap_charts(
     # sections in the same order they appear in the file.
     beatmaps_rows = [row for _, _, _, _, row in sections_sorted]
 
+    # Order beatmap_records to mirror the chart's stem/n ordering, then sort
+    # each record's own `sections` list by difficulty and strip the internal
+    # `_n` field so callers (write_song_ini) see a clean public schema.
+    diff_order_local = {'Expert': 0, 'Hard': 1, 'Medium': 2, 'Easy': 3}
+    beatmap_records.sort(
+        key=lambda r: (
+            suffix_first_seen.get(STEM_TO_SECTION_SUFFIX.get(r['stem'], ''), 0),
+            r['_n'],
+        ),
+    )
+    for r in beatmap_records:
+        suf = STEM_TO_SECTION_SUFFIX.get(r['stem'], '')
+        if suf:
+            r['sections'].sort(
+                key=lambda sn: diff_order_local.get(
+                    sn[: sn.index(suf)] if suf in sn else '', 99
+                )
+            )
+        r.pop('_n', None)
+
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(f'[Song]\n{{{song_block}}}\n')
         f.write(f'[SyncTrack]\n{{{sync_block}}}\n')
@@ -229,7 +266,11 @@ def merge_beatmap_charts(
             f.write(f'[Beatmaps]\n{{\n{body}\n}}\n')
         for section_name, content, _suffix, _n, _row in sections_sorted:
             f.write(f'[{section_name}]\n{{{content}}}\n')
-    return {'included': included, 'skipped': skipped}
+    return {
+        'included': included,
+        'skipped': skipped,
+        'sections_by_beatmap': beatmap_records,
+    }
 
 
 def merge_charts(chart_paths: list[str], section_names: list[str], output_path: str):
