@@ -1096,6 +1096,56 @@ async def create_blank_tutorial(
         shutil.rmtree(staging, ignore_errors=True)
 
 
+def order_beatmaps_for_publish(
+    track_beatmaps: list[dict],
+    stem_overrides: dict[str, str],
+) -> list[tuple[dict, bool]]:
+    """Group beatmaps by stem and return a per-beatmap ordering with the
+    primary flag attached. Pure function — no filesystem or DB hits — so
+    it's testable in isolation.
+
+    For each stem: pick the primary (stem_overrides[stem] override wins,
+    else the user-marked active beatmap, else the most recent), then list
+    alternates alphabetically by preset name (with generated_at as the
+    tiebreaker when two beatmaps share a preset).
+
+    Returns [(beatmap_dict, is_primary)] in the order the merger should
+    consume — grouped by stem, primary first per stem, then alternates.
+    Stems are emitted in dict-insertion order of their first beatmap so
+    the resulting chart's section ordering is stable.
+
+    Beatmaps without a 'stem' field are silently dropped — they belong
+    to no instrument.
+    """
+    by_stem: dict[str, list[dict]] = {}
+    for bm in track_beatmaps:
+        stem = bm.get('stem')
+        if not stem:
+            continue
+        by_stem.setdefault(stem, []).append(bm)
+
+    out: list[tuple[dict, bool]] = []
+    for stem, candidates in by_stem.items():
+        primary: dict | None = None
+        want = stem_overrides.get(stem)
+        if want:
+            primary = next((b for b in candidates if b.get('id') == want), None)
+        if primary is None:
+            primary = next((b for b in candidates if b.get('active')), None)
+        if primary is None:
+            primary = max(candidates, key=lambda b: b.get('generated_at', 0))
+
+        alternates = sorted(
+            (b for b in candidates if b is not primary),
+            key=lambda b: (b.get('preset', '') or '', b.get('generated_at', 0)),
+        )
+
+        out.append((primary, True))
+        for bm in alternates:
+            out.append((bm, False))
+    return out
+
+
 @router.post('/{track_id}/publish-game')
 async def publish_track_to_game(
     track_id: str,
@@ -1191,28 +1241,15 @@ async def publish_track_to_game(
 
         chart_status: dict = {'found': False, 'source': None, 'included_stems': [], 'skipped_stems': []}
         if track.beatmaps:
-            # Group beatmaps by stem so we can apply user overrides cleanly.
-            by_stem: dict[str, list[dict]] = {}
-            for bm in track.beatmaps:
-                by_stem.setdefault(bm.get('stem', ''), []).append(bm)
+            # Order every beatmap for publish: primary first per stem (override > active > most recent),
+            # then alternates alphabetical by preset. Numbered sections come from
+            # merge_beatmap_charts' per-stem counter.
+            ordered = order_beatmaps_for_publish(list(track.beatmaps), stem_overrides)
 
-            charts_to_merge: list[tuple[str, str]] = []
+            charts_to_merge: list[tuple[str, str, dict]] = []
             beatmap_selection: dict[str, str] = {}
-            for stem, candidates in by_stem.items():
-                # Pick: the user-specified beatmap_id if provided AND it exists
-                # for this stem; otherwise the most recently generated.
-                chosen: dict | None = None
-                want = stem_overrides.get(stem)
-                if want:
-                    for bm in candidates:
-                        if bm.get('id') == want:
-                            chosen = bm
-                            break
-                if chosen is None:
-                    active_match = next((b for b in candidates if b.get('active')), None)
-                    chosen = active_match or max(candidates, key=lambda b: b.get('generated_at', 0))
-
-                bm_dir = track.beatmaps_dir / chosen.get('id', '')
+            for bm, is_primary in ordered:
+                bm_dir = track.beatmaps_dir / bm.get('id', '')
                 if not bm_dir.exists():
                     continue
                 src_chart = None
@@ -1225,8 +1262,15 @@ async def publish_track_to_game(
                     src_chart = next(iter(bm_dir.glob('*.chart')), None)
                 if src_chart is None:
                     continue
-                charts_to_merge.append((str(src_chart), stem))
-                beatmap_selection[stem] = chosen.get('id', '')
+                stem = bm.get('stem', '')
+                meta = {
+                    'preset': bm.get('preset', '') or '',
+                    'beatmap_id': bm.get('id', ''),
+                    'is_active': is_primary,
+                }
+                charts_to_merge.append((str(src_chart), stem, meta))
+                if is_primary:
+                    beatmap_selection[stem] = bm.get('id', '')
 
             if charts_to_merge:
                 merge_result = merge_beatmap_charts(
@@ -1388,7 +1432,7 @@ def _strip_orphan_musicsegs(chart_text: str) -> str:
 
 def _bundle_tutorial_assets(
     track,
-    charts_to_merge: list,
+    charts_to_merge: list[tuple[str, str, dict]],
     beatmap_selection: dict,
     tmp_dir,
     ini_fields: dict,
@@ -1404,7 +1448,7 @@ def _bundle_tutorial_assets(
     from pathlib import Path as _Path
 
     tutorial_blocks: list[tuple[str, str]] = []  # (stem, body)
-    for chart_path, stem in charts_to_merge:
+    for chart_path, stem, _meta in charts_to_merge:
         try:
             text = _Path(chart_path).read_text(encoding='utf-8', errors='replace')
         except OSError:
