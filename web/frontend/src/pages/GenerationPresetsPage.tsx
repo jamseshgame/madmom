@@ -17,7 +17,7 @@ interface Preset {
   generation: Record<string, { engine: string; params: Record<string, unknown> }>
 }
 
-const STEM_ORDER = ['drums', 'guitar', 'bass', 'vocal'] as const
+const STEM_ORDER = ['drums', 'guitar', 'bass', 'vocals'] as const
 
 export default function GenerationPresetsPage() {
   const [me, setMe] = useState<Me | null>(null)
