@@ -71,7 +71,9 @@ class FeedbackError(ValueError):
 
 
 def _validate_payload(rating: Any, tags: Any, text: Any) -> tuple[int, list[str], str]:
-    if not isinstance(rating, int) or rating < 1 or rating > 5:
+    # `bool` is a subclass of `int` in Python, so guard against it explicitly:
+    # `rating=True` would otherwise pass and persist as JSON `true`.
+    if isinstance(rating, bool) or not isinstance(rating, int) or rating < 1 or rating > 5:
         raise FeedbackError('rating must be an integer between 1 and 5')
     if tags is None:
         tags = []
@@ -139,6 +141,10 @@ def add_note(
     return note
 
 
+# Sentinel: rating/tags/text == None means "leave unchanged". The router is
+# responsible for filtering missing-from-payload keys before calling, so an
+# explicit `null` in a request body is rejected by validation when the field
+# arrives (the router will translate it to a 422 via the payload check).
 def update_note(
     track_id: str, beatmap_id: str, note_id: str, *, requester: str,
     rating: Any = None, tags: Any = None, text: Any = None,
@@ -147,24 +153,41 @@ def update_note(
     if p is None:
         raise FeedbackError('beatmap not found')
     with _lock_for(track_id, beatmap_id):
-        notes = list_notes(track_id, beatmap_id)
-        target_idx = next((i for i, n in enumerate(notes) if n.get('id') == note_id), None)
-        if target_idx is None:
+        if not p.exists():
             raise FeedbackError('note not found')
-        target = notes[target_idx]
-        if target.get('author') != requester:
-            raise PermissionError('only the author can edit a note')
-        new_rating = target['rating'] if rating is None else rating
-        new_tags = target['tags'] if tags is None else tags
-        new_text = target['text'] if text is None else text
-        new_rating, new_tags, new_text = _validate_payload(new_rating, new_tags, new_text)
-        target.update({
-            'rating': new_rating, 'tags': new_tags, 'text': new_text,
-            'updated_at': _now_iso(),
-        })
-        notes[target_idx] = target
-        p.write_text(''.join(json.dumps(n) + '\n' for n in notes), encoding='utf-8')
-        return target
+        raw_lines = p.read_text(encoding='utf-8').splitlines()
+        # Find and parse the target; preserve every other line verbatim so a
+        # transient parse failure doesn't permanently drop a note on the next edit.
+        updated_target: dict[str, Any] | None = None
+        out_lines: list[str] = []
+        for line in raw_lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                obj = json.loads(stripped)
+            except json.JSONDecodeError:
+                out_lines.append(line)
+                continue
+            if obj.get('id') != note_id:
+                out_lines.append(line)
+                continue
+            if obj.get('author') != requester:
+                raise PermissionError('only the author can edit a note')
+            new_rating = obj['rating'] if rating is None else rating
+            new_tags = obj['tags'] if tags is None else tags
+            new_text = obj['text'] if text is None else text
+            new_rating, new_tags, new_text = _validate_payload(new_rating, new_tags, new_text)
+            obj.update({
+                'rating': new_rating, 'tags': new_tags, 'text': new_text,
+                'updated_at': _now_iso(),
+            })
+            updated_target = obj
+            out_lines.append(json.dumps(obj))
+        if updated_target is None:
+            raise FeedbackError('note not found')
+        p.write_text('\n'.join(out_lines) + ('\n' if out_lines else ''), encoding='utf-8')
+        return updated_target
 
 
 def delete_note(
@@ -174,14 +197,32 @@ def delete_note(
     if p is None:
         raise FeedbackError('beatmap not found')
     with _lock_for(track_id, beatmap_id):
-        notes = list_notes(track_id, beatmap_id)
-        target = next((n for n in notes if n.get('id') == note_id), None)
-        if target is None:
+        if not p.exists():
             raise FeedbackError('note not found')
-        if not is_admin and target.get('author') != requester:
-            raise PermissionError('only the author or an admin can delete a note')
-        kept = [n for n in notes if n.get('id') != note_id]
-        p.write_text(''.join(json.dumps(n) + '\n' for n in kept), encoding='utf-8')
+        raw_lines = p.read_text(encoding='utf-8').splitlines()
+        found = False
+        out_lines: list[str] = []
+        for line in raw_lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                obj = json.loads(stripped)
+            except json.JSONDecodeError:
+                # Preserve unparseable lines so a transient parse failure
+                # doesn't permanently drop a note on the next edit.
+                out_lines.append(line)
+                continue
+            if obj.get('id') != note_id:
+                out_lines.append(line)
+                continue
+            if not is_admin and obj.get('author') != requester:
+                raise PermissionError('only the author or an admin can delete a note')
+            found = True
+            # drop this line — skip the append
+        if not found:
+            raise FeedbackError('note not found')
+        p.write_text('\n'.join(out_lines) + ('\n' if out_lines else ''), encoding='utf-8')
 
 
 # ── Aggregation (admin-only consumer) ───────────────────────────────────────
