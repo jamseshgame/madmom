@@ -46,7 +46,9 @@ Ship three integrated capabilities in one design:
 - Per-session: `<upload_dir>/users/sessions.json` (token → username, 30-day TTL).
 - Presets: `<upload_dir>/generation_presets.json` for user-saved; built-ins live in code at `web/backend/app/routers/generation_presets.py:BUILTIN_PRESETS`. Each preset is `{name, description, builtin?, stems?: [str], generation: {<stage>: {engine, params}}}`.
 
-**Existing song.ini writer** — `web/backend/app/services/chart_generator.py:write_chart_song_ini` (line 259). Currently emits `[song]` + one `[<diff>_stats]` block per difficulty. Reads chart stats via `chart_analyser.analyse_chart_file`.
+**Existing song.ini writers** — two distinct paths:
+- `web/backend/app/services/stems.py:write_song_ini` (line 86) — the **publish-time** writer. Called from `publish_track_to_game` (`tracks.py:1357`) when emitting the final shipped folder (containing the merged `notes_fixed_slides.chart`). Writes `[song]`, `[onboarding]`, `[real_notes]`, `[background]` sections from a flat `fields` dict. **This is the writer the Unity client will read** — the new `[beatmap_N]` blocks belong here.
+- `web/backend/app/services/chart_generator.py:write_chart_song_ini` (line 259) — the **per-beatmap** writer. Called at generation time (`tracks.py:630`) to drop a song.ini next to each per-beatmap `notes.chart`. Emits chart-analysis stats. Not in scope for subsystem A — the editor already learns about sibling beatmaps via `GET /api/tracks/{track_id}`.
 
 **Existing chart merger** — `merge_beatmap_charts` already produces the `[Beatmaps]` metadata block in `notes.chart`. The new song.ini blocks are a one-for-one mirror of those rows.
 
@@ -60,7 +62,7 @@ Ship three integrated capabilities in one design:
 │     │                                                              │
 │     ├─▶ merge_beatmap_charts (existing) ──▶ notes.chart [Beatmaps] │
 │     │                                                              │
-│     └─▶ write_chart_song_ini (modified) ─▶ song.ini [beatmap_N]    │
+│     └─▶ stems.write_song_ini (modified) ─▶ song.ini [beatmap_N]    │
 │                                                                    │
 └────────────────────────────────────────────────────────────────────┘
 
@@ -105,8 +107,8 @@ Ship three integrated capabilities in one design:
 
 | Path | Action |
 |---|---|
-| `web/backend/app/services/chart_generator.py` | Modify — `write_chart_song_ini` gains an optional `beatmaps=[…]` argument; emits `[beatmap_N]` sections after `[song]` and the `[<diff>_stats]` blocks |
-| `web/backend/app/routers/tracks.py` | Modify — `publish_track_to_game` passes the same `(id, name, preset, stem, is_active, sections)` list that's already built for `merge_beatmap_charts` into `write_chart_song_ini` |
+| `web/backend/app/services/stems.py` | Modify — `write_song_ini` gains an optional `beatmaps=[…]` argument; emits `[beatmap_N]` sections after the existing `[onboarding]` / `[real_notes]` / `[background]` blocks |
+| `web/backend/app/routers/tracks.py` | Modify — `publish_track_to_game` passes the same `(id, name, preset, stem, is_active, sections)` list that's already built for `merge_beatmap_charts` into the `write_song_ini` call at line 1357 |
 | `web/backend/app/services/feedback.py` | Create — `FEEDBACK_TAGS` constant + CRUD helpers + `aggregate_for_stem` |
 | `web/backend/app/routers/feedback.py` | Create — new router under `/api/feedback` |
 | `web/backend/app/services/preset_proposer.py` | Create — Anthropic client wrapper + system-prompt builder + response validator |
@@ -122,11 +124,11 @@ Ship three integrated capabilities in one design:
 | `web/backend/tests/test_feedback_crud.py` | Create |
 | `web/backend/tests/test_feedback_aggregate.py` | Create |
 | `web/backend/tests/test_preset_proposer.py` | Create |
-| `web/backend/tests/test_write_chart_song_ini.py` | Modify — extend to cover the new `beatmaps` parameter |
+| `web/backend/tests/test_write_song_ini_beatmaps.py` | Create — covers the new `beatmaps` parameter on `stems.write_song_ini` |
 
 ## Subsystem A — song.ini multi-chart metadata
 
-`write_chart_song_ini` signature gains an optional `beatmaps: list[dict] | None = None`. Each entry has the same shape `publish_track_to_game` already builds for the chart merger:
+`stems.write_song_ini` signature gains an optional `beatmaps: list[dict] | None = None`. Each entry has the same shape `publish_track_to_game` already builds for the chart merger:
 
 ```python
 {
@@ -139,7 +141,7 @@ Ship three integrated capabilities in one design:
 }
 ```
 
-When `beatmaps` is None or empty, song.ini is written exactly as today. When provided, after the existing `[<diff>_stats]` blocks the writer appends:
+When `beatmaps` is None or empty, song.ini is written exactly as today. When provided, after the existing `[song]` / `[onboarding]` / `[real_notes]` / `[background]` blocks the writer appends:
 
 ```ini
 [beatmap_1]
@@ -163,7 +165,7 @@ sections = ExpertSingle2,HardSingle2,MediumSingle2,EasySingle2
 
 **Escaping:** `name`, `preset`, and any other free-text field is run through the same `_esc` helper used by the chart `[Beatmaps]` block — strip newlines and carriage returns; escape embedded double quotes. (song.ini is line-oriented like the chart's row format.)
 
-**CH compatibility:** Clone Hero ignores unknown song.ini sections. The existing `[song]` and `[<diff>_stats]` blocks still describe the active beatmap, so a CH player sees the unchanged chart.
+**CH compatibility:** Clone Hero ignores unknown song.ini sections. The existing `[song]` block still describes the active beatmap, so a CH player sees the unchanged chart.
 
 ## Subsystem B — Per-chart feedback
 
@@ -363,7 +365,7 @@ When a beatmap is deleted (`delete_beatmap_record`), the whole beatmap folder is
 ## Testing
 
 **Backend:**
-- `test_write_chart_song_ini.py` — extend with cases for `beatmaps=None` (unchanged behavior), `beatmaps=[one]`, `beatmaps=[two]`, special chars in name + preset (escaping), inactive beatmap, missing optional fields.
+- `test_write_song_ini_beatmaps.py` — new test file covering `beatmaps=None` (unchanged behavior, regression-safe against the existing publish path), `beatmaps=[one]`, `beatmaps=[two]`, special chars in name + preset (escaping), inactive beatmap, missing optional fields.
 - `test_feedback_crud.py` — happy-path POST/GET/PUT/DELETE; auth rules (anon → 401, non-author PUT → 403, admin DELETE on someone else's note → 200, non-admin DELETE on someone else's → 403); schema validation (missing rating, unknown tag, both tags and text empty → 422); concurrent appends don't interleave (spawn N threads, all notes land).
 - `test_feedback_aggregate.py` — multi-track scan; stem filter respects the preset's `stems` field; preset with no `stems` field counts as universal and appears in every stem's aggregate.
 - `test_preset_proposer.py` — mock the Anthropic client; verify prompt structure includes engine catalog, current presets, and feedback bundle; parse a known-good response; reject invalid JSON; reject schema-invalid candidates while passing valid ones in the same response.
