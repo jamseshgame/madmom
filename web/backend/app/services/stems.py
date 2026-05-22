@@ -83,13 +83,31 @@ _SONG_INI_FIELDS = [
 ]
 
 
-def write_song_ini(output_dir: Path, fields: dict) -> Path:
+def _esc_ini_value(s: str) -> str:
+    """Strip CR/LF (which would break the line-oriented song.ini format) and
+    escape embedded double quotes. Mirrors the chart_generator._esc helper used
+    for the notes.chart [Beatmaps] block."""
+    return s.replace('\r', '').replace('\n', ' ').replace('"', '\\"')
+
+
+def write_song_ini(
+    output_dir: Path,
+    fields: dict,
+    *,
+    beatmaps: list[dict] | None = None,
+) -> Path:
     """Write a Jamsesh-compatible song.ini file.
 
     Standard fields go in [song]. Any keys prefixed with `sample_` or any of
     the onboarding control keys (onboarding, tutorial_voice) get a separate
     [onboarding] section so Jamsesh ignores them while the Jamsesh runtime
     can pick them up cleanly.
+
+    When `beatmaps` is provided, an additional `[beatmap_N]` section is
+    appended for each entry (1-indexed). Each section emits the keys
+    `id`, `name`, `preset`, `stem`, `is_active`, and `sections`. This lets
+    the Unity client enumerate every per-stem variant in a published track
+    by reading song.ini alone.
     """
     ini_path = output_dir / 'song.ini'
     lines = ['[song]']
@@ -138,6 +156,22 @@ def write_song_ini(output_dir: Path, fields: dict) -> Path:
             v = fields.get(k, '')
             if v != '' and v is not None:
                 lines.append(f'{k} = {v}')
+
+    # ── multi-beatmap metadata ──────────────────────────────────────────────
+    # Each variant published into the track gets one [beatmap_N] section so
+    # the Unity client can build its variant picker from song.ini alone.
+    if beatmaps:
+        for i, bm in enumerate(beatmaps, start=1):
+            lines.append('')
+            lines.append(f'[beatmap_{i}]')
+            for key in ('id', 'name', 'preset', 'stem'):
+                raw = str(bm.get(key, ''))
+                lines.append(f'{key} = {_esc_ini_value(raw)}')
+            is_active = bool(bm.get('is_active', False))
+            lines.append(f'is_active = {"true" if is_active else "false"}')
+            sections = bm.get('sections') or []
+            joined = ','.join(_esc_ini_value(str(s)) for s in sections)
+            lines.append(f'sections = {joined}')
 
     ini_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
     return ini_path
