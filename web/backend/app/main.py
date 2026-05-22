@@ -18,6 +18,7 @@ from .routers import (
     auth,
     beatmap,
     elevenlabs,
+    feedback,
     game_songs,
     gem_meshes,
     generation_presets,
@@ -82,6 +83,7 @@ app.include_router(jobs.router, dependencies=_auth_dep)
 app.include_router(youtube.router, dependencies=_auth_dep)
 app.include_router(tutorial.router, dependencies=_auth_dep)
 app.include_router(elevenlabs.router, dependencies=_auth_dep)
+app.include_router(feedback.router)
 app.include_router(lyrics.router, dependencies=_auth_dep)
 app.include_router(pipeline.router, dependencies=_auth_dep)
 app.include_router(vocals.router, dependencies=_auth_dep)
