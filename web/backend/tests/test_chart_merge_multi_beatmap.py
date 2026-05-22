@@ -299,9 +299,58 @@ def test_returns_sections_by_beatmap_for_song_ini(tmp_path: Path):
     sb = result['sections_by_beatmap']
     assert len(sb) == 2
     primary, alt = sb
-    assert primary['is_active'] is True
+    # Primary record
+    assert primary['id'] == 'bm-1'
     assert primary['preset'] == 'v1'
+    assert primary['name'] == 'v1'  # name defaults to preset in v1
+    assert primary['stem'] == 'guitar'
+    assert primary['is_active'] is True
     assert primary['sections'] == ['ExpertSingle', 'HardSingle', 'MediumSingle', 'EasySingle']
-    assert alt['is_active'] is False
+    # Alt record
+    assert alt['id'] == 'bm-2'
     assert alt['preset'] == 'v2'
+    assert alt['name'] == 'v2'
+    assert alt['stem'] == 'guitar'
+    assert alt['is_active'] is False
     assert alt['sections'] == ['ExpertSingle2', 'HardSingle2', 'MediumSingle2', 'EasySingle2']
+    # Internal `_n` field must be stripped before return
+    assert '_n' not in primary
+    assert '_n' not in alt
+
+
+def test_sections_by_beatmap_groups_by_stem(tmp_path: Path):
+    """Records for the same stem are contiguous and ordered by N; stems appear
+    in the order their first beatmap was encountered."""
+    g = tmp_path / 'g.chart'
+    d = tmp_path / 'd.chart'
+    _write_chart(g)
+    _write_chart(d)
+    out = tmp_path / 'merged.chart'
+
+    result = merge_beatmap_charts(
+        [
+            (str(g), 'guitar', _meta('v1', 'bg-1', True)),
+            (str(d), 'drums',  _meta('drums-v1', 'bd-1', True)),
+            (str(g), 'guitar', _meta('v2', 'bg-2', False)),
+        ],
+        str(out),
+    )
+
+    sb = result['sections_by_beatmap']
+    assert [r['stem'] for r in sb] == ['guitar', 'guitar', 'drums']
+    assert [r['preset'] for r in sb] == ['v1', 'v2', 'drums-v1']
+
+
+def test_partial_difficulty_beatmap_records_only_emitted_sections(tmp_path: Path):
+    in1 = tmp_path / 'g.chart'
+    _write_chart(in1, medium=None, easy=None)  # only Expert + Hard
+    out = tmp_path / 'merged.chart'
+
+    result = merge_beatmap_charts(
+        [(str(in1), 'guitar', _meta('v1', 'bm-1', True))],
+        str(out),
+    )
+
+    sb = result['sections_by_beatmap']
+    assert len(sb) == 1
+    assert sb[0]['sections'] == ['ExpertSingle', 'HardSingle']  # no Medium/Easy

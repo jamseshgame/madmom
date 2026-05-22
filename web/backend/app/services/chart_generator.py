@@ -240,7 +240,6 @@ def merge_beatmap_charts(
     # Order beatmap_records to mirror the chart's stem/n ordering, then sort
     # each record's own `sections` list by difficulty and strip the internal
     # `_n` field so callers (write_song_ini) see a clean public schema.
-    diff_order_local = {'Expert': 0, 'Hard': 1, 'Medium': 2, 'Easy': 3}
     beatmap_records.sort(
         key=lambda r: (
             suffix_first_seen.get(STEM_TO_SECTION_SUFFIX.get(r['stem'], ''), 0),
@@ -251,7 +250,7 @@ def merge_beatmap_charts(
         suf = STEM_TO_SECTION_SUFFIX.get(r['stem'], '')
         if suf:
             r['sections'].sort(
-                key=lambda sn: diff_order_local.get(
+                key=lambda sn: diff_order.get(
                     sn[: sn.index(suf)] if suf in sn else '', 99
                 )
             )
