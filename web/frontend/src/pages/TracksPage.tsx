@@ -1643,6 +1643,20 @@ function TracksPageInner() {
                       const baseModelVer = modelVer.endsWith('+v2') ? modelVer.slice(0, -3) : modelVer
                       const isOlder = model === 'madmom' && !!baseModelVer && !!installedMadmom && baseModelVer !== installedMadmom
                       const presetName = (bm.preset || '').trim()
+                      const isIncluded = (bm as { included?: boolean }).included ?? true
+                      const toggleIncluded = async () => {
+                        try {
+                          const r = await fetch(`/api/tracks/${selectedTrack.id}/beatmaps/${bm.id}/included`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ included: !isIncluded }),
+                          })
+                          if (!r.ok) throw new Error(`HTTP ${r.status}`)
+                          await loadTracks()
+                        } catch (e) {
+                          setBatchError((e as Error).message)
+                        }
+                      }
                       const activate = async () => {
                         if (isActive) return
                         try {
@@ -1658,17 +1672,28 @@ function TracksPageInner() {
                         key={bm.id}
                         className={`mt-1 flex flex-wrap items-center gap-1.5 rounded border px-1.5 py-1 ${
                           isActive ? 'border-jam-600/60 bg-jam-700/20' : 'border-gray-800 bg-gray-900/40'
-                        }`}
+                        } ${!isIncluded ? 'opacity-50' : ''}`}
                         title={liveName ? `${liveName} · ${dateStr}` : undefined}
                       >
                         <input
-                          type="radio"
-                          name={`active-beatmap-${stem}-${selectedTrack.id}`}
-                          checked={isActive}
-                          onChange={activate}
+                          type="checkbox"
+                          checked={isIncluded}
+                          onChange={toggleIncluded}
                           className="shrink-0 h-3.5 w-3.5 accent-jam-500 cursor-pointer"
-                          title={isActive ? 'Active beatmap (used when publishing)' : 'Use this beatmap'}
+                          title={isIncluded ? 'Included in published chart (click to exclude)' : 'Excluded from publish (click to include)'}
                         />
+                        <button
+                          onClick={activate}
+                          disabled={isActive}
+                          className={`shrink-0 text-[10px] px-1 py-0.5 rounded border ${
+                            isActive
+                              ? 'bg-jam-600/40 text-jam-100 border-jam-500/60 cursor-default'
+                              : 'bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 border-gray-700'
+                          }`}
+                          title={isActive ? 'Primary (unnumbered) chart section' : 'Make this the primary chart section'}
+                        >
+                          {isActive ? '★ primary' : 'set primary'}
+                        </button>
                         <span className={`shrink-0 inline-block px-1 py-0.5 rounded border text-[9px] font-semibold uppercase ${modelBadgeCls}`}>
                           {modelLabel}
                         </span>

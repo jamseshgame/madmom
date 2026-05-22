@@ -8,17 +8,54 @@ from __future__ import annotations
 from app.routers.tracks import order_beatmaps_for_publish
 
 
-def _bm(bid: str, stem: str, preset: str, *, active: bool = False, generated_at: float = 0.0) -> dict:
-    return {
+def _bm(bid: str, stem: str, preset: str, *, active: bool = False,
+        generated_at: float = 0.0, included: bool | None = None) -> dict:
+    rec: dict = {
         'id': bid, 'stem': stem, 'preset': preset,
         'active': active, 'generated_at': generated_at,
     }
+    if included is not None:
+        rec['included'] = included
+    return rec
 
 
 def test_single_beatmap_per_stem_keeps_it_as_primary():
     bms = [_bm('g1', 'guitar', 'v1', active=True)]
     ordered = order_beatmaps_for_publish(bms, stem_overrides={})
     assert ordered == [(_bm('g1', 'guitar', 'v1', active=True), True)]
+
+
+def test_included_false_excludes_beatmap_from_publish():
+    bms = [
+        _bm('g1', 'guitar', 'v1', active=False, generated_at=100.0, included=True),
+        _bm('g2', 'guitar', 'v2', active=True,  generated_at=200.0, included=False),
+        _bm('g3', 'guitar', 'v3', active=False, generated_at=300.0, included=True),
+    ]
+    ordered = order_beatmaps_for_publish(bms, stem_overrides={})
+    # g2 is unchecked (included=False) and dropped entirely. The active flag
+    # would have picked it as primary, so the picker falls back to most-recent
+    # included (g3 at generated_at=300.0).
+    assert [b['id'] for b, _ in ordered] == ['g3', 'g1']
+    assert [is_primary for _, is_primary in ordered] == [True, False]
+
+
+def test_missing_included_field_treated_as_included():
+    """Backward-compat: pre-checkbox beatmap records don't have an `included`
+    field. They should ship in publishes by default."""
+    bms = [_bm('g1', 'guitar', 'v1', active=True)]  # no `included` key
+    ordered = order_beatmaps_for_publish(bms, stem_overrides={})
+    assert len(ordered) == 1
+    assert ordered[0][0]['id'] == 'g1'
+
+
+def test_all_beatmaps_for_stem_excluded_drops_stem_entirely():
+    bms = [
+        _bm('g1', 'guitar', 'v1', active=True, included=False),
+        _bm('d1', 'drums',  'v1', active=True, included=True),
+    ]
+    ordered = order_beatmaps_for_publish(bms, stem_overrides={})
+    # Guitar stem has zero included beatmaps and is dropped.
+    assert [b['stem'] for b, _ in ordered] == ['drums']
 
 
 def test_active_flag_picks_primary_when_multiple_present():

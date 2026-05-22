@@ -327,6 +327,27 @@ def set_active_beatmap(track_id: str, beatmap_id: str) -> dict | None:
     return target
 
 
+def set_beatmap_included(track_id: str, beatmap_id: str, included: bool) -> dict | None:
+    """Toggle whether `beatmap_id` is included in the published chart.
+
+    Independent of `active` — multiple beatmaps per stem can be included
+    simultaneously (they appear as numbered alternates in the published
+    notes.chart). When a stem has zero included beatmaps, that stem is
+    skipped from the publish bundle entirely.
+
+    Missing field on the record is treated as included (backward compat).
+    """
+    track = Track.load(track_id)
+    if not track:
+        return None
+    target = next((b for b in track.beatmaps if b.get('id') == beatmap_id), None)
+    if target is None:
+        return None
+    target['included'] = bool(included)
+    track.save()
+    return target
+
+
 def get_beatmap_dir(track_id: str, beatmap_id: str) -> Path | None:
     track = Track.load(track_id)
     if not track:

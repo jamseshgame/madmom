@@ -10,7 +10,7 @@ from pathlib import Path
 
 from typing import Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from ..config import settings
@@ -35,6 +35,7 @@ from ..services.tracks import (
     clone_beatmap_record,
     rename_beatmap_record,
     set_active_beatmap,
+    set_beatmap_included,
     update_track_meta,
     write_elevenlabs_voice,
 )
@@ -839,6 +840,23 @@ async def activate_beatmap(track_id: str, beatmap_id: str):
     return record
 
 
+@router.post('/{track_id}/beatmaps/{beatmap_id}/included')
+async def toggle_beatmap_included(
+    track_id: str,
+    beatmap_id: str,
+    included: bool = Body(..., embed=True),
+):
+    """Mark whether this beatmap is included in the published chart.
+
+    Multiple beatmaps per stem can be included simultaneously — they appear
+    as numbered alternates in notes.chart. Unchecking excludes a beatmap
+    from publish without deleting it."""
+    record = set_beatmap_included(track_id, beatmap_id, included)
+    if record is None:
+        raise HTTPException(404, 'Beatmap not found')
+    return record
+
+
 @router.post('/{track_id}/empty-beatmap')
 async def create_empty_beatmap_for_track(
     track_id: str,
@@ -1121,6 +1139,11 @@ def order_beatmaps_for_publish(
     for bm in track_beatmaps:
         stem = bm.get('stem')
         if not stem:
+            continue
+        # Honour the per-beatmap `included` checkbox — unchecked beatmaps
+        # are filtered out of the publish bundle entirely. Missing field
+        # means included (backward compat with pre-checkbox records).
+        if not bm.get('included', True):
             continue
         by_stem.setdefault(stem, []).append(bm)
 
