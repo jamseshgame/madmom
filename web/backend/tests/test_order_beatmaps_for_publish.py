@@ -1,7 +1,7 @@
 """Unit tests for order_beatmaps_for_publish — the pure helper that
-chooses each stem's primary beatmap (active flag > selected_beatmaps
-override > most recent) and orders the rest alphabetically by preset
-name for the multi-beatmap publish flow.
+chooses each stem's primary beatmap (stem_overrides override > active flag
+> most recent) and orders the rest alphabetically by preset name for the
+multi-beatmap publish flow.
 """
 from __future__ import annotations
 
@@ -42,6 +42,25 @@ def test_stem_overrides_beat_the_active_flag():
     # Override wins — g2 is primary even though g1 is the active one.
     assert [b['id'] for b, _ in ordered] == ['g2', 'g1']
     assert [is_active for _, is_active in ordered] == [True, False]
+
+
+def test_override_with_missing_beatmap_id_falls_back_to_active():
+    """A stem_overrides entry pointing at a beatmap_id that no longer
+    exists in the candidates list (e.g. user saved the selection then
+    deleted the beatmap) cleanly falls back to the next-best primary."""
+    bms = [
+        _bm('g1', 'guitar', 'v1', active=False, generated_at=100.0),
+        _bm('g2', 'guitar', 'v2', active=True, generated_at=200.0),  # active
+        _bm('g3', 'guitar', 'v3', active=False, generated_at=300.0),
+    ]
+    ordered = order_beatmaps_for_publish(
+        bms,
+        stem_overrides={'guitar': 'g-deleted-long-ago'},
+    )
+    # Override beatmap doesn't exist — falls through to active (g2).
+    # Then alternates alphabetical: v1 < v3.
+    assert [b['id'] for b, _ in ordered] == ['g2', 'g1', 'g3']
+    assert [is_active for _, is_active in ordered] == [True, False, False]
 
 
 def test_most_recent_wins_when_no_active_and_no_override():

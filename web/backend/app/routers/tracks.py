@@ -1157,8 +1157,14 @@ async def publish_track_to_game(
 
     `selected_beatmaps` is an optional JSON object mapping stem name to a
     specific beatmap_id (e.g. {"drums": "abc123", "guitar": "def456"}). When
-    omitted or a stem isn't listed, the most recent beatmap for that stem
-    is used.
+    set for a stem, that beatmap becomes the PRIMARY (unnumbered section
+    in the chart) for that stem; otherwise the user-marked active beatmap
+    is used, or the most recent if none is marked active.
+
+    All other beatmaps for each stem are included as numbered alternates
+    ([ExpertSingle2], [ExpertSingle3], ...) sorted alphabetically by
+    preset name. See merge_beatmap_charts in chart_generator.py for the
+    chart format details.
     """
     track = get_track(track_id)
     if not track:
@@ -1286,6 +1292,9 @@ async def publish_track_to_game(
                         'source': f'{len(merge_result["included"])}-stem merge',
                         'selected_beatmaps': beatmap_selection,
                     }
+        else:
+            charts_to_merge: list[tuple[str, str, dict]] = []
+            beatmap_selection: dict[str, str] = {}
 
         # Vocals (preferred) / lyrics (fallback): if vocal_notes.json exists,
         # write a [JamseshVocals] block (and clear stale [Events] lyric/phrase
