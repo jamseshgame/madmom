@@ -126,8 +126,10 @@ def merge_beatmap_charts(
     song_block: str | None = None
     sync_block: str | None = None
     events_block: str | None = None
-    sections_out: list[tuple[str, str, str, int]] = []  # (section_name, content, suffix, n)
-    beatmaps_rows: list[str] = []
+    # Each entry: (section_name, content, suffix, n, beatmaps_row_text).
+    # Storing the [Beatmaps] row text alongside the section info lets a single
+    # sort below order both lists consistently.
+    sections_out: list[tuple[str, str, str, int, str]] = []
     included: list[str] = []
     skipped: list[str] = []
 
@@ -179,10 +181,10 @@ def merge_beatmap_charts(
                 f'{difficulty}{suffix}' if candidate_n == 1
                 else f'{difficulty}{suffix}{candidate_n}'
             )
-            sections_out.append((section_name, m.group(1), suffix, candidate_n))
-            beatmaps_rows.append(
+            row_text = (
                 f'  {section_name} = preset="{preset}" name="{name_tag}" beatmap_id="{bid}"'
             )
+            sections_out.append((section_name, m.group(1), suffix, candidate_n, row_text))
             any_section = True
 
         if any_section:
@@ -201,16 +203,22 @@ def merge_beatmap_charts(
     diff_order = {'Expert': 0, 'Hard': 1, 'Medium': 2, 'Easy': 3}
     # Stem-suffix order: emit in the order suffixes first appeared (stable).
     suffix_first_seen: dict[str, int] = {}
-    for _, _, suf, _ in sections_out:
+    for _, _, suf, _, _ in sections_out:
         suffix_first_seen.setdefault(suf, len(suffix_first_seen))
 
     def _section_sort_key(item):
-        section_name, _content, suffix, n = item
+        section_name, _content, suffix, n, _row = item
         # Difficulty prefix sits before the suffix; pull it back out.
         diff = section_name[: section_name.index(suffix)]
         return (suffix_first_seen[suffix], n, diff_order.get(diff, 99))
 
+    # Sort by (stem-suffix-first-seen, n, difficulty) so all four difficulties
+    # of the same beatmap stay adjacent in the file and stems are grouped.
     sections_sorted = sorted(sections_out, key=_section_sort_key)
+
+    # Derive [Beatmaps] rows from the SORTED sections so they describe the
+    # sections in the same order they appear in the file.
+    beatmaps_rows = [row for _, _, _, _, row in sections_sorted]
 
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(f'[Song]\n{{{song_block}}}\n')
@@ -219,7 +227,7 @@ def merge_beatmap_charts(
         if beatmaps_rows:
             body = '\n'.join(beatmaps_rows)
             f.write(f'[Beatmaps]\n{{\n{body}\n}}\n')
-        for section_name, content, _suffix, _n in sections_sorted:
+        for section_name, content, _suffix, _n, _row in sections_sorted:
             f.write(f'[{section_name}]\n{{{content}}}\n')
     return {'included': included, 'skipped': skipped}
 

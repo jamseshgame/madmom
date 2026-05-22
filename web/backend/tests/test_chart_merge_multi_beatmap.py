@@ -229,6 +229,42 @@ def test_empty_input_returns_empty_result(tmp_path: Path):
     assert not out.exists()
 
 
+def test_beatmaps_rows_match_section_order_for_interleaved_input(tmp_path: Path):
+    """[Beatmaps] rows must describe sections in the same order as they
+    appear in the file. With interleaved input the row order would otherwise
+    diverge from the sorted note-section order.
+    """
+    g1 = tmp_path / 'g1.chart'; _write_chart(g1)
+    d1 = tmp_path / 'd1.chart'; _write_chart(d1)
+    g2 = tmp_path / 'g2.chart'; _write_chart(g2)
+    d2 = tmp_path / 'd2.chart'; _write_chart(d2)
+    out = tmp_path / 'merged.chart'
+
+    merge_beatmap_charts(
+        [
+            (str(g1), 'guitar', _meta('v1', 'g-1', True)),
+            (str(d1), 'drums', _meta('drums-v1', 'd-1', True)),
+            (str(g2), 'guitar', _meta('v2', 'g-2', False)),
+            (str(d2), 'drums', _meta('v1', 'd-2', False)),
+        ],
+        str(out),
+    )
+
+    text = out.read_text(encoding='utf-8')
+    note_section_names = [
+        n for n in _section_names(text)
+        if n not in {'Song', 'SyncTrack', 'Events', 'Beatmaps'}
+    ]
+    rows = _beatmaps_rows(text)
+    # Each row starts with its section name; extract and compare to the
+    # actual section order.
+    row_section_names = [r.split(' = ', 1)[0] for r in rows]
+    assert row_section_names == note_section_names, (
+        f'Beatmaps rows describe sections in a DIFFERENT order than they '
+        f'appear in the file:\n  sections: {note_section_names}\n  rows: {row_section_names}'
+    )
+
+
 def test_unknown_stem_is_skipped(tmp_path: Path):
     c1 = tmp_path / 'c1.chart'; _write_chart(c1)
     out = tmp_path / 'merged.chart'
