@@ -16,9 +16,8 @@ import secrets
 import threading
 import time
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
-from ..config import settings
 from . import tracks as tracks_service
 
 
