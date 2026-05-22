@@ -12,6 +12,7 @@ import { ImportedSourcesPanel } from './ImportedSourcesPanel'
 import { ClipsLibraryPanel } from './ClipsLibraryPanel'
 import { SourcePickerModal } from './SourcePickerModal'
 import { GenerateTab } from './pipeline/GenerateTab'
+import FeedbackPanel from './feedback/FeedbackPanel'
 import { importSlides, buildSlideEmitInfo, groupSlides, nextSlideId, pruneSlides, type SlideEvent } from '../chart/slides'
 
 // .chart parsing ------------------------------------------------------------
@@ -2739,6 +2740,21 @@ export default function BeatmapEditor() {
   const params = useParams<{ trackId: string; beatmapId: string }>()
   const trackId = params.trackId!
   const beatmapId = params.beatmapId!
+
+  // Current user — needed by the sidebar FeedbackPanel so it can show the
+  // delete buttons on the viewer's own notes (and on every note for admins).
+  // Cookie auth carries on /api/feedback/* requests; this just identifies who
+  // "you" are. Null until the /api/auth/me round-trip resolves, which gates
+  // the panel from rendering pre-auth.
+  const [me, setMe] = useState<{ username: string; role: string } | null>(null)
+  useEffect(() => {
+    fetch('/api/auth/me')
+      .then((r) => r.json())
+      .then((d) => {
+        if (d && d.authenticated) setMe({ username: d.username, role: d.role })
+      })
+      .catch(() => {})
+  }, [])
 
   const [chart, setChart] = useState<ChartState | null>(null)
   const [meta, setMeta] = useState<BeatmapMeta | null>(null)
@@ -8111,6 +8127,25 @@ export default function BeatmapEditor() {
 
           <CollapsibleSection id="generate" title="Generate" defaultOpen={false}>
             <GenerateTab trackId={trackId} />
+          </CollapsibleSection>
+
+          {/* Feedback panel — collapsed by default so it doesn't steal sidebar
+              real estate, but lives alongside Generate so the user can leave
+              ratings + tag notes while playing the chart in the main area.
+              Gated on `me` so the panel only mounts once we know who the
+              viewer is (the panel itself uses currentUsername to decide which
+              delete buttons to show). */}
+          <CollapsibleSection id="feedback" title="Feedback" defaultOpen={false}>
+            {me ? (
+              <FeedbackPanel
+                trackId={trackId}
+                beatmapId={beatmapId}
+                currentUsername={me.username}
+                isAdmin={me.role === 'admin'}
+              />
+            ) : (
+              <p className="text-[11px] text-gray-600 leading-snug">Sign in to leave feedback.</p>
+            )}
           </CollapsibleSection>
         </aside>
 
