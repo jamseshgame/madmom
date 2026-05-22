@@ -51,6 +51,12 @@ class Settings(BaseSettings):
         Path('C:/Users/Admin/Documents/GitHub/jamseshquest/Assets/Art/Textures/Highways'),
     )
 
+    # Claude integration for the "Propose new presets from feedback" button on
+    # the Tracks page. Empty key = the proposer endpoint returns 503.
+    anthropic_api_key: str = ''
+    anthropic_model: str = 'claude-sonnet-4-6'
+    anthropic_max_tokens: int = 8192
+
     model_config = {
         'env_file': os.getenv('BEATMAP_ENV', str(Path(__file__).resolve().parents[2] / '.env')),
         'extra': 'ignore',
