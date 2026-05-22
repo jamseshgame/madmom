@@ -84,30 +84,59 @@ def _normalise_bpm(bpm: float) -> float:
     return bpm
 
 
+def _esc(s: str) -> str:
+    """Escape a string for use inside a [Beatmaps] row's double-quoted value.
+
+    Strips newlines (which would corrupt the line-oriented row format) and
+    escapes embedded double quotes."""
+    return s.replace('\r', '').replace('\n', ' ').replace('"', '\\"')
+
+
 def merge_beatmap_charts(
-    chart_paths_with_stems: list[tuple[str, str]],
+    chart_paths_with_meta: list[tuple[str, str, dict]],
     output_path: str,
 ) -> dict:
     """Merge per-stem beatmap charts into a single notes_fixed_slides.chart.
 
-    Each input chart was produced by generate_full_chart and contains
-    [ExpertSingle], [HardSingle], [MediumSingle], [EasySingle] sections.
-    For each beatmap, those sections get renamed based on the source stem
-    (drums → ExpertDrums / HardDrums / …) and concatenated into one chart
-    that shares the [Song] / [SyncTrack] / [Events] header from the first
-    beatmap with a recognised stem.
+    Each input tuple is (chart_path, stem, meta) where meta is
+    {'preset': str, 'beatmap_id': str, 'is_active': bool}. The caller is
+    responsible for ordering — primary-first per stem, then alternates in
+    whatever order they want exposed in the chart (the merger emits in
+    input order within each stem).
 
-    Returns a dict with `included` (list of stems that contributed) and
-    `skipped` (list of stems with no section mapping or missing chart).
+    Sections from each beatmap are renamed by stem-suffix
+    (drums → ExpertDrums/HardDrums/..., guitar → ExpertSingle/HardSingle/...).
+    The first beatmap per stem gets unnumbered names; subsequent beatmaps
+    for the same stem get numeric suffixes ([ExpertDrums2], [ExpertDrums3]).
+    All four difficulties for a single beatmap share the same N — if a
+    beatmap is missing one difficulty, that specific section is simply
+    absent (other difficulties for the same beatmap still align at the
+    beatmap's N).
+
+    A [Beatmaps] metadata block lists every emitted section with its source
+    preset, active/alt tag, and beatmap_id. Clone Hero ignores unknown
+    sections; the published chart is still CH-playable using the unnumbered
+    (active) sections.
+
+    Returns {'included': [stems...], 'skipped': [stems...]}. A stem may
+    appear in 'included' multiple times if multiple beatmaps for it
+    contributed sections; 'skipped' contains stems whose chart had no
+    sections OR whose stem name has no STEM_TO_SECTION_SUFFIX entry.
     """
     song_block: str | None = None
     sync_block: str | None = None
     events_block: str | None = None
-    sections_out: list[tuple[str, str]] = []
+    sections_out: list[tuple[str, str, str, int]] = []  # (section_name, content, suffix, n)
+    beatmaps_rows: list[str] = []
     included: list[str] = []
     skipped: list[str] = []
 
-    for chart_path, stem in chart_paths_with_stems:
+    # Per-stem counter — advances only when the beatmap actually contributed
+    # one or more sections (so a beatmap with zero usable difficulties
+    # doesn't burn the next N slot).
+    beatmap_index_per_stem: dict[str, int] = {}
+
+    for chart_path, stem, meta in chart_paths_with_meta:
         suffix = STEM_TO_SECTION_SUFFIX.get(stem)
         if suffix is None:
             skipped.append(stem)
@@ -119,6 +148,9 @@ def merge_beatmap_charts(
             skipped.append(stem)
             continue
 
+        # Capture the first chart's header blocks — those become the merged
+        # chart's [Song]/[SyncTrack]/[Events] (all beatmaps for a track
+        # share the same tempo grid via the V2 pipeline).
         if song_block is None:
             sm = re.search(r'\[Song\]\s*\{([^}]*)\}', content)
             tk = re.search(r'\[SyncTrack\]\s*\{([^}]*)\}', content)
@@ -130,29 +162,65 @@ def merge_beatmap_charts(
             if ev:
                 events_block = ev.group(1)
 
+        candidate_n = beatmap_index_per_stem.get(stem, 0) + 1
         any_section = False
+        preset = _esc(meta.get('preset', '') or '')
+        bid = _esc(meta.get('beatmap_id', '') or '')
+        name_tag = 'active' if meta.get('is_active') else 'alt'
+
         for difficulty in ('Expert', 'Hard', 'Medium', 'Easy'):
             m = re.search(
                 r'\[' + difficulty + r'Single\]\s*\{([^}]*)\}',
                 content,
             )
-            if m:
-                sections_out.append((f'{difficulty}{suffix}', m.group(1)))
-                any_section = True
+            if not m:
+                continue
+            section_name = (
+                f'{difficulty}{suffix}' if candidate_n == 1
+                else f'{difficulty}{suffix}{candidate_n}'
+            )
+            sections_out.append((section_name, m.group(1), suffix, candidate_n))
+            beatmaps_rows.append(
+                f'  {section_name} = preset="{preset}" name="{name_tag}" beatmap_id="{bid}"'
+            )
+            any_section = True
+
         if any_section:
+            beatmap_index_per_stem[stem] = candidate_n
             included.append(stem)
         else:
             skipped.append(stem)
 
     if not sections_out or song_block is None or sync_block is None:
-        return {'included': [], 'skipped': [s for _, s in chart_paths_with_stems]}
+        # Empty input or no usable sections — return without writing.
+        # Preserves the test expectation that no file is written for empty
+        # input or all-unknown-stems input.
+        return {'included': included, 'skipped': skipped}
+
+    # Difficulty order inside one beatmap: Expert → Hard → Medium → Easy.
+    diff_order = {'Expert': 0, 'Hard': 1, 'Medium': 2, 'Easy': 3}
+    # Stem-suffix order: emit in the order suffixes first appeared (stable).
+    suffix_first_seen: dict[str, int] = {}
+    for _, _, suf, _ in sections_out:
+        suffix_first_seen.setdefault(suf, len(suffix_first_seen))
+
+    def _section_sort_key(item):
+        section_name, _content, suffix, n = item
+        # Difficulty prefix sits before the suffix; pull it back out.
+        diff = section_name[: section_name.index(suffix)]
+        return (suffix_first_seen[suffix], n, diff_order.get(diff, 99))
+
+    sections_sorted = sorted(sections_out, key=_section_sort_key)
 
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(f'[Song]\n{{{song_block}}}\n')
         f.write(f'[SyncTrack]\n{{{sync_block}}}\n')
         f.write(f'[Events]\n{{{events_block or ""}}}\n')
-        for name, content in sections_out:
-            f.write(f'[{name}]\n{{{content}}}\n')
+        if beatmaps_rows:
+            body = '\n'.join(beatmaps_rows)
+            f.write(f'[Beatmaps]\n{{\n{body}\n}}\n')
+        for section_name, content, _suffix, _n in sections_sorted:
+            f.write(f'[{section_name}]\n{{{content}}}\n')
     return {'included': included, 'skipped': skipped}
 
 
