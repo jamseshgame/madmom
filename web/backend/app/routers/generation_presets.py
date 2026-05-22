@@ -258,16 +258,29 @@ async def save_preset(body: dict = Body(...)) -> dict[str, Any]:
     generation = _validate_generation(body.get('generation'))
     description = str(body.get('description', '')).strip()
 
+    # `stems` is an optional list restricting which stem rows surface this
+    # preset (mirrors the built-in `drums-v1` shape). Drops silently if the
+    # caller doesn't include it — universal preset, unchanged behaviour.
+    raw_stems = body.get('stems')
+    stems_filter: list[str] | None = None
+    if isinstance(raw_stems, list) and raw_stems:
+        cleaned = [str(s).strip() for s in raw_stems if isinstance(s, str) and str(s).strip()]
+        if cleaned:
+            stems_filter = cleaned
+
     presets = _load_user_presets()
     presets = [p for p in presets if p.get('name') != name]
-    presets.append({
+    record: dict[str, Any] = {
         'name': name,
         'description': description,
         'builtin': False,
         'generation': generation,
-    })
+    }
+    if stems_filter:
+        record['stems'] = stems_filter
+    presets.append(record)
     _save_user_presets(presets)
-    return {'name': name, 'description': description, 'builtin': False, 'generation': generation}
+    return record
 
 
 @router.delete('/{name}')
