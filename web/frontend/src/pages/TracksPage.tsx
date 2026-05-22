@@ -3,6 +3,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import LyricsButtons from '../components/LyricsButtons'
 import StemPlayer from '../components/StemPlayer.tsx'
 import BeatmapStatsModal, { BeatmapRecord as BeatmapStatsRecord } from '../components/BeatmapStatsModal.tsx'
+import FeedbackButton from '../components/feedback/FeedbackButton'
 import VocalmapButtons from '../components/VocalmapButtons'
 import useInstalledVersion from '../components/useInstalledVersion'
 import { BusyProvider, useExclusiveTask } from '../components/useExclusiveTask'
@@ -1150,6 +1151,19 @@ function TracksPageInner() {
   const [selectedStems, setSelectedStems] = useState<Set<string>>(new Set())
   const [inlineBmJobs, setInlineBmJobs] = useState<Record<string, string>>({})
   const [hasVocalNotes, setHasVocalNotes] = useState(false)
+  // Current session — surfaced for FeedbackButton (and downstream feedback
+  // delete permissions). Cookie auth carries on /api/feedback/* requests, but
+  // the FeedbackPanel needs to know who "you" are to enable the delete buttons
+  // on your own notes. Fetched once on mount; null until resolved.
+  const [me, setMe] = useState<{ username: string; role: string } | null>(null)
+  useEffect(() => {
+    fetch('/api/auth/me')
+      .then((r) => r.json())
+      .then((d) => {
+        if (d && d.authenticated) setMe({ username: d.username, role: d.role })
+      })
+      .catch(() => {})
+  }, [])
   const installedMadmom = useInstalledVersion('madmom')
   const beatmapBtnLabel = installedMadmom
     ? `Generate Beatmap with madmom ${installedMadmom}`
@@ -1642,7 +1656,7 @@ function TracksPageInner() {
                       return (
                       <div
                         key={bm.id}
-                        className={`mt-1 flex items-center gap-1.5 rounded border px-1.5 py-1 ${
+                        className={`mt-1 flex flex-wrap items-center gap-1.5 rounded border px-1.5 py-1 ${
                           isActive ? 'border-jam-600/60 bg-jam-700/20' : 'border-gray-800 bg-gray-900/40'
                         }`}
                         title={liveName ? `${liveName} · ${dateStr}` : undefined}
@@ -1686,6 +1700,14 @@ function TracksPageInner() {
                         >
                           Edit
                         </button>
+                        {me && (
+                          <FeedbackButton
+                            trackId={selectedTrack.id}
+                            beatmapId={bm.id}
+                            currentUsername={me.username}
+                            isAdmin={me.role === 'admin'}
+                          />
+                        )}
                         <button
                           onClick={async () => {
                             const msg = isActive
