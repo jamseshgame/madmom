@@ -12,9 +12,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Body, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from ..config import settings
+from .auth import require_admin
 
 
 router = APIRouter(prefix='/api/generation-presets', tags=['generation-presets'])
@@ -280,3 +281,25 @@ async def delete_preset(name: str) -> dict[str, str]:
         raise HTTPException(404, f'No preset named `{name}`')
     _save_user_presets(presets)
     return {'name': name, 'deleted': 'true'}
+
+
+@router.post('/propose-from-feedback')
+async def propose_from_feedback(
+    stem: str = Query(...),
+    n: int = Query(default=3, ge=1, le=5),
+    _admin: dict = Depends(require_admin),
+) -> dict[str, list[dict[str, Any]]]:
+    """Aggregate feedback for `stem`, call Claude, return validated drafts.
+    Admin-only. No persistence — the user saves the drafts they want via
+    the normal POST / endpoint."""
+    from ..services.preset_proposer import ProposalError, propose_presets
+    try:
+        proposals = propose_presets(stem, n)
+    except ProposalError as e:
+        msg = str(e)
+        if 'not configured' in msg.lower():
+            raise HTTPException(503, msg)
+        if 'no feedback' in msg.lower():
+            raise HTTPException(422, msg)
+        raise HTTPException(502, msg)
+    return {'proposals': proposals}
