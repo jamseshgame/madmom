@@ -1186,6 +1186,41 @@ function TracksPageInner() {
 
   useEffect(() => { refetchHasVocalNotes() }, [refetchHasVocalNotes])
 
+  // Auto-tick stems that already have a chart on initial load of a track so
+  // the user can see at a glance what's covered (and one-click batch-regen
+  // those stems via a new preset selection). Tracked per-trackId so manual
+  // unticks after the first pass stick. Vocals lags behind beatmaps because
+  // its presence comes from a separate async probe, so it gets its own
+  // "applied" flag and folds in once `hasVocalNotes` resolves.
+  const autoTickRef = useRef<{ trackId: string; vocalsApplied: boolean }>({ trackId: '', vocalsApplied: false })
+  useEffect(() => {
+    const tid = selectedId || ''
+    const track = tracks.find((t) => t.id === tid) || null
+    if (!track) {
+      autoTickRef.current = { trackId: '', vocalsApplied: false }
+      return
+    }
+    if (autoTickRef.current.trackId !== tid) {
+      const next = new Set<string>()
+      for (const bm of track.beatmaps || []) next.add(bm.stem)
+      setSelectedStems(next)
+      autoTickRef.current = { trackId: tid, vocalsApplied: false }
+    }
+    if (
+      hasVocalNotes &&
+      !autoTickRef.current.vocalsApplied &&
+      Object.prototype.hasOwnProperty.call(track.stems, 'vocals')
+    ) {
+      setSelectedStems((prev) => {
+        if (prev.has('vocals')) return prev
+        const next = new Set(prev)
+        next.add('vocals')
+        return next
+      })
+      autoTickRef.current.vocalsApplied = true
+    }
+  }, [selectedId, tracks, hasVocalNotes])
+
   const deleteVocalNotes = async () => {
     if (!selectedId) return
     if (!window.confirm('Delete the vocal beatmap for this track? Lyrics versions are kept.')) return

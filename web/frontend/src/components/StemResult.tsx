@@ -266,6 +266,37 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
 
   useEffect(() => { refetchHasVocalNotes() }, [refetchHasVocalNotes])
 
+  // Auto-tick stems that already have a chart on initial load so the user
+  // can see at a glance what's covered. Beatmaps arrive via the tracks
+  // refetch; vocals lags on its own probe so it gets a separate one-shot
+  // applied flag. Manual unticks after the first pass stick.
+  const autoTickRef = useRef<{ jobId: string; vocalsApplied: boolean }>({ jobId: '', vocalsApplied: false })
+  useEffect(() => {
+    if (!jobId) {
+      autoTickRef.current = { jobId: '', vocalsApplied: false }
+      return
+    }
+    if (autoTickRef.current.jobId !== jobId) {
+      const next = new Set<string>()
+      for (const bm of existingBeatmaps) next.add(bm.stem)
+      setSelectedStems(next)
+      autoTickRef.current = { jobId, vocalsApplied: false }
+    }
+    if (
+      hasVocalNotes &&
+      !autoTickRef.current.vocalsApplied &&
+      Object.prototype.hasOwnProperty.call(stems, 'vocals')
+    ) {
+      setSelectedStems((prev) => {
+        if (prev.has('vocals')) return prev
+        const next = new Set(prev)
+        next.add('vocals')
+        return next
+      })
+      autoTickRef.current.vocalsApplied = true
+    }
+  }, [jobId, existingBeatmaps, hasVocalNotes, stems])
+
   const deleteVocalNotes = async () => {
     if (!jobId) return
     if (!window.confirm('Delete the vocal beatmap for this track? Lyrics versions are kept.')) return
