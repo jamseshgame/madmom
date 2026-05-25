@@ -819,12 +819,29 @@ function InlinePublish({ track }: { track: Track }) {
             {Object.entries(beatmapsByStem).map(([stem, bms]) => {
               const colour = STEM_COLORS[stem] || 'text-gray-300'
               const stemLabel = STEM_LABELS[stem] || stem
+              // Mirror the per-stem beatmap-list chips so the dropdown speaks
+              // the same vocabulary: preset name (or "Custom" for V2 ad-hoc /
+              // the model name for V1 / manual / imported records) followed
+              // by the generated-at timestamp, plus a custom song_name tail
+              // when the user renamed the beatmap away from the default.
+              const defaultName = `${track.name} (${stemLabel})`
               const fmtBm = (bm: BeatmapRecord) => {
                 const date = new Date(bm.generated_at * 1000).toLocaleString(undefined, {
                   month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
                 })
+                const preset = (bm.preset || '').trim()
+                const model = (bm.model || '').toLowerCase()
+                const modelVer = (bm.model_version || '').trim()
+                const isV2 = modelVer.endsWith('+v2')
+                let label: string
+                if (preset) label = preset
+                else if (model === 'madmom' && isV2) label = 'Custom'
+                else if (model) label = model
+                else label = 'unknown'
                 const liveName = (bm.song_name || '').trim()
-                return liveName ? `${liveName} · ${date}` : date
+                const baseName = liveName.replace(/(\s*\(copy\))+$/i, '')
+                const isCustomName = !!liveName && baseName !== defaultName
+                return isCustomName ? `${label} · ${date} · ${liveName}` : `${label} · ${date}`
               }
               return (
                 <div key={stem} className="flex items-center gap-2">
