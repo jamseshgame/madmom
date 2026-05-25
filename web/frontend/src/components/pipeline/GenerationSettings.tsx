@@ -334,6 +334,26 @@ export default function GenerationSettings(props: GenerationSettingsProps) {
                       )}
                     </label>
                   ))}
+                  <div className="sticky bottom-0 border-t border-gray-700/60 mt-1 pt-1 px-2 pb-1 bg-gray-800 flex gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setSelected(['', ...presets.map((p) => p.name)])}
+                      disabled={presets.length === 0}
+                      className="flex-1 px-2 py-1 text-[11px] bg-gray-700 hover:bg-gray-600 disabled:opacity-40 text-gray-200 rounded"
+                      title="Check Custom and every preset"
+                    >
+                      Select all
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelected([])}
+                      disabled={selected.length === 0}
+                      className="flex-1 px-2 py-1 text-[11px] bg-gray-700 hover:bg-gray-600 disabled:opacity-40 text-gray-200 rounded"
+                      title="Uncheck everything"
+                    >
+                      Clear all
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
