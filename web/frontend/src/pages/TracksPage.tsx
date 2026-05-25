@@ -12,7 +12,9 @@ import {
   GENERATION_STAGE_LABELS,
   type GenerationStage,
   type GenerationState,
+  type QueuedGeneration,
 } from '../components/pipeline/generationTypes'
+import { materializeQueue } from '../components/pipeline/queueBuilder'
 import GenerationSettings from '../components/pipeline/GenerationSettings'
 import { STEM_COLORS, STEM_LABELS } from '../components/stemDisplay'
 
@@ -73,30 +75,29 @@ function BeatmapPanel({
   track,
   stem,
   onClose,
-  onGenerated,
+  onBatchGenerate,
 }: {
   track: Track
   stem: string
   onClose: () => void
-  onGenerated?: () => void
+  // Called with the resolved queue + song.ini overrides when the user clicks
+  // Generate. The parent owns sequential firing + per-stem lock holding;
+  // the modal just hands off and closes — same pattern StemGenerationModal
+  // uses on the Create page.
+  onBatchGenerate: (queue: QueuedGeneration[], values: Record<string, unknown>) => void
 }) {
   const navigate = useNavigate()
   const [schema, setSchema] = useState<Record<string, SongIniField>>({})
   const [values, setValues] = useState<Record<string, unknown>>({})
-  const [generating, setGenerating] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
   const [creatingEmpty, setCreatingEmpty] = useState(false)
   const [emptyError, setEmptyError] = useState('')
-  const [jobId, setJobId] = useState('')
-  const [progress, setProgress] = useState(0)
-  const [message, setMessage] = useState('')
-  const [done, setDone] = useState(false)
   const [error, setError] = useState('')
-  const [beatmapJobId, setBeatmapJobId] = useState('')
-  // V2 pipeline state — user's current per-stage engine + params selection,
-  // and the name of the active preset ('' = Custom). Both are passed down to
-  // GenerationSettings as controlled props and read by handleGenerate.
+  // V2 pipeline state — user's per-stage engine + params selection, and the
+  // multi-select picker state. Both flow through GenerationSettings as
+  // controlled props and get read at submit time.
   const [generation, setGeneration] = useState<GenerationState>(GENERATION_DEFAULTS)
-  const [activePreset, setActivePreset] = useState<string>('')
+  const [activePresets, setActivePresets] = useState<string[]>([])
 
   useEffect(() => {
     fetch('/api/tracks/schema/song-ini')
@@ -123,80 +124,25 @@ function BeatmapPanel({
   }
 
   const handleGenerate = async () => {
-    setGenerating(true)
+    if (activePresets.length === 0) return
+    setSubmitting(true)
     setError('')
-    setDone(false)
-
-    const formData = new FormData()
-    formData.append('stem', stem)
-    for (const [key, val] of Object.entries(values)) {
-      formData.append(key, String(val ?? ''))
-    }
-
-    // All stems go through V2 — the legacy single-shot endpoint was retired
-    // when drums got V2 support (centroid pitch engine + single-hit lane
-    // engine semantics handle drums identically to other stems).
-    // Field naming matches the V2 endpoint's Form(...) parameters — note that
-    // `lanes_expert` is sent as `lanes_*` and `lanes_filtered` as `playability_*`.
-    for (const stage of Object.keys(GENERATION_STAGE_LABELS) as GenerationStage[]) {
-      const sel = generation[stage]
-      const fieldPrefix =
-        stage === 'lanes_expert' ? 'lanes' :
-        stage === 'lanes_filtered' ? 'playability' :
-        stage
-      formData.append(`${fieldPrefix}_engine`, sel.engine)
-      formData.append(`${fieldPrefix}_params`, JSON.stringify(sel.params))
-    }
-    // Record which preset (if any) drove this generation so the picker
-    // can show a badge on the result.
-    if (activePreset) formData.append('preset', activePreset)
-
-    const endpoint = `/api/tracks/${track.id}/generate-beatmap-v2`
-
     try {
-      const res = await fetch(endpoint, { method: 'POST', body: formData })
-      if (!res.ok) {
-        const err = await res.json()
-        throw new Error(err.detail || 'Failed')
-      }
-      const { job_id } = await res.json()
-      setBeatmapJobId(job_id)
-      setJobId(job_id)
-
-      // SSE tracking
-      const evtSource = new EventSource(`/api/beatmap/${job_id}/status`)
-      evtSource.onmessage = (e) => {
-        const data = JSON.parse(e.data)
-        if (data.progress >= 0) setProgress(data.progress)
-        setMessage(data.message)
-        if (data.step === 'done') {
-          evtSource.close()
-          setDone(true)
-          setGenerating(false)
-          if (onGenerated) onGenerated()
-        } else if (data.step === 'error') {
-          evtSource.close()
-          setError(data.message)
-          setGenerating(false)
-        } else if (data.step === 'cancelled') {
-          evtSource.close()
-          setGenerating(false)
-          setProgress(0)
-          setMessage('')
-          setJobId('')
-          setBeatmapJobId('')
-        }
-      }
-      evtSource.onerror = () => {
-        evtSource.close()
-        setError('Connection lost')
-        setGenerating(false)
-      }
+      const queue = await materializeQueue(activePresets, generation, stem)
+      onBatchGenerate(queue, values)
+      onClose()
     } catch (e) {
       setError((e as Error).message)
-      setGenerating(false)
+    } finally {
+      setSubmitting(false)
     }
   }
+
+  const generateLabel = (() => {
+    if (submitting) return 'Starting…'
+    if (activePresets.length <= 1) return 'Generate Beatmap'
+    return `Generate ${activePresets.length} beatmaps`
+  })()
 
   const renderField = (key: string) => {
     const field = schema[key]
@@ -275,10 +221,11 @@ function BeatmapPanel({
               {/* GENERATION section: sits between Metadata (idx 0) and Timing. */}
               {idx === 0 && (
                 <GenerationSettings
+                  mode="multi"
                   generation={generation}
-                  activePreset={activePreset}
+                  activePresets={activePresets}
                   onGenerationChange={setGeneration}
-                  onActivePresetChange={setActivePreset}
+                  onActivePresetsChange={setActivePresets}
                   stem={stem}
                 />
               )}
@@ -287,88 +234,47 @@ function BeatmapPanel({
         </div>
 
         <div className="p-5 border-t border-gray-800 space-y-3">
-          {!done && !error && (
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                onClick={handleGenerate}
-                disabled={generating || creatingEmpty}
-                className="px-6 py-2.5 bg-jam-600 hover:bg-jam-500 disabled:opacity-50 text-white rounded-lg font-medium transition-colors"
-              >
-                {generating ? 'Generating...' : 'Generate Beatmap'}
-              </button>
-              <button
-                onClick={async () => {
-                  setCreatingEmpty(true)
-                  setEmptyError('')
-                  try {
-                    const fd = new FormData()
-                    fd.append('stem', stem)
-                    const res = await fetch(`/api/tracks/${track.id}/empty-beatmap`, {
-                      method: 'POST',
-                      body: fd,
-                    })
-                    if (!res.ok) {
-                      const err = await res.json().catch(() => ({}))
-                      throw new Error(err.detail || `Failed (${res.status})`)
-                    }
-                    const data = await res.json()
-                    if (onGenerated) onGenerated()
-                    navigate(`/edit/${data.track_id}/${data.beatmap_id}`)
-                  } catch (e) {
-                    setEmptyError((e as Error).message)
-                  } finally {
-                    setCreatingEmpty(false)
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={handleGenerate}
+              disabled={submitting || creatingEmpty || activePresets.length === 0}
+              className="px-6 py-2.5 bg-jam-600 hover:bg-jam-500 disabled:opacity-50 text-white rounded-lg font-medium transition-colors"
+              title={activePresets.length === 0 ? 'Pick at least one preset' : undefined}
+            >
+              {generateLabel}
+            </button>
+            <button
+              onClick={async () => {
+                setCreatingEmpty(true)
+                setEmptyError('')
+                try {
+                  const fd = new FormData()
+                  fd.append('stem', stem)
+                  const res = await fetch(`/api/tracks/${track.id}/empty-beatmap`, {
+                    method: 'POST',
+                    body: fd,
+                  })
+                  if (!res.ok) {
+                    const err = await res.json().catch(() => ({}))
+                    throw new Error(err.detail || `Failed (${res.status})`)
                   }
-                }}
-                disabled={generating || creatingEmpty}
-                className="px-4 py-2.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 border border-gray-700 hover:border-gray-600 text-gray-200 rounded-lg text-sm font-medium transition-colors"
-                title="Skip beat detection — open the editor with an empty chart"
-              >
-                {creatingEmpty ? 'Creating…' : 'Open empty editor →'}
-              </button>
-              {emptyError && <span className="text-xs text-red-400">{emptyError}</span>}
-            </div>
-          )}
-
-          {generating && jobId && (
-            <div className="space-y-2">
-              <div className="w-full bg-gray-800 rounded-full h-2 overflow-hidden">
-                <div className="bg-jam-500 h-full rounded-full transition-all duration-500" style={{ width: `${Math.max(progress, 2)}%` }} />
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-xs text-gray-500 flex-1 truncate">{message}</p>
-                <button
-                  onClick={async () => {
-                    try {
-                      await fetch(`/api/beatmap/${jobId}/cancel`, { method: 'POST' })
-                    } catch {
-                      // best-effort
-                    }
-                  }}
-                  className="shrink-0 px-3 py-1.5 bg-red-900/40 hover:bg-red-800/60 border border-red-800 text-red-300 hover:text-red-200 rounded text-xs font-medium transition-colors"
-                >
-                  Kill task
-                </button>
-              </div>
-            </div>
-          )}
-
-          {done && beatmapJobId && (
-            <div className="flex flex-wrap gap-2">
-              <a
-                href={`/api/beatmap/${beatmapJobId}/download/zip`}
-                className="px-5 py-2.5 bg-jam-600 hover:bg-jam-500 text-white rounded-lg font-medium transition-colors"
-              >
-                Download ZIP
-              </a>
-              <a
-                href={`/api/beatmap/${beatmapJobId}/download/notes.chart`}
-                className="px-5 py-2.5 bg-gray-700 hover:bg-gray-600 text-gray-200 rounded-lg font-medium transition-colors"
-              >
-                Download .chart
-              </a>
-            </div>
-          )}
+                  const data = await res.json()
+                  onClose()
+                  navigate(`/edit/${data.track_id}/${data.beatmap_id}`)
+                } catch (e) {
+                  setEmptyError((e as Error).message)
+                } finally {
+                  setCreatingEmpty(false)
+                }
+              }}
+              disabled={submitting || creatingEmpty}
+              className="px-4 py-2.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 border border-gray-700 hover:border-gray-600 text-gray-200 rounded-lg text-sm font-medium transition-colors"
+              title="Skip beat detection — open the editor with an empty chart"
+            >
+              {creatingEmpty ? 'Creating…' : 'Open empty editor →'}
+            </button>
+            {emptyError && <span className="text-xs text-red-400">{emptyError}</span>}
+          </div>
 
           {error && (
             <div className="bg-red-900/30 border border-red-800 rounded-lg p-3 text-sm text-red-400">{error}</div>
@@ -1150,6 +1056,17 @@ function TracksPageInner() {
   // tickbox selection for the batch-generate button below the stem grid.
   const [selectedStems, setSelectedStems] = useState<Set<string>>(new Set())
   const [inlineBmJobs, setInlineBmJobs] = useState<Record<string, string>>({})
+  // Per-stem queue of V2 generations waiting behind the active inlineBmJobs
+  // entry. Populated by BeatmapPanel's onBatchGenerate; drained as each
+  // SSE-done fires. queueSongIni carries the modal's song.ini overrides for
+  // every item in the same stem's batch (every preset gets the same name/
+  // artist/etc.).
+  const [beatmapQueue, setBeatmapQueue] = useState<Record<string, QueuedGeneration[]>>({})
+  const [queueSongIni, setQueueSongIni] = useState<Record<string, Record<string, unknown>>>({})
+  const beatmapQueueRef = useRef(beatmapQueue)
+  beatmapQueueRef.current = beatmapQueue
+  const queueSongIniRef = useRef(queueSongIni)
+  queueSongIniRef.current = queueSongIni
   const [hasVocalNotes, setHasVocalNotes] = useState(false)
   // Current session — surfaced for FeedbackButton (and downstream feedback
   // delete permissions). Cookie auth carries on /api/feedback/* requests, but
@@ -1464,6 +1381,84 @@ function TracksPageInner() {
     })
   }
 
+  // V2 batch generation — fires one item against the V2 endpoint with
+  // the song.ini overrides the BeatmapPanel collected. Sets inlineBmJobs[stem]
+  // so the existing <InlineBeatmapProgress> picks it up. Throws on HTTP failure.
+  const fireOneV2 = useCallback(async (
+    trackId: string,
+    stem: string,
+    item: QueuedGeneration,
+    values: Record<string, unknown>,
+  ) => {
+    const fd = new FormData()
+    fd.append('stem', stem)
+    for (const [key, val] of Object.entries(values)) {
+      fd.append(key, String(val ?? ''))
+    }
+    for (const stage of Object.keys(GENERATION_STAGE_LABELS) as GenerationStage[]) {
+      const sel = item.generation[stage]
+      const fieldPrefix =
+        stage === 'lanes_expert' ? 'lanes' :
+        stage === 'lanes_filtered' ? 'playability' :
+        stage
+      fd.append(`${fieldPrefix}_engine`, sel.engine)
+      fd.append(`${fieldPrefix}_params`, JSON.stringify(sel.params))
+    }
+    if (item.preset) fd.append('preset', item.preset)
+    const res = await fetch(`/api/tracks/${trackId}/generate-beatmap-v2`, { method: 'POST', body: fd })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.detail || 'Failed to start beatmap generation')
+    }
+    const { job_id } = await res.json()
+    setInlineBmJobs((prev) => ({ ...prev, [stem]: job_id }))
+  }, [])
+
+  // Hand-off target for BeatmapPanel's onBatchGenerate. Acquires the per-stem
+  // lock, sets up the queue, and fires the first item. The InlineBeatmapProgress
+  // SSE callbacks below drain the rest one at a time.
+  const startV2Batch = useCallback((
+    trackId: string,
+    stem: string,
+    queue: QueuedGeneration[],
+    values: Record<string, unknown>,
+  ) => {
+    if (queue.length === 0) return
+    if (!lock.acquire(`beatmap:${stem}`)) return
+    setBeatmapQueue((prev) => ({ ...prev, [stem]: queue.slice(1) }))
+    setQueueSongIni((prev) => ({ ...prev, [stem]: values }))
+    fireOneV2(trackId, stem, queue[0], values).catch((e) => {
+      setBatchError((e as Error).message)
+      setBeatmapQueue((prev) => { const n = { ...prev }; delete n[stem]; return n })
+      setQueueSongIni((prev) => { const n = { ...prev }; delete n[stem]; return n })
+      lock.release()
+    })
+  }, [lock, fireOneV2])
+
+  // Drain the next queued item for `stem`. Returns true if it fired the next
+  // one; false if the queue was empty (caller should release the lock).
+  const dequeueV2 = useCallback((trackId: string, stem: string): boolean => {
+    const remaining = beatmapQueueRef.current[stem] || []
+    if (remaining.length === 0) return false
+    const item = remaining[0]
+    const values = queueSongIniRef.current[stem] || {}
+    setBeatmapQueue((prev) => {
+      const arr = prev[stem] || []
+      const n = { ...prev }
+      if (arr.length <= 1) delete n[stem]
+      else n[stem] = arr.slice(1)
+      return n
+    })
+    setInlineBmJobs((prev) => { const n = { ...prev }; delete n[stem]; return n })
+    fireOneV2(trackId, stem, item, values).catch((e) => {
+      setBatchError((e as Error).message)
+      setBeatmapQueue((prev) => { const n = { ...prev }; delete n[stem]; return n })
+      setQueueSongIni((prev) => { const n = { ...prev }; delete n[stem]; return n })
+      lock.release()
+    })
+    return true
+  }, [lock, fireOneV2])
+
   const selectedTrack = tracks.find((t) => t.id === selectedId) || null
 
   if (selectedTrack) {
@@ -1635,15 +1630,23 @@ function TracksPageInner() {
                     )}
                   {inlineBmJobs[stem] && stem !== 'vocals' && (
                     <InlineBeatmapProgress
+                      key={inlineBmJobs[stem]}
                       jobId={inlineBmJobs[stem]}
                       onDone={() => {
-                        setInlineBmJobs((prev) => {
-                          const next = { ...prev }
-                          delete next[stem]
-                          return next
-                        })
-                        lock.release()
                         loadTracks()
+                        const fired = dequeueV2(selectedTrack.id, stem)
+                        if (!fired) {
+                          setInlineBmJobs((prev) => {
+                            const next = { ...prev }
+                            delete next[stem]
+                            return next
+                          })
+                          setQueueSongIni((prev) => { const n = { ...prev }; delete n[stem]; return n })
+                          lock.release()
+                        }
+                        // If fired, dequeueV2 has set inlineBmJobs[stem] to
+                        // the new job; the keyed InlineBeatmapProgress re-mounts
+                        // and starts watching it.
                       }}
                       onCancelled={() => {
                         setInlineBmJobs((prev) => {
@@ -1651,10 +1654,24 @@ function TracksPageInner() {
                           delete next[stem]
                           return next
                         })
+                        setBeatmapQueue((prev) => { const n = { ...prev }; delete n[stem]; return n })
+                        setQueueSongIni((prev) => { const n = { ...prev }; delete n[stem]; return n })
                         lock.release()
                       }}
-                      onError={() => { lock.release() }}
+                      onError={() => {
+                        setBeatmapQueue((prev) => { const n = { ...prev }; delete n[stem]; return n })
+                        setQueueSongIni((prev) => { const n = { ...prev }; delete n[stem]; return n })
+                        lock.release()
+                      }}
                     />
+                  )}
+                  {inlineBmJobs[stem] && (beatmapQueue[stem]?.length ?? 0) > 0 && (
+                    <div
+                      className="text-[10px] text-gray-500 italic mt-1 truncate"
+                      title="Generations queued behind the active run"
+                    >
+                      queued: {(beatmapQueue[stem] || []).map((q) => q.preset || 'Custom').join(' · ')}
+                    </div>
                   )}
                   {/* Vocals uses VocalmapButtons → vocal_notes.json, not the
                       tracks.beatmaps array, so skip the legacy chart list here. */}
@@ -2025,7 +2042,10 @@ function TracksPageInner() {
             track={beatmapPanel.track}
             stem={beatmapPanel.stem}
             onClose={() => setBeatmapPanel(null)}
-            onGenerated={loadTracks}
+            onBatchGenerate={(queue, values) => {
+              const { track, stem } = beatmapPanel
+              startV2Batch(track.id, stem, queue, values)
+            }}
           />
         )}
 
