@@ -159,11 +159,20 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
   // Queued generations waiting behind the active one in `beatmaps[stem]`.
   // Drained by the SSE-done callback below; cleared by error/cancel paths.
   const [beatmapQueue, setBeatmapQueue] = useState<Record<string, QueuedGeneration[]>>({})
-  // Mirror beatmapQueue through a ref so the tracker callbacks (which
-  // capture stale state) can read the latest queue at fire time without
-  // pulling stem into their dep arrays.
+  // Stems waiting their turn in a "Generate beatmap for N selected stems"
+  // batch. The active stem is the one in beatmaps[]; this list is everything
+  // queued behind it. batchTotal is the original size of the multi-stem
+  // batch (used to compute "X of N done" — only set while a multi-stem
+  // batch is running so a single-stem fire keeps the row clean).
+  const [pendingStems, setPendingStems] = useState<string[]>([])
+  const [batchTotal, setBatchTotal] = useState<number | null>(null)
+  // Mirror beatmapQueue + pendingStems through refs so the tracker callbacks
+  // (which capture stale state) can read the latest at fire time without
+  // pulling them into dep arrays.
   const beatmapQueueRef = useRef(beatmapQueue)
   beatmapQueueRef.current = beatmapQueue
+  const pendingStemsRef = useRef(pendingStems)
+  pendingStemsRef.current = pendingStems
   const [statsBeatmap, setStatsBeatmap] = useState<BeatmapRecord | null>(null)
   const [publishing, setPublishing] = useState<'idle' | 'publishing' | 'done' | 'error'>('idle')
   const [publishResult, setPublishResult] = useState<{ commitUrl: string; folder: string } | null>(null)
@@ -568,16 +577,41 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
     }
   }
 
-  const generateSelected = async () => {
+  // Drain the next pending stem (if any) and fire its batch. Called from
+  // the tracker callbacks once a stem's per-preset queue is fully drained,
+  // so multi-stem batches actually progress stem-by-stem instead of getting
+  // wedged behind the page-scoped lock.
+  const triggerNextStemIfAny = () => {
+    const remaining = pendingStemsRef.current
+    if (remaining.length === 0) {
+      setBatchTotal(null)
+      return false
+    }
+    const [next, ...rest] = remaining
+    setPendingStems(rest)
+    generateBeatmap(next)
+    return true
+  }
+
+  const generateSelected = () => {
     setBatchError('')
     const targets = Array.from(selectedStems).filter(
       (stem) => stem !== 'song' && stem !== 'vocals' && !NON_AUDIO_KEYS.has(stem) && !beatmaps[stem],
     )
     if (targets.length === 0) return
-    for (const stem of targets) {
-      await generateBeatmap(stem)
+    if (lock.owner) {
+      setBatchError('Wait for the current task to finish.')
+      return
     }
     setSelectedStems(new Set())
+    if (targets.length > 1) {
+      setBatchTotal(targets.length)
+      setPendingStems(targets.slice(1))
+    } else {
+      setBatchTotal(null)
+      setPendingStems([])
+    }
+    generateBeatmap(targets[0])
   }
 
   const createdAt = typeof metadata.created_at === 'number' ? (metadata.created_at as number) : null
@@ -775,6 +809,11 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                             return next
                           })
                           setBeatmapQueue((prev) => { const n = { ...prev }; delete n[stem]; return n })
+                          // Cancel aborts the whole multi-stem batch too —
+                          // the user asked the active task to stop, treat
+                          // that as "stop everything".
+                          setPendingStems([])
+                          setBatchTotal(null)
                           lock.release()
                         }}
                         onDone={() => {
@@ -787,6 +826,10 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                               return next
                             })
                             lock.release()
+                            // This stem's whole per-preset batch is done;
+                            // move on to the next stem in the multi-stem
+                            // queue (if any).
+                            triggerNextStemIfAny()
                           }
                           // When fired, dequeueAndFire already replaced
                           // beatmaps[stem] with the next job — the tracker
@@ -795,6 +838,10 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                         onError={() => {
                           setBeatmapQueue((prev) => { const n = { ...prev }; delete n[stem]; return n })
                           lock.release()
+                          // Move on to the next stem in the multi-stem queue —
+                          // a single transient failure shouldn't kill the
+                          // whole batch. The "Failed" pill stays on this row.
+                          triggerNextStemIfAny()
                         }}
                         onView={
                           trackId
@@ -928,22 +975,67 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
         </div>
 
         {/* Batch generate row */}
-        <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-          <div className="text-xs text-gray-500">
-            {selectedStems.size > 0
-              ? `${selectedStems.size} stem${selectedStems.size === 1 ? '' : 's'} selected`
-              : 'Tick stems above to queue multiple beatmap generations.'}
-          </div>
-          <div className="flex items-center gap-2">
-            {batchError && <span className="text-xs text-red-400">{batchError}</span>}
-            <button
-              onClick={generateSelected}
-              disabled={selectedStems.size === 0 || !!lock.owner}
-              title={lock.owner ? 'Another task is running' : undefined}
-              className="px-3 py-1.5 bg-jam-600 hover:bg-jam-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-md text-xs font-medium transition-colors"
-            >
-              Generate beatmap for {selectedStems.size || 'selected'} stem{selectedStems.size === 1 ? '' : 's'}
-            </button>
+        <div className="mt-3 flex flex-col gap-2">
+          {batchTotal !== null && (() => {
+            const total = batchTotal
+            const queued = pendingStems.length
+            const activeStem = Object.entries(beatmaps).find(([, b]) => b?.state === 'generating')?.[0] || null
+            const done = total - queued - (activeStem ? 1 : 0)
+            const pct = total > 0 ? Math.round((done / total) * 100) : 0
+            return (
+              <div className="bg-gray-900/60 border border-gray-800 rounded-md p-2 space-y-1.5">
+                <div className="flex items-center justify-between gap-2 text-xs text-gray-400">
+                  <span>
+                    Batch: <span className="text-gray-200 font-medium">{done} of {total}</span> stems done
+                    {activeStem && (
+                      <>
+                        {' '}· running{' '}
+                        <span className={STEM_COLORS[activeStem] || 'text-gray-200'}>
+                          {STEM_LABELS[activeStem] || activeStem}
+                        </span>
+                      </>
+                    )}
+                  </span>
+                  <span className="text-gray-500 text-[10px] tabular-nums">{pct}%</span>
+                </div>
+                <div className="w-full bg-gray-800 rounded-full h-1 overflow-hidden">
+                  <div className="bg-jam-500 h-full transition-all duration-500" style={{ width: `${Math.max(pct, 2)}%` }} />
+                </div>
+                {queued > 0 && (
+                  <div className="text-[10px] text-gray-500 truncate" title={`queued stems: ${pendingStems.join(', ')}`}>
+                    next: {pendingStems.map((s) => STEM_LABELS[s] || s).join(' · ')}
+                  </div>
+                )}
+              </div>
+            )
+          })()}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-xs text-gray-500">
+              {batchTotal !== null
+                ? null
+                : selectedStems.size > 0
+                  ? `${selectedStems.size} stem${selectedStems.size === 1 ? '' : 's'} selected`
+                  : 'Tick stems above to queue multiple beatmap generations.'}
+            </div>
+            <div className="flex items-center gap-2">
+              {batchError && <span className="text-xs text-red-400">{batchError}</span>}
+              <button
+                onClick={generateSelected}
+                disabled={selectedStems.size === 0 || batchTotal !== null || !!lock.owner}
+                title={
+                  batchTotal !== null
+                    ? 'Multi-stem batch already running'
+                    : lock.owner
+                      ? 'Another task is running'
+                      : undefined
+                }
+                className="px-3 py-1.5 bg-jam-600 hover:bg-jam-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-md text-xs font-medium transition-colors"
+              >
+                {batchTotal !== null
+                  ? 'Batch in progress…'
+                  : `Generate beatmap for ${selectedStems.size || 'selected'} stem${selectedStems.size === 1 ? '' : 's'}`}
+              </button>
+            </div>
           </div>
         </div>
       </div>
