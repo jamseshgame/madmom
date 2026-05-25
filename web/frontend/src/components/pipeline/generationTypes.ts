@@ -36,3 +36,22 @@ export interface GenerationPreset {
   stems?: string[]
   generation: GenerationState
 }
+
+// Materialise a preset into a full GenerationState, deep-cloning over the
+// defaults so callers can mutate the result without corrupting the source.
+export function presetToGeneration(p: GenerationPreset): GenerationState {
+  const next: GenerationState = structuredClone(GENERATION_DEFAULTS)
+  for (const stage of Object.keys(GENERATION_STAGE_LABELS) as GenerationStage[]) {
+    const s = p.generation[stage]
+    if (s) next[stage] = { engine: s.engine, params: structuredClone(s.params) }
+  }
+  return next
+}
+
+// One queued generation: the preset name to record on the resulting beatmap
+// (empty string for "Custom" — the user's live engine-cards settings) and
+// the fully-materialised engine/param state to ship to the V2 endpoint.
+export interface QueuedGeneration {
+  preset: string
+  generation: GenerationState
+}

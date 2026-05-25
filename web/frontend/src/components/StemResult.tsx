@@ -11,7 +11,9 @@ import {
   GENERATION_STAGE_LABELS,
   type GenerationStage,
   type GenerationState,
+  type QueuedGeneration,
 } from './pipeline/generationTypes'
+import { materializeQueue } from './pipeline/queueBuilder'
 import { loadStoredGeneration, saveStoredGeneration } from './pipeline/generationStorage'
 import { STEM_COLORS, STEM_LABELS } from './stemDisplay'
 
@@ -153,7 +155,15 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
   const trackName = (metadata.original_name as string) || 'track'
   const isGameReady = !!metadata.game_ready
   const trackId = (metadata.track_id as string) || ''
-  const [beatmaps, setBeatmaps] = useState<Record<string, { jobId: string; state: BeatmapState }>>({})
+  const [beatmaps, setBeatmaps] = useState<Record<string, { jobId: string; state: BeatmapState; preset?: string }>>({})
+  // Queued generations waiting behind the active one in `beatmaps[stem]`.
+  // Drained by the SSE-done callback below; cleared by error/cancel paths.
+  const [beatmapQueue, setBeatmapQueue] = useState<Record<string, QueuedGeneration[]>>({})
+  // Mirror beatmapQueue through a ref so the tracker callbacks (which
+  // capture stale state) can read the latest queue at fire time without
+  // pulling stem into their dep arrays.
+  const beatmapQueueRef = useRef(beatmapQueue)
+  beatmapQueueRef.current = beatmapQueue
   const [statsBeatmap, setStatsBeatmap] = useState<BeatmapRecord | null>(null)
   const [publishing, setPublishing] = useState<'idle' | 'publishing' | 'done' | 'error'>('idle')
   const [publishResult, setPublishResult] = useState<{ commitUrl: string; folder: string } | null>(null)
@@ -191,20 +201,22 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
   // Shared generation state for all non-drums stems on this page. Persisted
   // to localStorage so the user's preset/engine choices survive reloads.
   // Stays in sync with the cog modal: edits via the modal update this state
-  // and the next click of the green main button picks them up.
+  // and the next click of the green main button picks them up. `activePresets`
+  // is the multi-select picker state — one entry per preset to batch-run,
+  // empty string for the "Custom" (engine-cards) pick.
   //
   // useState lazy-init runs the loader twice on mount (once per useState),
   // but JSON.parse on a tiny stored object is negligible.
   const [generation, setGeneration] = useState<GenerationState>(() => loadStoredGeneration().generation)
-  const [activePreset, setActivePreset] = useState<string>(() => loadStoredGeneration().activePreset)
+  const [activePresets, setActivePresets] = useState<string[]>(() => loadStoredGeneration().activePresets)
   const [modalStem, setModalStem] = useState<string | null>(null)
 
   // Persist on every change. Note: this also fires on the initial mount,
   // writing the just-loaded values back to localStorage. Harmless but
   // unavoidable with this pattern — the write is synchronous and tiny.
   useEffect(() => {
-    saveStoredGeneration(generation, activePreset)
-  }, [generation, activePreset])
+    saveStoredGeneration(generation, activePresets)
+  }, [generation, activePresets])
 
   const installedMadmom = useInstalledVersion('madmom')
   const lock = useExclusiveTask()
@@ -416,50 +428,112 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
     }
   }
 
-  const generateBeatmap = async (stem: string) => {
-    if (!lock.acquire(`beatmap:${stem}`)) return
-    const label = STEM_LABELS[stem] || stem
-    setBeatmaps((prev) => ({ ...prev, [stem]: { jobId: '', state: 'generating' } }))
+  // Fire ONE V2 generation against `trackId` using the materialised item's
+  // {preset, generation} bundle. Sets the resulting job_id into beatmaps[stem]
+  // so <StemBeatmapTracker> picks it up. Throws on HTTP failure so the caller
+  // can clean up the queue + release the lock.
+  const fireOneV2 = async (stem: string, item: QueuedGeneration) => {
+    if (!trackId) throw new Error('trackId required for V2 generation')
+    const formData = new FormData()
+    formData.append('stem', stem)
+    for (const [key, val] of Object.entries(songIni)) {
+      formData.append(key, String(val ?? ''))
+    }
+    for (const stage of Object.keys(GENERATION_STAGE_LABELS) as GenerationStage[]) {
+      const sel = item.generation[stage]
+      const fieldPrefix =
+        stage === 'lanes_expert' ? 'lanes' :
+        stage === 'lanes_filtered' ? 'playability' :
+        stage
+      formData.append(`${fieldPrefix}_engine`, sel.engine)
+      formData.append(`${fieldPrefix}_params`, JSON.stringify(sel.params))
+    }
+    if (item.preset) formData.append('preset', item.preset)
+    const res = await fetch(`/api/tracks/${trackId}/generate-beatmap-v2`, { method: 'POST', body: formData })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      throw new Error(err.detail || 'Failed to start beatmap generation')
+    }
+    const { job_id } = await res.json()
+    setBeatmaps((prev) => ({ ...prev, [stem]: { jobId: job_id, state: 'generating', preset: item.preset } }))
+  }
 
-    // All stems get the V2 staged pipeline with whatever preset/engine
-    // settings the user has set on this page (defaults to v1).
-    const useV2 = !!trackId
-    try {
-      let res: Response
-      if (useV2) {
-        const formData = new FormData()
-        formData.append('stem', stem)
-        for (const [key, val] of Object.entries(songIni)) {
-          formData.append(key, String(val ?? ''))
-        }
-        for (const stage of Object.keys(GENERATION_STAGE_LABELS) as GenerationStage[]) {
-          const sel = generation[stage]
-          const fieldPrefix =
-            stage === 'lanes_expert' ? 'lanes' :
-            stage === 'lanes_filtered' ? 'playability' :
-            stage
-          formData.append(`${fieldPrefix}_engine`, sel.engine)
-          formData.append(`${fieldPrefix}_params`, JSON.stringify(sel.params))
-        }
-        if (activePreset) formData.append('preset', activePreset)
-        res = await fetch(`/api/tracks/${trackId}/generate-beatmap-v2`, { method: 'POST', body: formData })
-      } else {
+  // Kick off a batch of generations for a single stem. Caller must NOT
+  // pre-acquire the lock; this function takes it.
+  const startBatch = (stem: string, queue: QueuedGeneration[]) => {
+    if (queue.length === 0) return
+    if (!lock.acquire(`beatmap:${stem}`)) return
+    setBeatmaps((prev) => ({ ...prev, [stem]: { jobId: '', state: 'generating', preset: queue[0].preset } }))
+    setBeatmapQueue((prev) => ({ ...prev, [stem]: queue.slice(1) }))
+    fireOneV2(stem, queue[0]).catch((e) => {
+      setBeatmaps((prev) => ({ ...prev, [stem]: { jobId: '', state: 'error' } }))
+      setBeatmapQueue((prev) => { const n = { ...prev }; delete n[stem]; return n })
+      setBatchError((e as Error).message)
+      lock.release()
+    })
+  }
+
+  // Drain the next queued item for `stem` (if any). Used by the tracker's
+  // onDone callback to chain runs. Returns true if it fired the next one;
+  // false if the queue was empty (caller should release the lock).
+  const dequeueAndFire = (stem: string): boolean => {
+    const remaining = beatmapQueueRef.current[stem] || []
+    if (remaining.length === 0) return false
+    const item = remaining[0]
+    setBeatmapQueue((prev) => {
+      const arr = prev[stem] || []
+      const n = { ...prev }
+      if (arr.length <= 1) delete n[stem]
+      else n[stem] = arr.slice(1)
+      return n
+    })
+    setBeatmaps((prev) => ({ ...prev, [stem]: { jobId: '', state: 'generating', preset: item.preset } }))
+    fireOneV2(stem, item).catch((e) => {
+      setBeatmaps((prev) => ({ ...prev, [stem]: { jobId: '', state: 'error' } }))
+      setBeatmapQueue((prev) => { const n = { ...prev }; delete n[stem]; return n })
+      setBatchError((e as Error).message)
+      lock.release()
+    })
+    return true
+  }
+
+  const generateBeatmap = async (stem: string) => {
+    setBatchError('')
+    // Loose-stems mode (no trackId, e.g. legacy upload flow) keeps the
+    // single-shot v1 endpoint. Multi-select / batch is V2-only.
+    if (!trackId) {
+      if (!lock.acquire(`beatmap:${stem}`)) return
+      const label = STEM_LABELS[stem] || stem
+      setBeatmaps((prev) => ({ ...prev, [stem]: { jobId: '', state: 'generating' } }))
+      try {
         const formData = new FormData()
         formData.append('stem_job_id', jobId)
         formData.append('stem', stem)
         formData.append('title', `${trackName} (${label})`)
-        res = await fetch('/api/beatmap/from-stem', { method: 'POST', body: formData })
+        const res = await fetch('/api/beatmap/from-stem', { method: 'POST', body: formData })
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}))
+          throw new Error(err.detail || 'Failed to start beatmap generation')
+        }
+        const { job_id } = await res.json()
+        setBeatmaps((prev) => ({ ...prev, [stem]: { jobId: job_id, state: 'generating' } }))
+      } catch (e) {
+        setBeatmaps((prev) => ({ ...prev, [stem]: { jobId: '', state: 'error' } }))
+        setBatchError((e as Error).message)
+        lock.release()
       }
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.detail || 'Failed to start beatmap generation')
+      return
+    }
+    // V2 path: materialise queue from the picker selection and run it.
+    try {
+      const queue = await materializeQueue(activePresets, generation, stem)
+      if (queue.length === 0) {
+        setBatchError('Pick at least one preset (open the cog to edit).')
+        return
       }
-      const { job_id } = await res.json()
-      setBeatmaps((prev) => ({ ...prev, [stem]: { jobId: job_id, state: 'generating' } }))
+      startBatch(stem, queue)
     } catch (e) {
-      setBeatmaps((prev) => ({ ...prev, [stem]: { jobId: '', state: 'error' } }))
       setBatchError((e as Error).message)
-      lock.release()
     }
   }
 
@@ -606,12 +680,13 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                     </div>
                   )}
 
-                  {stem !== 'vocals' && stem !== 'song' && !bm && activePreset && activePreset !== 'v1' && (
+                  {stem !== 'vocals' && stem !== 'song' && !bm && activePresets.length > 0 &&
+                    !(activePresets.length === 1 && activePresets[0] === 'v1') && (
                     <span
                       className="self-center text-[10px] text-gray-500 italic mt-0.5"
-                      title={`Generation preset: ${activePreset}`}
+                      title={`Generation ${activePresets.length === 1 ? 'preset' : 'presets'}: ${activePresets.map((n) => n || 'Custom').join(', ')}`}
                     >
-                      preset: {activePreset}
+                      {activePresets.length === 1 ? 'preset' : 'presets'}: {activePresets.map((n) => n || 'Custom').join(', ')}
                     </span>
                   )}
 
@@ -646,44 +721,73 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                   {bm?.state === 'generating' && !bm.jobId && stem !== 'vocals' && (
                     <div className="flex items-center gap-1.5 mt-1">
                       <div className="animate-spin h-3 w-3 border-2 border-jam-400 border-t-transparent rounded-full" />
-                      <span className="text-xs text-gray-500">Starting...</span>
+                      <span className="text-xs text-gray-500">
+                        Starting{bm.preset !== undefined ? ` "${bm.preset || 'Custom'}"` : ''}...
+                      </span>
                     </div>
                   )}
 
                   {bm?.state === 'generating' && bm.jobId && stem !== 'vocals' && (
-                    <StemBeatmapTracker
-                      beatmapJobId={bm.jobId}
-                      onCancelled={() => {
-                        setBeatmaps((prev) => {
-                          const next = { ...prev }
-                          delete next[stem]
-                          return next
-                        })
-                        lock.release()
-                      }}
-                      onDone={() => {
-                        setBeatmaps((prev) => {
-                          const next = { ...prev }
-                          delete next[stem]
-                          return next
-                        })
-                        lock.release()
-                        refetchBeatmaps()
-                      }}
-                      onError={() => { lock.release() }}
-                      onView={
-                        trackId
-                          ? (id) =>
-                              setStatsBeatmap({
-                                id,
-                                stem,
-                                generated_at: Date.now() / 1000,
-                                folder_name: '',
-                                song_name: `${trackName} (${label})`,
-                              })
-                          : undefined
-                      }
-                    />
+                    <>
+                      {bm.preset !== undefined && (
+                        <div className="text-[10px] text-jam-300 mt-0.5">
+                          Generating "{bm.preset || 'Custom'}"
+                        </div>
+                      )}
+                      <StemBeatmapTracker
+                        key={bm.jobId}
+                        beatmapJobId={bm.jobId}
+                        onCancelled={() => {
+                          setBeatmaps((prev) => {
+                            const next = { ...prev }
+                            delete next[stem]
+                            return next
+                          })
+                          setBeatmapQueue((prev) => { const n = { ...prev }; delete n[stem]; return n })
+                          lock.release()
+                        }}
+                        onDone={() => {
+                          refetchBeatmaps()
+                          const fired = dequeueAndFire(stem)
+                          if (!fired) {
+                            setBeatmaps((prev) => {
+                              const next = { ...prev }
+                              delete next[stem]
+                              return next
+                            })
+                            lock.release()
+                          }
+                          // When fired, dequeueAndFire already replaced
+                          // beatmaps[stem] with the next job — the tracker
+                          // re-keys on the new jobId and starts watching it.
+                        }}
+                        onError={() => {
+                          setBeatmapQueue((prev) => { const n = { ...prev }; delete n[stem]; return n })
+                          lock.release()
+                        }}
+                        onView={
+                          trackId
+                            ? (id) =>
+                                setStatsBeatmap({
+                                  id,
+                                  stem,
+                                  generated_at: Date.now() / 1000,
+                                  folder_name: '',
+                                  song_name: `${trackName} (${label})`,
+                                })
+                            : undefined
+                        }
+                      />
+                    </>
+                  )}
+
+                  {bm?.state === 'generating' && (beatmapQueue[stem]?.length ?? 0) > 0 && (
+                    <div
+                      className="text-[10px] text-gray-500 italic mt-1 truncate"
+                      title="Generations queued behind the active run"
+                    >
+                      queued: {(beatmapQueue[stem] || []).map((q) => q.preset || 'Custom').join(' · ')}
+                    </div>
                   )}
 
                   {bm?.state === 'error' && (
@@ -1053,29 +1157,22 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
 
       {modalStem && trackId && (
         <StemGenerationModal
-          trackId={trackId}
           stem={modalStem}
-          songIni={songIni}
           generation={generation}
-          activePreset={activePreset}
+          activePresets={activePresets}
           onGenerationChange={setGeneration}
-          onActivePresetChange={setActivePreset}
+          onActivePresetsChange={setActivePresets}
           onClose={() => setModalStem(null)}
-          onGenerated={(beatmapJobId) => {
+          onBatchGenerate={(queue) => {
             // Capture modalStem inside the callback — TS doesn't narrow
             // through closure boundaries even though the surrounding
             // `modalStem && trackId &&` already proved it non-null.
             const stem = modalStem
             if (!stem) return
-            // Acquire the same per-stem lock the main button uses so the user
-            // can't kick off a parallel generation on this row while the
-            // modal-started one is in flight. The existing StemBeatmapTracker
-            // SSE callbacks (done/error/cancelled) release the lock.
-            lock.acquire(`beatmap:${stem}`)
-            setBeatmaps((prev) => ({
-              ...prev,
-              [stem]: { jobId: beatmapJobId, state: 'generating' },
-            }))
+            // startBatch acquires the per-stem lock and fires the first
+            // generation; the StemBeatmapTracker's onDone callback chains
+            // through the rest of the queue.
+            startBatch(stem, queue)
           }}
         />
       )}

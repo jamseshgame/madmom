@@ -1,63 +1,38 @@
 import { useState } from 'react'
 import GenerationSettings from './pipeline/GenerationSettings'
-import {
-  GENERATION_STAGE_LABELS,
-  type GenerationStage,
-  type GenerationState,
-} from './pipeline/generationTypes'
+import { type GenerationState, type QueuedGeneration } from './pipeline/generationTypes'
+import { materializeQueue } from './pipeline/queueBuilder'
 import { STEM_COLORS, STEM_LABELS } from './stemDisplay'
 
 interface StemGenerationModalProps {
-  trackId: string
   stem: string
-  songIni: Record<string, string>
   generation: GenerationState
-  activePreset: string
+  activePresets: string[]
   onGenerationChange: (next: GenerationState) => void
-  onActivePresetChange: (name: string) => void
+  onActivePresetsChange: (names: string[]) => void
   onClose: () => void
-  onGenerated: (jobId: string) => void
+  // Called with the resolved queue when the user clicks Generate. The parent
+  // owns sequential firing + per-stem lock holding; the modal just hands off
+  // and closes.
+  onBatchGenerate: (queue: QueuedGeneration[]) => void
 }
 
 export default function StemGenerationModal({
-  trackId, stem, songIni,
-  generation, activePreset,
-  onGenerationChange, onActivePresetChange,
-  onClose, onGenerated,
+  stem,
+  generation, activePresets,
+  onGenerationChange, onActivePresetsChange,
+  onClose, onBatchGenerate,
 }: StemGenerationModalProps) {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
 
   const handleGenerate = async () => {
+    if (activePresets.length === 0) return
     setSubmitting(true)
     setError('')
     try {
-      const formData = new FormData()
-      formData.append('stem', stem)
-      for (const [key, val] of Object.entries(songIni)) {
-        formData.append(key, String(val ?? ''))
-      }
-      for (const stage of Object.keys(GENERATION_STAGE_LABELS) as GenerationStage[]) {
-        const sel = generation[stage]
-        const fieldPrefix =
-          stage === 'lanes_expert' ? 'lanes' :
-          stage === 'lanes_filtered' ? 'playability' :
-          stage
-        formData.append(`${fieldPrefix}_engine`, sel.engine)
-        formData.append(`${fieldPrefix}_params`, JSON.stringify(sel.params))
-      }
-      if (activePreset) formData.append('preset', activePreset)
-
-      const res = await fetch(`/api/tracks/${trackId}/generate-beatmap-v2`, {
-        method: 'POST',
-        body: formData,
-      })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.detail || `HTTP ${res.status}`)
-      }
-      const { job_id } = await res.json()
-      onGenerated(job_id)
+      const queue = await materializeQueue(activePresets, generation, stem)
+      onBatchGenerate(queue)
       onClose()
     } catch (e) {
       setError((e as Error).message)
@@ -65,6 +40,12 @@ export default function StemGenerationModal({
       setSubmitting(false)
     }
   }
+
+  const generateLabel = (() => {
+    if (submitting) return 'Starting…'
+    if (activePresets.length <= 1) return 'Generate Beatmap'
+    return `Generate ${activePresets.length} beatmaps`
+  })()
 
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-start justify-center overflow-y-auto py-8">
@@ -78,10 +59,11 @@ export default function StemGenerationModal({
 
         <div className="p-5 space-y-5 max-h-[70vh] overflow-y-auto">
           <GenerationSettings
+            mode="multi"
             generation={generation}
-            activePreset={activePreset}
+            activePresets={activePresets}
             onGenerationChange={onGenerationChange}
-            onActivePresetChange={onActivePresetChange}
+            onActivePresetsChange={onActivePresetsChange}
             stem={stem}
           />
         </div>
@@ -99,10 +81,11 @@ export default function StemGenerationModal({
           <button
             type="button"
             onClick={handleGenerate}
-            disabled={submitting}
+            disabled={submitting || activePresets.length === 0}
             className="px-6 py-2 bg-jam-600 hover:bg-jam-500 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors"
+            title={activePresets.length === 0 ? 'Pick at least one preset' : undefined}
           >
-            {submitting ? 'Starting…' : 'Generate'}
+            {generateLabel}
           </button>
         </div>
       </div>

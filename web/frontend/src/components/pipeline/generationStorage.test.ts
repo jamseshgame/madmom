@@ -32,9 +32,9 @@ describe('generationStorage', () => {
   })
 
   it('returns defaults when no entry stored', () => {
-    const { generation, activePreset } = loadStoredGeneration()
+    const { generation, activePresets } = loadStoredGeneration()
     expect(generation).toEqual(GENERATION_DEFAULTS)
-    expect(activePreset).toBe('v1')
+    expect(activePresets).toEqual(['v1'])
   })
 
   it('round-trips a stored value', () => {
@@ -42,36 +42,51 @@ describe('generationStorage', () => {
       ...GENERATION_DEFAULTS,
       onsets: { engine: 'aubio-onset', params: { threshold: 0.4 } },
     }
-    saveStoredGeneration(custom, 'v4 — chord-heavy')
+    saveStoredGeneration(custom, ['v4 — chord-heavy', 'v6'])
     const out = loadStoredGeneration()
     expect(out.generation).toEqual(custom)
-    expect(out.activePreset).toBe('v4 — chord-heavy')
+    expect(out.activePresets).toEqual(['v4 — chord-heavy', 'v6'])
   })
 
   it('falls back to defaults when stored JSON is malformed', () => {
     localStorage.setItem(STORAGE_KEY, '{not json')
-    const { generation, activePreset } = loadStoredGeneration()
+    const { generation, activePresets } = loadStoredGeneration()
     expect(generation).toEqual(GENERATION_DEFAULTS)
-    expect(activePreset).toBe('v1')
+    expect(activePresets).toEqual(['v1'])
   })
 
   it('falls back to defaults when stored value is missing keys', () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ generation: { onsets: { engine: 'aubio-onset', params: {} } } }))
-    const { generation, activePreset } = loadStoredGeneration()
+    const { generation, activePresets } = loadStoredGeneration()
     // Missing stages get filled with defaults so the UI doesn't crash on
     // partial state shipped from an older version of the app.
     expect(generation.pitches).toEqual(GENERATION_DEFAULTS.pitches)
     expect(generation.lanes_expert).toEqual(GENERATION_DEFAULTS.lanes_expert)
     expect(generation.onsets).toEqual({ engine: 'aubio-onset', params: {} })
-    expect(activePreset).toBe('v1')
+    expect(activePresets).toEqual(['v1'])
+  })
+
+  it('migrates legacy single-string activePreset to a one-element array', () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ generation: GENERATION_DEFAULTS, activePreset: 'v3 — legacy global bins' }),
+    )
+    const { activePresets } = loadStoredGeneration()
+    expect(activePresets).toEqual(['v3 — legacy global bins'])
+  })
+
+  it('preserves the empty-string ("Custom") entry in the activePresets array', () => {
+    saveStoredGeneration(GENERATION_DEFAULTS, ['', 'v1'])
+    const { activePresets } = loadStoredGeneration()
+    expect(activePresets).toEqual(['', 'v1'])
   })
 
   it('save followed by clear-and-reload returns defaults', () => {
-    saveStoredGeneration(GENERATION_DEFAULTS, 'v2 — tonal (key-relative)')
+    saveStoredGeneration(GENERATION_DEFAULTS, ['v2 — tonal (key-relative)'])
     localStorage.clear()
-    const { generation, activePreset } = loadStoredGeneration()
+    const { generation, activePresets } = loadStoredGeneration()
     expect(generation).toEqual(GENERATION_DEFAULTS)
-    expect(activePreset).toBe('v1')
+    expect(activePresets).toEqual(['v1'])
   })
 
   it('saveStoredGeneration tolerates localStorage quota errors silently', () => {
@@ -80,7 +95,7 @@ describe('generationStorage', () => {
       throw new Error('QuotaExceededError')
     }
     try {
-      expect(() => saveStoredGeneration(GENERATION_DEFAULTS, 'v1')).not.toThrow()
+      expect(() => saveStoredGeneration(GENERATION_DEFAULTS, ['v1'])).not.toThrow()
     } finally {
       Storage.prototype.setItem = original
     }
