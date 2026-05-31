@@ -1011,7 +1011,10 @@ function loadView3d(): View3DState {
     const raw = localStorage.getItem('editor.view3d')
     if (!raw) return VIEW3D_DEFAULT
     const parsed = JSON.parse(raw) as Partial<View3DState>
-    return { ...VIEW3D_DEFAULT, ...parsed }
+    // Always open in the 2D editing view — the 3D preview is a per-session
+    // toggle, not a remembered state. The user's persisted mesh/angle/texture
+    // prefs still load, so their 3D setup is intact the moment they re-enable.
+    return { ...VIEW3D_DEFAULT, ...parsed, enabled: false }
   } catch {
     return VIEW3D_DEFAULT
   }
