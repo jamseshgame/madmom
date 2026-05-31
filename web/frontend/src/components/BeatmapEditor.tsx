@@ -2763,6 +2763,12 @@ export default function BeatmapEditor() {
   const [saveMsg, setSaveMsg] = useState('')
   const [dirty, setDirty] = useState(false)
   const [snapDivisor, setSnapDivisor] = useState(4)
+  // Clone-difficulty picker: copy one difficulty's notes into another.
+  // Empty string = "use the active difficulty" so the controls have a sane
+  // default before the user touches them.
+  const [cloneFrom, setCloneFrom] = useState('')
+  const [cloneTo, setCloneTo] = useState('')
+  const [cloneMsg, setCloneMsg] = useState('')
 
   // Piecewise tempo map — recomputed whenever the chart's markers or
   // resolution change. Every tick↔seconds conversion in the editor (canvas
@@ -5977,6 +5983,57 @@ export default function BeatmapEditor() {
     setHistoryTick((n) => n + 1)
   }
 
+  // Copy every note from one difficulty section into another. Source/target
+  // are full section names (e.g. 'ExpertSingle'). The clone fully replaces the
+  // target's notes (N/R lines + slides/sustains carried by ChartNote); the
+  // target's star power, anchors and other E events pass through untouched.
+  // Lives only in memory until Save, like every other edit.
+  const cloneDifficulty = (from: string, to: string) => {
+    if (!chart || from === to) return
+    // Flush the active section's in-memory notes back into fullText so a clone
+    // that reads from (or the active difficulty) sees the latest edits.
+    let newFull = replaceSectionNotes(chart.fullText, chart.activeName, chart.notes)
+    const sourceNotes =
+      from === chart.activeName ? chart.notes : parseSectionNotes(newFull, from, chart.resolution)
+    const targetCount =
+      to === chart.activeName
+        ? chart.notes.length
+        : chart.availableSections.includes(to)
+          ? parseSectionNotes(newFull, to, chart.resolution).length
+          : 0
+    if (
+      targetCount > 0 &&
+      !window.confirm(
+        `${to} already has ${targetCount} note${targetCount === 1 ? '' : 's'}. ` +
+          `Replace ${targetCount === 1 ? 'it' : 'them'} with ${sourceNotes.length} note` +
+          `${sourceNotes.length === 1 ? '' : 's'} from ${from}?`,
+      )
+    ) {
+      return
+    }
+    newFull = replaceSectionNotes(newFull, to, sourceNotes)
+    const nextAvailable = chart.availableSections.includes(to)
+      ? chart.availableSections
+      : [...chart.availableSections, to]
+    if (to === chart.activeName) {
+      // Cloning into the section we're viewing — reflect the new notes right
+      // away and reset history (a wholesale replacement isn't a single
+      // undoable edit).
+      const newNotes = parseSectionNotes(newFull, to, chart.resolution)
+      setChart({ ...chart, fullText: newFull, notes: newNotes, availableSections: nextAvailable })
+      setSelectedIds(new Set())
+      historyRef.current = []
+      futureRef.current = []
+      setHistoryTick((n) => n + 1)
+    } else {
+      setChart({ ...chart, fullText: newFull, availableSections: nextAvailable })
+    }
+    setDirty(true)
+    setCloneMsg(
+      `Cloned ${sourceNotes.length} note${sourceNotes.length === 1 ? '' : 's'}: ${from} → ${to}. Save to write to disk.`,
+    )
+  }
+
   const togglePlay = () => {
     const a = audioRef.current
     if (!a) return
@@ -6965,6 +7022,52 @@ export default function BeatmapEditor() {
                     return <option key={s} value={s}>{`${s} · ${tag}`}</option>
                   })}
                 </select>
+                {(() => {
+                  // Clone notes from one difficulty into another. Default both
+                  // ends to the active difficulty so the picker opens on a
+                  // sensible (no-op) state until the user changes one.
+                  const from = cloneFrom || chart.activeName
+                  const to = cloneTo || chart.activeName
+                  const optLabel = (s: string) => {
+                    const exists = chart.availableSections.includes(s)
+                    const tag = exists ? `${noteCountOf(s)} note${noteCountOf(s) === 1 ? '' : 's'}` : 'empty'
+                    return `${s} · ${tag}`
+                  }
+                  return (
+                    <div className="mt-3 pt-3 border-t border-gray-800">
+                      <span className="text-[10px] uppercase tracking-wider text-gray-500 block mb-1.5">Clone difficulty</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[11px] text-gray-500 w-9 shrink-0">From</span>
+                        <select
+                          value={from}
+                          onChange={(e) => { setCloneFrom(e.target.value); setCloneMsg('') }}
+                          className="flex-1 min-w-0 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-200 focus:outline-none focus:border-jam-500"
+                        >
+                          {allNames.map((s) => <option key={s} value={s}>{optLabel(s)}</option>)}
+                        </select>
+                      </div>
+                      <div className="flex items-center gap-1.5 mt-1.5">
+                        <span className="text-[11px] text-gray-500 w-9 shrink-0">To</span>
+                        <select
+                          value={to}
+                          onChange={(e) => { setCloneTo(e.target.value); setCloneMsg('') }}
+                          className="flex-1 min-w-0 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-200 focus:outline-none focus:border-jam-500"
+                        >
+                          {allNames.map((s) => <option key={s} value={s}>{optLabel(s)}</option>)}
+                        </select>
+                      </div>
+                      <button
+                        onClick={() => cloneDifficulty(from, to)}
+                        disabled={from === to}
+                        className="mt-2 w-full px-3 py-1.5 rounded text-[11px] font-medium bg-gray-800 hover:bg-gray-700 disabled:opacity-30 disabled:cursor-not-allowed text-gray-200 border border-gray-700"
+                        title={from === to ? 'Pick two different difficulties' : `Copy ${from} notes into ${to}`}
+                      >
+                        Clone {from === to ? '' : `${from.replace(/Single|Drums|DoubleBass|DoubleGuitar|Keyboard/, '')} → ${to.replace(/Single|Drums|DoubleBass|DoubleGuitar|Keyboard/, '')}`}
+                      </button>
+                      {cloneMsg && <p className="mt-1.5 text-[10px] text-emerald-400 leading-snug">{cloneMsg}</p>}
+                    </div>
+                  )
+                })()}
               </CollapsibleSection>
             )
           })()}
