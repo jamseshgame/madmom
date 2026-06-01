@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import time
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -83,3 +82,27 @@ def test_clone_difficulty_missing_source_section_422(client):
         'target_difficulty': 'HardSingle',
     })
     assert r.status_code == 422, r.text
+
+
+def test_list_difficulties_unknown_beatmap_404(client):
+    r = client.get('/api/tracks/trk1/beatmaps/ghost/difficulties')
+    assert r.status_code == 404, r.text
+
+
+def test_list_difficulties_empty_when_no_chart(client):
+    # Point the beatmap dir at one with no notes.chart by removing src's chart.
+    from app.services.tracks import get_beatmap_dir
+    chart = get_beatmap_dir('trk1', 'src') / 'notes.chart'
+    chart.unlink()
+    r = client.get('/api/tracks/trk1/beatmaps/src/difficulties')
+    assert r.status_code == 200, r.text
+    assert r.json() == {'difficulties': []}
+
+
+def test_clone_difficulty_missing_source_section_detail(client):
+    r = client.post('/api/tracks/trk1/beatmaps/dst/clone-difficulty', json={
+        'source_beatmap_id': 'src', 'source_difficulty': 'MediumSingle',
+        'target_difficulty': 'HardSingle',
+    })
+    assert r.status_code == 422, r.text
+    assert 'MediumSingle' in r.json()['detail']

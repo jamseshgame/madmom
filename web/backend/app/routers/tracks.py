@@ -886,6 +886,8 @@ async def clone_beatmap_difficulty(
     """Copy one difficulty from `source_beatmap_id` into this (`target_id`)
     beatmap's chart, under `target_difficulty`. Both beatmaps must be on the
     same stem. Overwrites the target difficulty in place."""
+    if not get_beatmap_dir(track_id, target_id):
+        raise HTTPException(404, 'Beatmap not found')
     try:
         result = clone_difficulty_across_beatmaps(
             track_id, source_beatmap_id, source_difficulty, target_id, target_difficulty
@@ -893,7 +895,7 @@ async def clone_beatmap_difficulty(
     except CloneDifficultyError as exc:
         raise HTTPException(422, str(exc))
     if result is None:
-        raise HTTPException(404, 'Track, beatmap, or notes.chart not found')
+        raise HTTPException(404, 'Source beatmap or notes.chart not found')
     return result
 
 
