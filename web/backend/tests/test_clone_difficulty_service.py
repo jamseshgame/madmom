@@ -97,3 +97,15 @@ def test_clone_unknown_beatmap_returns_none(track_with_two_guitar_beatmaps):
     from app.services.tracks import clone_difficulty_across_beatmaps
     tid, _ = track_with_two_guitar_beatmaps
     assert clone_difficulty_across_beatmaps(tid, 'nope', 'ExpertSingle', 'dst', 'HardSingle') is None
+
+
+def test_clone_same_beatmap_remaps_difficulty(track_with_two_guitar_beatmaps):
+    """source==target is well-defined: copy one difficulty into another slot of
+    the same beatmap."""
+    from app.services.tracks import clone_difficulty_across_beatmaps
+    tid, bdir = track_with_two_guitar_beatmaps
+    result = clone_difficulty_across_beatmaps(tid, 'dst', 'ExpertSingle', 'dst', 'HardSingle')
+    assert result['overwrote'] is True
+    txt = (bdir / 'dst' / 'notes.chart').read_text(encoding='utf-8')
+    # dst's Expert ('  0 = N 4 0') is now also its Hard.
+    assert '[HardSingle]\n{\n  0 = N 4 0\n}\n' in txt

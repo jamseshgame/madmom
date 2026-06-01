@@ -342,8 +342,11 @@ def clone_difficulty_across_beatmaps(
     if src is None or tgt is None:
         return None
 
-    src_stem = src.get('stem', '')
-    if src_stem != tgt.get('stem', ''):
+    src_stem = src.get('stem') or ''
+    tgt_stem = tgt.get('stem') or ''
+    if not src_stem:
+        raise CloneDifficultyError('source beatmap has no stem')
+    if src_stem != tgt_stem:
         raise CloneDifficultyError('source and target beatmaps are on different stems')
     suffix = STEM_TO_SECTION_SUFFIX.get(src_stem)
     if not suffix:
@@ -359,8 +362,11 @@ def clone_difficulty_across_beatmaps(
     if not src_chart.exists() or not tgt_chart.exists():
         return None
 
-    src_text = src_chart.read_text(encoding='utf-8', errors='replace')
-    tgt_text = tgt_chart.read_text(encoding='utf-8', errors='replace')
+    try:
+        src_text = src_chart.read_text(encoding='utf-8')
+        tgt_text = tgt_chart.read_text(encoding='utf-8')
+    except UnicodeDecodeError as exc:
+        raise CloneDifficultyError(f'chart file is not valid UTF-8: {exc}') from exc
     try:
         new_text, overwrote = splice_difficulty(
             src_text, source_difficulty, tgt_text, target_difficulty
