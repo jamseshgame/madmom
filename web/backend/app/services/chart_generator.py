@@ -68,6 +68,91 @@ STEM_TO_SECTION_SUFFIX: dict[str, str] = {
 }
 
 
+_DIFFICULTY_PREFIXES = ('Expert', 'Hard', 'Medium', 'Easy')
+
+
+def _read_resolution(chart_text: str) -> int | None:
+    """Parse `[Song] Resolution = N`. Returns None if not found."""
+    m = re.search(r'\[Song\]\s*\{([^}]*)\}', chart_text)
+    if not m:
+        return None
+    rm = re.search(r'(?im)^\s*Resolution\s*=\s*(\d+)', m.group(1))
+    return int(rm.group(1)) if rm else None
+
+
+def _extract_section_body(chart_text: str, section: str) -> str | None:
+    """Return the brace body of [section], or None if the section is absent."""
+    m = re.search(r'\[' + re.escape(section) + r'\]\s*\{([^}]*)\}', chart_text)
+    return m.group(1) if m else None
+
+
+def _rescale_block(body: str, ratio: float) -> str:
+    """Scale the leading tick of each `  <tick> = <event>` line by `ratio`.
+    Non-event lines (blank, braces already stripped) pass through unchanged."""
+    if ratio == 1.0:
+        return body
+    out = []
+    for line in body.split('\n'):
+        m = re.match(r'^(\s*)(\d+)(\s*=.*)$', line)
+        if m:
+            out.append(f'{m.group(1)}{round(int(m.group(2)) * ratio)}{m.group(3)}')
+        else:
+            out.append(line)
+    return '\n'.join(out)
+
+
+def splice_difficulty(
+    source_chart_text: str,
+    source_difficulty: str,
+    target_chart_text: str,
+    target_difficulty: str,
+) -> tuple[str, bool]:
+    """Lift `[source_difficulty]` out of the source chart and write it into the
+    target chart as `[target_difficulty]`, rescaling note ticks when the two
+    charts have different `[Song] Resolution`. Replaces an existing target block
+    in place (preserving every other section) or appends if the slot is empty.
+
+    Returns `(new_target_chart_text, overwrote)` where `overwrote` is True when
+    the target slot already held a block. Raises ValueError if the source chart
+    has no `[source_difficulty]` section.
+    """
+    src_body = _extract_section_body(source_chart_text, source_difficulty)
+    if src_body is None:
+        raise ValueError(f'source chart has no [{source_difficulty}] section')
+
+    src_res = _read_resolution(source_chart_text)
+    tgt_res = _read_resolution(target_chart_text)
+    ratio = (tgt_res / src_res) if (src_res and tgt_res and src_res != tgt_res) else 1.0
+    new_body = _rescale_block(src_body, ratio)
+    new_block = f'[{target_difficulty}]\n{{{new_body}}}\n'
+
+    pattern = re.compile(r'\[' + re.escape(target_difficulty) + r'\]\s*\{[^}]*\}\n?')
+    if pattern.search(target_chart_text):
+        # Use a function replacement so backslashes/braces in new_block are literal.
+        return pattern.sub(lambda _m: new_block, target_chart_text, count=1), True
+
+    sep = '' if (not target_chart_text or target_chart_text.endswith('\n')) else '\n'
+    return target_chart_text + sep + new_block, False
+
+
+def chart_difficulties(chart_text: str) -> list[dict]:
+    """List the difficulty sections present in a chart as
+    `[{'name': 'ExpertSingle', 'note_count': 12}, ...]`. Only sections whose
+    name is `<prefix><suffix>` (e.g. ExpertSingle, HardDrums) are reported;
+    `[Song]`/`[SyncTrack]`/`[Events]`/`[Beatmaps]` are skipped."""
+    suffixes = set(STEM_TO_SECTION_SUFFIX.values())
+    out: list[dict] = []
+    for m in re.finditer(r'\[([A-Za-z]+)\]\s*\{([^}]*)\}', chart_text):
+        name = m.group(1)
+        if not any(name.startswith(p) for p in _DIFFICULTY_PREFIXES):
+            continue
+        if not any(name.endswith(s) for s in suffixes):
+            continue
+        note_count = sum(1 for ln in m.group(2).split('\n') if re.search(r'=\s*N\s', ln))
+        out.append({'name': name, 'note_count': note_count})
+    return out
+
+
 def _normalise_bpm(bpm: float) -> float:
     """Constrain wildly off tempo estimates back into a typical band.
 
