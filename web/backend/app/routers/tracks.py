@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from ..config import settings
 from ..services.audio import compute_audio_peaks, resize_to_square_png
-from ..services.chart_generator import generate_full_chart
+from ..services.chart_generator import chart_difficulties, generate_full_chart
 from ..services.game_songs import _parse_song_ini
 from ..services.github_publisher import publish_song_folder
 from ..services.jobs import JobKind, JobStatus, create_job, get_job
@@ -24,6 +24,9 @@ from ..services import sample_packs
 from ..services.stems import DEMUCS_TO_GAME, _convert_to_ogg, write_song_ini
 from ..services.tracks import (
     add_beatmap_record,
+    CloneDifficultyError,
+    clone_beatmap_record,
+    clone_difficulty_across_beatmaps,
     create_track,
     delete_beatmap_record,
     delete_track,
@@ -32,7 +35,6 @@ from ..services.tracks import (
     get_track_enriched,
     list_tracks,
     read_elevenlabs_voice,
-    clone_beatmap_record,
     rename_beatmap_record,
     set_active_beatmap,
     set_beatmap_included,
@@ -855,6 +857,44 @@ async def toggle_beatmap_included(
     if record is None:
         raise HTTPException(404, 'Beatmap not found')
     return record
+
+
+@router.get('/{track_id}/beatmaps/{beatmap_id}/difficulties')
+async def list_beatmap_difficulties(track_id: str, beatmap_id: str):
+    """List the difficulty sections present in a beatmap's notes.chart, with a
+    note count per section. Drives the clone-difficulty picker (which source
+    difficulties exist) and the overwrite warning (does the target slot already
+    have notes)."""
+    bm_dir = get_beatmap_dir(track_id, beatmap_id)
+    if not bm_dir:
+        raise HTTPException(404, 'Beatmap not found')
+    chart_path = bm_dir / 'notes.chart'
+    if not chart_path.exists():
+        return {'difficulties': []}
+    text = chart_path.read_text(encoding='utf-8', errors='replace')
+    return {'difficulties': chart_difficulties(text)}
+
+
+@router.post('/{track_id}/beatmaps/{target_id}/clone-difficulty')
+async def clone_beatmap_difficulty(
+    track_id: str,
+    target_id: str,
+    source_beatmap_id: str = Body(...),
+    source_difficulty: str = Body(...),
+    target_difficulty: str = Body(...),
+):
+    """Copy one difficulty from `source_beatmap_id` into this (`target_id`)
+    beatmap's chart, under `target_difficulty`. Both beatmaps must be on the
+    same stem. Overwrites the target difficulty in place."""
+    try:
+        result = clone_difficulty_across_beatmaps(
+            track_id, source_beatmap_id, source_difficulty, target_id, target_difficulty
+        )
+    except CloneDifficultyError as exc:
+        raise HTTPException(422, str(exc))
+    if result is None:
+        raise HTTPException(404, 'Track, beatmap, or notes.chart not found')
+    return result
 
 
 @router.post('/{track_id}/empty-beatmap')
