@@ -310,6 +310,74 @@ def clone_beatmap_record(track_id: str, beatmap_id: str) -> dict | None:
     return record
 
 
+class CloneDifficultyError(Exception):
+    """Raised for cross-stem / mismatched-family / missing-source-section
+    clone-difficulty attempts. The router maps it to HTTP 422."""
+
+
+def clone_difficulty_across_beatmaps(
+    track_id: str,
+    source_beatmap_id: str,
+    source_difficulty: str,
+    target_beatmap_id: str,
+    target_difficulty: str,
+) -> dict | None:
+    """Copy one difficulty section from one beatmap's notes.chart into another
+    beatmap's notes.chart on the same track. Both beatmaps must be on the same
+    stem; source/target difficulty names must belong to that stem's section
+    family (remap across difficulties is allowed). Overwrites the target
+    difficulty in place, preserving every other section.
+
+    Returns a result dict, or None when the track / either beatmap record /
+    either notes.chart is missing. Raises CloneDifficultyError on validation
+    failures (cross-stem, mismatched family, source section absent).
+    """
+    from app.services.chart_generator import STEM_TO_SECTION_SUFFIX, splice_difficulty
+
+    track = Track.load(track_id)
+    if not track:
+        return None
+    src = next((b for b in track.beatmaps if b.get('id') == source_beatmap_id), None)
+    tgt = next((b for b in track.beatmaps if b.get('id') == target_beatmap_id), None)
+    if src is None or tgt is None:
+        return None
+
+    src_stem = src.get('stem', '')
+    if src_stem != tgt.get('stem', ''):
+        raise CloneDifficultyError('source and target beatmaps are on different stems')
+    suffix = STEM_TO_SECTION_SUFFIX.get(src_stem)
+    if not suffix:
+        raise CloneDifficultyError(f'stem {src_stem!r} has no chart section family')
+    valid = {f'{p}{suffix}' for p in ('Expert', 'Hard', 'Medium', 'Easy')}
+    if source_difficulty not in valid or target_difficulty not in valid:
+        raise CloneDifficultyError(
+            f'difficulty must be one of {sorted(valid)} for stem {src_stem!r}'
+        )
+
+    src_chart = track.beatmaps_dir / source_beatmap_id / 'notes.chart'
+    tgt_chart = track.beatmaps_dir / target_beatmap_id / 'notes.chart'
+    if not src_chart.exists() or not tgt_chart.exists():
+        return None
+
+    src_text = src_chart.read_text(encoding='utf-8', errors='replace')
+    tgt_text = tgt_chart.read_text(encoding='utf-8', errors='replace')
+    try:
+        new_text, overwrote = splice_difficulty(
+            src_text, source_difficulty, tgt_text, target_difficulty
+        )
+    except ValueError as exc:
+        raise CloneDifficultyError(str(exc))
+    tgt_chart.write_text(new_text, encoding='utf-8')
+
+    return {
+        'target_beatmap_id': target_beatmap_id,
+        'target_difficulty': target_difficulty,
+        'source_beatmap_id': source_beatmap_id,
+        'source_difficulty': source_difficulty,
+        'overwrote': overwrote,
+    }
+
+
 def set_active_beatmap(track_id: str, beatmap_id: str) -> dict | None:
     """Mark `beatmap_id` as the active beatmap for its stem. Returns the
     updated record, or None if not found."""
