@@ -17,6 +17,7 @@ import {
 import { materializeQueue } from '../components/pipeline/queueBuilder'
 import GenerationSettings from '../components/pipeline/GenerationSettings'
 import { STEM_COLORS, STEM_LABELS } from '../components/stemDisplay'
+import CloneDifficultyModal, { ChartRow } from '../components/tracks/CloneDifficultyModal'
 
 type BeatmapRecord = BeatmapStatsRecord
 
@@ -1068,6 +1069,7 @@ function TracksPageInner() {
   const [confirmDelete, setConfirmDelete] = useState<Track | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [statsBeatmap, setStatsBeatmap] = useState<BeatmapRecord | null>(null)
+  const [cloneDiffFor, setCloneDiffFor] = useState<ChartRow | null>(null)
   const [coverFetchState, setCoverFetchState] = useState<'idle' | 'loading' | 'none' | 'error'>('idle')
   // Inline beatmap generation: per-stem job id when one is in flight, plus
   // tickbox selection for the batch-generate button below the stem grid.
@@ -1854,6 +1856,20 @@ function TracksPageInner() {
                             isAdmin={me.role === 'admin'}
                           />
                         )}
+                        {(selectedTrack.beatmaps || []).filter((b) => b.stem === bm.stem).length > 1 && (
+                          <button
+                            className="shrink-0 rounded border border-slate-600 px-2 py-0.5 text-[10px] text-slate-300 hover:bg-slate-700"
+                            onClick={() =>
+                              setCloneDiffFor({
+                                id: bm.id,
+                                stem: bm.stem,
+                                label: presetName ? presetName : modelLabel,
+                              })
+                            }
+                          >
+                            Clone diff
+                          </button>
+                        )}
                         <button
                           onClick={async () => {
                             const msg = isActive
@@ -2177,6 +2193,24 @@ function TracksPageInner() {
               setStatsBeatmap(null)
               navigate(`/edit/${selectedTrack.id}/${cloned.id}`)
             }}
+          />
+        )}
+
+        {cloneDiffFor && selectedTrack && (
+          <CloneDifficultyModal
+            trackId={selectedTrack.id}
+            source={cloneDiffFor}
+            targets={(selectedTrack.beatmaps || [])
+              .filter((b) => b.stem === cloneDiffFor!.stem && b.id !== cloneDiffFor!.id)
+              .map((b) => {
+                const bPreset = (b.preset || '').trim()
+                const bModel = (b.model || 'madmom').toLowerCase()
+                const bModelVer = (b.model_version || '').trim()
+                const bModelLabel = bModelVer ? `${bModel.toUpperCase()} ${bModelVer}` : bModel.toUpperCase()
+                return { id: b.id, stem: b.stem, label: bPreset ? bPreset : bModelLabel }
+              })}
+            onClose={() => setCloneDiffFor(null)}
+            onDone={() => { loadTracks() }}
           />
         )}
 
