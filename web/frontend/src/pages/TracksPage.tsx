@@ -1070,6 +1070,7 @@ function TracksPageInner() {
   const [deleting, setDeleting] = useState(false)
   const [statsBeatmap, setStatsBeatmap] = useState<BeatmapRecord | null>(null)
   const [cloneDiffFor, setCloneDiffFor] = useState<ChartRow | null>(null)
+  const [cloneDiffMsg, setCloneDiffMsg] = useState('')
   const [coverFetchState, setCoverFetchState] = useState<'idle' | 'loading' | 'none' | 'error'>('idle')
   // Inline beatmap generation: per-stem job id when one is in flight, plus
   // tickbox selection for the batch-generate button below the stem grid.
@@ -1859,13 +1860,14 @@ function TracksPageInner() {
                         {(selectedTrack.beatmaps || []).filter((b) => b.stem === bm.stem).length > 1 && (
                           <button
                             className="shrink-0 rounded border border-slate-600 px-2 py-0.5 text-[10px] text-slate-300 hover:bg-slate-700"
-                            onClick={() =>
+                            onClick={() => {
+                              setCloneDiffMsg('')
                               setCloneDiffFor({
                                 id: bm.id,
                                 stem: bm.stem,
                                 label: presetName ? presetName : modelLabel,
                               })
-                            }
+                            }}
                           >
                             Clone diff
                           </button>
@@ -2196,6 +2198,13 @@ function TracksPageInner() {
           />
         )}
 
+        {cloneDiffMsg && (
+          <div className="mt-2 flex items-center justify-between rounded bg-green-900/40 px-3 py-1.5 text-sm text-green-300">
+            <span>{cloneDiffMsg}</span>
+            <button className="text-green-400 hover:text-green-200" onClick={() => setCloneDiffMsg('')}>×</button>
+          </div>
+        )}
+
         {cloneDiffFor && selectedTrack && (
           <CloneDifficultyModal
             trackId={selectedTrack.id}
@@ -2210,7 +2219,7 @@ function TracksPageInner() {
                 return { id: b.id, stem: b.stem, label: bPreset ? bPreset : bModelLabel }
               })}
             onClose={() => setCloneDiffFor(null)}
-            onDone={() => { loadTracks() }}
+            onDone={(msg) => { setCloneDiffMsg(msg); loadTracks() }}
           />
         )}
 

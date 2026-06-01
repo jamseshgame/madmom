@@ -1,5 +1,16 @@
 import { useEffect, useMemo, useState } from 'react'
 
+// Mirrors STEM_TO_SECTION_SUFFIX in the backend (chart_generator.py). Used only
+// as a fallback when the source chart has no sections to derive the suffix from.
+const STEM_SECTION_SUFFIX: Record<string, string> = {
+  guitar: 'Single',
+  drums: 'Drums',
+  bass: 'DoubleBass',
+  rhythm: 'DoubleBass',
+  piano: 'Keyboard',
+  song: 'Single',
+}
+
 export interface ChartRow {
   id: string
   stem: string
@@ -40,9 +51,11 @@ export default function CloneDifficultyModal({ trackId, source, targets, onClose
   // Difficulty slots for this stem's section family — derived from whatever
   // sections the source chart exposes (they share the stem suffix).
   const suffix = useMemo(() => {
-    const any = sourceDiffs[0]?.name ?? 'ExpertSingle'
-    return any.replace(/^(Expert|Hard|Medium|Easy)/, '')
-  }, [sourceDiffs])
+    if (sourceDiffs.length > 0) {
+      return sourceDiffs[0].name.replace(/^(Expert|Hard|Medium|Easy)/, '')
+    }
+    return STEM_SECTION_SUFFIX[source.stem] ?? 'Single'
+  }, [sourceDiffs, source.stem])
   const allSlots = useMemo(
     () => ['Expert', 'Hard', 'Medium', 'Easy'].map((p) => `${p}${suffix}`),
     [suffix],
@@ -55,13 +68,28 @@ export default function CloneDifficultyModal({ trackId, source, targets, onClose
     })
   }, [trackId, source.id])
 
+  // Fetch the target chart's existing difficulties whenever the target changes.
   useEffect(() => {
     if (!targetId) return
     fetchDiffs(trackId, targetId).then((d) => {
       setTargetDiffs(d)
-      setTargetDiff(d[0]?.name ?? allSlots[0] ?? '')
+      setTargetDiff(d[0]?.name ?? '')
     })
-  }, [trackId, targetId, allSlots])
+  }, [trackId, targetId])
+
+  // Once the stem's slot list is known (source loaded), seed the target
+  // difficulty if the fetch above didn't already pick one.
+  useEffect(() => {
+    if (!targetDiff) setTargetDiff(allSlots[0] ?? '')
+  }, [allSlots, targetDiff])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !busy) onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose, busy])
 
   const targetHasNotes =
     targetDiffs.find((d) => d.name === targetDiff && d.note_count > 0) != null
@@ -98,7 +126,7 @@ export default function CloneDifficultyModal({ trackId, source, targets, onClose
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
       <div
-        className="w-[420px] rounded-lg bg-slate-800 p-5 shadow-xl"
+        className="w-full max-w-md mx-4 rounded-lg bg-slate-800 p-5 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <h3 className="mb-1 text-lg font-semibold text-white">Clone difficulty</h3>
