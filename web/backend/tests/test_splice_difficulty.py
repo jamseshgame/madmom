@@ -3,6 +3,8 @@ difficulty clone. No filesystem or audio — just chart text in/out.
 """
 from __future__ import annotations
 
+import pytest
+
 from app.services.chart_generator import chart_difficulties, splice_difficulty
 
 
@@ -46,11 +48,8 @@ def test_splice_inserts_when_target_slot_empty():
 def test_splice_missing_source_difficulty_raises():
     src = _chart(expert='  0 = N 0 0')
     tgt = _chart(expert='  0 = N 0 0')
-    try:
+    with pytest.raises(ValueError, match='HardSingle'):
         splice_difficulty(src, 'HardSingle', tgt, 'HardSingle')
-        assert False, 'expected ValueError'
-    except ValueError as e:
-        assert 'HardSingle' in str(e)
 
 
 def test_splice_remap_writes_under_target_name():

@@ -89,6 +89,7 @@ def _extract_section_body(chart_text: str, section: str) -> str | None:
 def _rescale_block(body: str, ratio: float) -> str:
     """Scale the leading tick of each `  <tick> = <event>` line by `ratio`.
     Non-event lines (blank, braces already stripped) pass through unchanged."""
+    body = body.replace('\r\n', '\n')
     if ratio == 1.0:
         return body
     out = []
