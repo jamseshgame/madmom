@@ -14,6 +14,7 @@ import { SourcePickerModal } from './SourcePickerModal'
 import { GenerateTab } from './pipeline/GenerateTab'
 import FeedbackPanel from './feedback/FeedbackPanel'
 import { importSlides, buildSlideEmitInfo, groupSlides, nextSlideId, pruneSlides, type SlideEvent } from '../chart/slides'
+import { checkNoteRules, autoCleanNotes, ruleRemovalCount } from '../chart/noteRules'
 
 // .chart parsing ------------------------------------------------------------
 
@@ -294,61 +295,6 @@ function buildTempoSegments(markers: TempoMarker[], _resolution: number): TempoS
 // segment whose start tick is ≤ the query tick, then extrapolates within it
 // at that segment's tempo. Constant-tempo charts hit the first segment and
 // degenerate to the old (tick / resolution) * (60 / bpm) formula.
-// Chart authoring rules — enforced when committing edits.
-//
-//   R1: At most 2 gem notes (lanes 0–4) on a single tick. Open notes (lane 7)
-//       are mutually exclusive with gems at the same tick and count as 1.
-//   R2: A "chord" must be exactly aligned: any two gem notes in different
-//       lanes within CHORD_NEAR ticks of each other must share a tick. This
-//       catches near-miss authoring slip-ups (e.g. dragging a chord partner
-//       off by 1/32) without flagging legitimate fast runs at higher snap.
-//
-// Pure function — returns null when the chart is clean, or a human-readable
-// message describing the first violation found.
-function checkNoteRules(notes: ChartNote[], resolution: number): string | null {
-  const CHORD_NEAR = Math.max(1, Math.round(resolution / 16))  // ≈ 1/16 beat
-  // Group gem + open notes by tick. Modifiers (lanes 5/6) are skipped — they
-  // attach to the underlying note and don't add to the chord count.
-  // Slide-tagged notes are also excluded: a slide is a run of sequential notes,
-  // not a chord — synthesised slide-start notes must not inflate the per-tick
-  // count and falsely block commits on unrelated edits.
-  const tickLanes = new Map<number, number[]>()
-  for (const n of notes) {
-    if (n.lane > 4 && n.lane !== 7) continue
-    if (n.slideId != null) continue   // slides are runs, not chords
-    const arr = tickLanes.get(n.tick)
-    if (arr) arr.push(n.lane); else tickLanes.set(n.tick, [n.lane])
-  }
-  // R1: max 2 notes per tick. An open + any gem at the same tick is a
-  // gameplay-conflict (open = full strum) → also flagged.
-  for (const [tick, lanes] of tickLanes) {
-    if (lanes.length > 2) {
-      return `Max 2 notes per beat (tick ${tick} has ${lanes.length})`
-    }
-    if (lanes.length === 2 && lanes.includes(7)) {
-      return `Open notes can't be chorded with gems (tick ${tick})`
-    }
-  }
-  // R2: near-miss chord check. Walk gem notes in tick order — any two within
-  // CHORD_NEAR ticks that are NOT at the same tick are a misaligned chord.
-  const gems = notes
-    .filter((n) => n.lane <= 4)
-    .map((n) => ({ tick: n.tick, lane: n.lane }))
-    .sort((a, b) => a.tick - b.tick)
-  for (let i = 0; i < gems.length; i++) {
-    for (let j = i + 1; j < gems.length; j++) {
-      const a = gems[i], b = gems[j]
-      const gap = b.tick - a.tick
-      if (gap === 0) continue          // same-tick chord — counted by R1
-      if (gap >= CHORD_NEAR) break     // sorted: nothing closer further on
-      if (b.lane !== a.lane) {
-        return `Chord notes must share a tick (ticks ${a.tick} and ${b.tick} are too close)`
-      }
-    }
-  }
-  return null
-}
-
 function tickToSec(segs: TempoSegment[], resolution: number, tick: number): number {
   if (tick <= 0 || segs.length === 0) return 0
   let i = segs.length - 1
@@ -3843,10 +3789,15 @@ export default function BeatmapEditor() {
     let rejected = false
     setChart((prev) => {
       if (!prev) return prev
-      const err = checkNoteRules(nextNotes, prev.resolution)
-      if (err) {
+      // Gate on whether the edit makes the chart *worse*, not whether the result
+      // is perfectly clean. This lets users keep editing — and delete their way
+      // out of — a chart that arrived already containing violations (e.g. from
+      // generation/import), while still blocking edits that add new violations.
+      const before = ruleRemovalCount(prev.notes, prev.resolution)
+      const after = ruleRemovalCount(nextNotes, prev.resolution)
+      if (after > before) {
         rejected = true
-        flashRuleError(err)
+        flashRuleError(checkNoteRules(nextNotes, prev.resolution) ?? 'Edit would break a chart rule')
         return prev
       }
       historyRef.current.push({ activeName: prev.activeName, notes: prev.notes })
@@ -3882,6 +3833,29 @@ export default function BeatmapEditor() {
     )
     commitNotes(next)
   }, [chart, selectedIds, commitNotes])
+
+  // One-click cleanup for charts that arrived with rule violations (over-full
+  // ticks, open+gem conflicts, misaligned chords) — typically from generation
+  // or import. Strips the minimal set of offending notes so the chart is legal
+  // again. The commit gate allows this since it only ever reduces dirtiness.
+  const autoFix = useCallback(() => {
+    if (!chart) return
+    const cleaned = autoCleanNotes(chart.notes, chart.resolution)
+    if (!cleaned) {
+      flashRuleError('Chart is already clean — nothing to fix')
+      return
+    }
+    const removed = chart.notes.length - cleaned.length
+    commitNotes(pruneSlides(cleaned))
+    flashRuleError(`Auto-fixed: removed ${removed} conflicting note${removed === 1 ? '' : 's'}`)
+  }, [chart, commitNotes, flashRuleError])
+
+  // Number of notes Auto-fix would strip — drives the button's badge + disabled
+  // state so the user can see at a glance whether the chart has rule problems.
+  const ruleIssues = useMemo(
+    () => (chart ? ruleRemovalCount(chart.notes, chart.resolution) : 0),
+    [chart?.notes, chart?.resolution],
+  )
 
   const updateSections = useCallback((updater: (prev: ChartSection[]) => ChartSection[]) => {
     setChart((prev) => {
@@ -5659,21 +5633,19 @@ export default function BeatmapEditor() {
       // drag to where it started.
       setChart((prev) => {
         if (!prev || !dragRef.current) return prev
-        const err = checkNoteRules(prev.notes, prev.resolution)
-        if (err) {
-          const reverted = prev.notes.slice()
-          dragRef.current.snapshot.forEach((orig, idx) => {
-            const cur = reverted[idx]
-            if (cur) reverted[idx] = { ...cur, tick: orig.tick, lane: orig.lane }
-          })
-          flashRuleError(err)
-          return { ...prev, notes: reverted }
-        }
+        // Reconstruct the pre-drag chart so we can compare dirtiness before vs.
+        // after the drag — revert only if the drag made things worse.
         const restored = prev.notes.slice()
         dragRef.current.snapshot.forEach((orig, idx) => {
           const cur = restored[idx]
           if (cur) restored[idx] = { ...cur, tick: orig.tick, lane: orig.lane }
         })
+        const before = ruleRemovalCount(restored, prev.resolution)
+        const after = ruleRemovalCount(prev.notes, prev.resolution)
+        if (after > before) {
+          flashRuleError(checkNoteRules(prev.notes, prev.resolution) ?? 'Move would break a chart rule')
+          return { ...prev, notes: restored }
+        }
         historyRef.current.push({ activeName: prev.activeName, notes: restored })
         if (historyRef.current.length > 100) historyRef.current.shift()
         futureRef.current = []
@@ -7403,6 +7375,24 @@ export default function BeatmapEditor() {
                 ⤢✕ Remove slide
               </button>
             </div>
+            <button
+              onClick={autoFix}
+              disabled={ruleIssues === 0}
+              className={`w-full mt-1 px-2 py-1.5 rounded text-[11px] font-medium transition-colors ${
+                ruleIssues === 0
+                  ? 'bg-gray-800 text-gray-600 cursor-not-allowed'
+                  : 'bg-amber-900/60 hover:bg-amber-800 text-amber-200 ring-1 ring-amber-700'
+              }`}
+              title={
+                ruleIssues === 0
+                  ? 'No rule violations — chart is clean'
+                  : 'Auto-fix — strip over-full ticks, open+gem conflicts, and misaligned chords so the chart is playable again'
+              }
+            >
+              {ruleIssues === 0
+                ? '✓ No rule violations'
+                : `⚠ Auto-fix ${ruleIssues} rule violation${ruleIssues === 1 ? '' : 's'}`}
+            </button>
             <details className="mt-1.5 group">
               <summary className="cursor-pointer text-[10px] text-gray-500 hover:text-gray-300 select-none flex items-center gap-1">
                 <span className="text-[10px] text-gray-600 group-open:rotate-90 transition-transform inline-block w-2">▶</span>
