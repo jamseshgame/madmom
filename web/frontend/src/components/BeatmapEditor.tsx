@@ -2833,6 +2833,10 @@ export default function BeatmapEditor() {
   // highlight the matching pill and the click handler can set them.
   const [selectedTutorialId, setSelectedTutorialId] = useState<string | null>(null)
   const [sceneSelectedId, setSceneSelectedId] = useState<string | null>(null)
+  // Click-to-inspect popup for VO pills. Pill labels truncate the draft text
+  // and never show the file path, so a click surfaces the full filename (and
+  // text) in a small box anchored at the cursor, in container-CSS pixels.
+  const [voPopup, setVoPopup] = useState<{ x: number; y: number; file: string; text: string } | null>(null)
   // Bumps to force a re-render when peaks finish decoding so any UI that
   // reflects waveform-ready state can update.
   const [, setWaveLoaded] = useState(false)
@@ -5388,6 +5392,9 @@ export default function BeatmapEditor() {
     // don't map to the underlying pixel grid. Wheel scrub still works.
     if (view3d.enabled) return
     const { cx, cy } = canvasToCoords(e)
+    // Any fresh click dismisses the VO inspect popup; the pill branch below
+    // re-opens it when the click actually landed on a VO pill.
+    setVoPopup(null)
 
     // Click in the left timestamp gutter: seek the playhead to the tick
     // represented by the cursor's vertical position. Same y→tick mapping as
@@ -5420,9 +5427,25 @@ export default function BeatmapEditor() {
           if (r.kind === 'tutorial') {
             setSelectedTutorialId(r.id)
             setSceneSelectedId(null)
+            // VO pill → pop the full filename + text at the cursor. Labels on
+            // the runway truncate, so this is the only place the whole path is
+            // visible without opening the side panel.
+            const ev = chart.tutorial.find((t) => t.id === r.id)
+            if (ev && ev.kind === 'vo') {
+              const contRect = containerRef.current?.getBoundingClientRect()
+              setVoPopup({
+                x: e.clientX - (contRect?.left ?? 0),
+                y: e.clientY - (contRect?.top ?? 0),
+                file: ev.file || '(no file)',
+                text: ev.text || '',
+              })
+            } else {
+              setVoPopup(null)
+            }
           } else {
             setSceneSelectedId(r.id)
             setSelectedTutorialId(null)
+            setVoPopup(null)
           }
           return
         }
@@ -8366,6 +8389,36 @@ export default function BeatmapEditor() {
             {view3d.enabled && (
               <div className="absolute top-3 right-3 bg-emerald-900/80 border border-emerald-700 text-emerald-100 text-[10px] font-mono px-2 py-0.5 rounded pointer-events-none uppercase tracking-wider">
                 3D preview · editing off
+              </div>
+            )}
+            {/* VO inspect popup — shows the full filename (and draft text) for
+                the clicked VO pill. Positioned at the cursor, clamped to stay
+                inside the canvas column. Click the × or anywhere else to close. */}
+            {voPopup && (
+              <div
+                className="absolute z-30 max-w-[280px] bg-gray-900/95 border border-sky-700 rounded shadow-lg px-2.5 py-2 text-xs"
+                style={{
+                  left: Math.min(voPopup.x + 8, canvasSize.w - 290),
+                  top: Math.max(4, voPopup.y - 8),
+                }}
+                onMouseDown={(e) => e.stopPropagation()}
+              >
+                <div className="flex items-start gap-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[9px] uppercase tracking-wider text-sky-400 mb-0.5">VO file</div>
+                    <div className="font-mono text-sky-200 break-all leading-snug">{voPopup.file}</div>
+                    {voPopup.text && (
+                      <div className="mt-1.5 text-gray-300 italic leading-snug break-words">“{voPopup.text}”</div>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => setVoPopup(null)}
+                    className="shrink-0 text-gray-500 hover:text-gray-200 leading-none text-sm"
+                    title="Close"
+                  >
+                    ×
+                  </button>
+                </div>
               </div>
             )}
             {/* Floating fullscreen-highway toggle. Lives at the canvas's
