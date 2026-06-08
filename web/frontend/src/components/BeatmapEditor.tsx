@@ -2833,10 +2833,17 @@ export default function BeatmapEditor() {
   // highlight the matching pill and the click handler can set them.
   const [selectedTutorialId, setSelectedTutorialId] = useState<string | null>(null)
   const [sceneSelectedId, setSceneSelectedId] = useState<string | null>(null)
-  // Click-to-inspect popup for VO pills. Pill labels truncate the draft text
-  // and never show the file path, so a click surfaces the full filename (and
-  // text) in a small box anchored at the cursor, in container-CSS pixels.
-  const [voPopup, setVoPopup] = useState<{ x: number; y: number; file: string; text: string } | null>(null)
+  // Click-to-inspect popup for sidecar pills. Pill labels truncate hard, so a
+  // click surfaces the full detail (VO filename + draft text, or a scene
+  // event's name + catalog description) in a small box anchored at the cursor,
+  // in container-CSS pixels. `accent` colour-matches the popup to the pill.
+  const [inspectPopup, setInspectPopup] = useState<{
+    x: number; y: number
+    accent: 'sky' | 'emerald'
+    heading: string   // small uppercase label
+    primary: string   // monospace headline (file path / event name)
+    secondary: string // freeform body; may contain "\n" for multiple lines
+  } | null>(null)
   // Bumps to force a re-render when peaks finish decoding so any UI that
   // reflects waveform-ready state can update.
   const [, setWaveLoaded] = useState(false)
@@ -5392,9 +5399,9 @@ export default function BeatmapEditor() {
     // don't map to the underlying pixel grid. Wheel scrub still works.
     if (view3d.enabled) return
     const { cx, cy } = canvasToCoords(e)
-    // Any fresh click dismisses the VO inspect popup; the pill branch below
-    // re-opens it when the click actually landed on a VO pill.
-    setVoPopup(null)
+    // Any fresh click dismisses the inspect popup; the pill branch below
+    // re-opens it when the click actually landed on a VO or scene pill.
+    setInspectPopup(null)
 
     // Click in the left timestamp gutter: seek the playhead to the tick
     // represented by the cursor's vertical position. Same y→tick mapping as
@@ -5424,6 +5431,9 @@ export default function BeatmapEditor() {
       for (let i = regions.length - 1; i >= 0; i--) {
         const r = regions[i]
         if (cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h) {
+          const contRect = containerRef.current?.getBoundingClientRect()
+          const px = e.clientX - (contRect?.left ?? 0)
+          const py = e.clientY - (contRect?.top ?? 0)
           if (r.kind === 'tutorial') {
             setSelectedTutorialId(r.id)
             setSceneSelectedId(null)
@@ -5432,20 +5442,32 @@ export default function BeatmapEditor() {
             // visible without opening the side panel.
             const ev = chart.tutorial.find((t) => t.id === r.id)
             if (ev && ev.kind === 'vo') {
-              const contRect = containerRef.current?.getBoundingClientRect()
-              setVoPopup({
-                x: e.clientX - (contRect?.left ?? 0),
-                y: e.clientY - (contRect?.top ?? 0),
-                file: ev.file || '(no file)',
-                text: ev.text || '',
+              setInspectPopup({
+                x: px, y: py, accent: 'sky', heading: 'VO file',
+                primary: ev.file || '(no file)',
+                secondary: ev.text ? `“${ev.text}”` : '',
               })
-            } else {
-              setVoPopup(null)
             }
           } else {
             setSceneSelectedId(r.id)
             setSelectedTutorialId(null)
-            setVoPopup(null)
+            // Scene pill → pop the full event name + its catalog description
+            // (the pill itself only shows the onboard_-stripped short name).
+            const ev = chart.sceneEvents.find((s) => s.id === r.id)
+            if (ev) {
+              const entry = findCatalogEntry(ev.name, customSceneTypes)
+              const parts: string[] = []
+              if (entry) parts.push(`${entry.groupLabel} · ${entry.itemLabel}`)
+              if (entry?.description) parts.push(entry.description)
+              if (ev.duration > 0) parts.push(`Duration: ${ev.duration} ticks`)
+              else if (ev.value) parts.push(`Value: ${ev.value}`)
+              else parts.push('Instantaneous (no duration)')
+              setInspectPopup({
+                x: px, y: py, accent: 'emerald', heading: 'Scene event',
+                primary: ev.name,
+                secondary: parts.join('\n\n'),
+              })
+            }
           }
           return
         }
@@ -8391,28 +8413,35 @@ export default function BeatmapEditor() {
                 3D preview · editing off
               </div>
             )}
-            {/* VO inspect popup — shows the full filename (and draft text) for
-                the clicked VO pill. Positioned at the cursor, clamped to stay
-                inside the canvas column. Click the × or anywhere else to close. */}
-            {voPopup && (
+            {/* Sidecar inspect popup — full detail for the clicked VO or scene
+                pill (filename + text, or event name + catalog description).
+                Positioned at the cursor, clamped to the canvas column. Click
+                the × or anywhere else to close. */}
+            {inspectPopup && (
               <div
-                className="absolute z-30 max-w-[280px] bg-gray-900/95 border border-sky-700 rounded shadow-lg px-2.5 py-2 text-xs"
+                className={`absolute z-30 max-w-[280px] bg-gray-900/95 border rounded shadow-lg px-2.5 py-2 text-xs ${
+                  inspectPopup.accent === 'emerald' ? 'border-emerald-700' : 'border-sky-700'
+                }`}
                 style={{
-                  left: Math.min(voPopup.x + 8, canvasSize.w - 290),
-                  top: Math.max(4, voPopup.y - 8),
+                  left: Math.min(inspectPopup.x + 8, canvasSize.w - 290),
+                  top: Math.max(4, inspectPopup.y - 8),
                 }}
                 onMouseDown={(e) => e.stopPropagation()}
               >
                 <div className="flex items-start gap-2">
                   <div className="min-w-0 flex-1">
-                    <div className="text-[9px] uppercase tracking-wider text-sky-400 mb-0.5">VO file</div>
-                    <div className="font-mono text-sky-200 break-all leading-snug">{voPopup.file}</div>
-                    {voPopup.text && (
-                      <div className="mt-1.5 text-gray-300 italic leading-snug break-words">“{voPopup.text}”</div>
+                    <div className={`text-[9px] uppercase tracking-wider mb-0.5 ${
+                      inspectPopup.accent === 'emerald' ? 'text-emerald-400' : 'text-sky-400'
+                    }`}>{inspectPopup.heading}</div>
+                    <div className={`font-mono break-all leading-snug ${
+                      inspectPopup.accent === 'emerald' ? 'text-emerald-200' : 'text-sky-200'
+                    }`}>{inspectPopup.primary}</div>
+                    {inspectPopup.secondary && (
+                      <div className="mt-1.5 text-gray-300 leading-snug break-words whitespace-pre-line">{inspectPopup.secondary}</div>
                     )}
                   </div>
                   <button
-                    onClick={() => setVoPopup(null)}
+                    onClick={() => setInspectPopup(null)}
                     className="shrink-0 text-gray-500 hover:text-gray-200 leading-none text-sm"
                     title="Close"
                   >
