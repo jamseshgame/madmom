@@ -2734,6 +2734,11 @@ export default function BeatmapEditor() {
   // which ones have already been triggered in the current play pass — reset
   // on any meaningful seek so a VO can replay if you scrub back over it.
   const voAudiosRef = useRef<Map<string, HTMLAudioElement>>(new Map())
+  // Actual clip length (seconds) per VO id, learned from each preloaded audio
+  // element's `loadedmetadata`. Used only for visual pill length on the runway
+  // when a VO carries no explicit durationMs slice window (whole-clip VOs), so
+  // the highway band covers the audio it will play rather than a stub marker.
+  const voDurationsRef = useRef<Map<string, number>>(new Map())
   const sliceAudioRef = useRef<HTMLAudioElement | null>(null)
   const firedVosRef = useRef<Set<string>>(new Set())
   const lastSampleTimeRef = useRef(0)
@@ -4894,10 +4899,15 @@ export default function BeatmapEditor() {
       for (const ev of chart.tutorial) {
         if (ev.kind === 'vo') {
           // Duration on the highway = the clip's actual length so the pill
-          // visually covers the audio window. Fall back to MIN_TICK_DUR for
-          // VOs without an embedded durationMs (legacy, or pre-collation).
-          const voDurTicks = (ev.durationMs && ev.durationMs > 0)
-            ? Math.max(MIN_TICK_DUR, Math.round(tickFromSec(ev.durationMs / 1000)))
+          // visually covers the audio window. Prefer the embedded durationMs
+          // slice window; otherwise use the whole-clip length learned from the
+          // preloaded audio element. Fall back to MIN_TICK_DUR only until the
+          // audio metadata has loaded (or for VOs with no playable file).
+          const voDurSec = (ev.durationMs && ev.durationMs > 0)
+            ? ev.durationMs / 1000
+            : (voDurationsRef.current.get(ev.id) ?? 0)
+          const voDurTicks = voDurSec > 0
+            ? Math.max(MIN_TICK_DUR, Math.round(tickFromSec(voDurSec)))
             : MIN_TICK_DUR
           voPills.push({
             tickStart: ev.tick,
@@ -6556,6 +6566,15 @@ export default function BeatmapEditor() {
           const a = new Audio(url) as HTMLAudioElement & { _voUrl?: string }
           a.preload = 'auto'
           a._voUrl = url
+          // Cache the clip length once known so the runway pill can span the
+          // full audio window for VOs without an explicit durationMs slice.
+          const recordDuration = () => {
+            if (Number.isFinite(a.duration) && a.duration > 0) {
+              voDurationsRef.current.set(ev.id, a.duration)
+            }
+          }
+          if (a.readyState >= 1) recordDuration()
+          else a.addEventListener('loadedmetadata', recordDuration, { once: true })
           have.set(ev.id, a)
         }
       }
@@ -6564,6 +6583,7 @@ export default function BeatmapEditor() {
       if (!want.has(id)) {
         a.pause()
         have.delete(id)
+        voDurationsRef.current.delete(id)
       }
     }
   }, [chart, trackId, beatmapId])
