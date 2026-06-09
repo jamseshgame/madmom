@@ -204,6 +204,7 @@ interface CookieStatus {
   has_cookies: boolean
   uploaded_at: string | null
   size_bytes: number
+  signed_in?: boolean
   global_fallback_configured?: boolean
 }
 
@@ -265,10 +266,14 @@ function CookiesRow() {
   }
 
   const statusLine = status?.has_cookies
-    ? <>
-        <span className="text-emerald-400">✓ Cookies on file</span>
-        {status.uploaded_at && <span className="text-gray-600"> · uploaded {ago(status.uploaded_at)}</span>}
-      </>
+    ? status.signed_in === false
+      ? <span className="text-amber-400" title="The cookies file no longer contains signed-in session cookies (SID/SAPISID/…). Export a fresh cookies.txt from a private window — then close that window — and re-upload.">
+          ⚠ Cookies signed out — replace them
+        </span>
+      : <>
+          <span className="text-emerald-400">✓ Cookies on file</span>
+          {status.uploaded_at && <span className="text-gray-600"> · uploaded {ago(status.uploaded_at)}</span>}
+        </>
     : status?.global_fallback_configured
       ? <span className="text-gray-400">Using server-wide cookies (admin-configured)</span>
       : <span className="text-amber-400">No cookies — YouTube may block searches on this server</span>

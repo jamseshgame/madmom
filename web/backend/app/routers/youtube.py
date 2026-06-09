@@ -6,6 +6,7 @@ close the tab and come back to a still-running download.
 """
 
 import asyncio
+import contextlib
 import re
 import shutil
 from pathlib import Path
@@ -26,25 +27,47 @@ _MAX_DURATION_SECONDS = 30 * 60  # 30 minutes
 _VIDEO_ID_RE = re.compile(r'^[A-Za-z0-9_-]{6,32}$')
 
 
-def _ytdl_common_opts(username: str | None = None) -> dict[str, Any]:
+@contextlib.contextmanager
+def _ytdl_session_opts(username: str | None = None):
     """Shared yt-dlp options applied to every call (search + download).
 
-    Resolves cookies in priority order: per-user file (uploaded via
-    /api/youtube/cookies) → global settings.youtube_cookies_file → none.
-    Per-user wins so different sessions can use their own auth without
-    stepping on each other.
+    Cookies resolve per-user file → global YOUTUBE_COOKIES_FILE → none,
+    and yt-dlp gets a disposable copy (see yc.ytdlp_cookiefile) — never
+    the canonical file, which its on-close jar save would overwrite.
 
-    Also forces the Android InnerTube player client first (web stays as
-    a fallback) — more permissive about anonymous access than the web
-    client and often slips past the bot wall on its own.
+    Without cookies, force the Android InnerTube player client first
+    (web stays as a fallback) — more permissive about anonymous access
+    and often slips past the bot wall on its own. With cookies, leave
+    yt-dlp's default client list alone: android doesn't support cookies
+    (yt-dlp skips it), and the defaults are tuned for authed sessions.
     """
-    opts: dict[str, Any] = {
-        'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
-    }
-    cookies = yc.resolve_cookies_for_user(username)
-    if cookies:
-        opts['cookiefile'] = cookies
-    return opts
+    with yc.ytdlp_cookiefile(username) as cookiefile:
+        opts: dict[str, Any] = {}
+        if cookiefile:
+            opts['cookiefile'] = cookiefile
+        else:
+            opts['extractor_args'] = {'youtube': {'player_client': ['android', 'web']}}
+        yield opts
+
+
+def _bot_wall_hint(msg: str, username: str | None) -> str:
+    """Append an actionable hint when YouTube's bot check bites."""
+    if 'Sign in to confirm' not in msg and 'not a bot' not in msg.lower():
+        return msg
+    if yc.cookies_status(username).get('signed_in'):
+        return msg + (
+            "\n\nYouTube has flagged this server's IP and rejected the cookies on "
+            'file (the session may have been invalidated). Export a fresh '
+            'cookies.txt from a private/incognito window — then close that window '
+            "so the browser can't rotate the session — and upload it via Replace "
+            'under "YouTube cookies".'
+        )
+    return msg + (
+        "\n\nYouTube has flagged this server's IP and the cookies on file no "
+        'longer carry a signed-in session. Export a fresh cookies.txt from a '
+        'private/incognito window — then close that window — and upload it via '
+        'Replace under "YouTube cookies".'
+    )
 
 
 @router.get('/search')
@@ -66,22 +89,23 @@ async def search_youtube(
     import yt_dlp
 
     def _search() -> list[dict[str, Any]]:
-        opts = {
-            **_ytdl_common_opts(user.get('username')),
-            'quiet': True,
-            'no_warnings': True,
-            'extract_flat': True,
-            'skip_download': True,
-            'default_search': 'ytsearch',
-        }
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(f'ytsearch{limit}:{q}', download=False)
+        with _ytdl_session_opts(user.get('username')) as session_opts:
+            opts = {
+                **session_opts,
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': True,
+                'skip_download': True,
+                'default_search': 'ytsearch',
+            }
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(f'ytsearch{limit}:{q}', download=False)
         return info.get('entries', []) or []
 
     try:
         entries = await asyncio.to_thread(_search)
     except Exception as e:
-        raise HTTPException(502, f'YouTube search failed: {e}')
+        raise HTTPException(502, _bot_wall_hint(f'YouTube search failed: {e}', user.get('username')))
 
     results = []
     for e in entries:
@@ -158,30 +182,30 @@ async def start_youtube_download(
                         job.send('convert', 85, 'Extracting MP3 with ffmpeg…'), loop,
                     )
 
-            opts = {
-                **_ytdl_common_opts(user.get('username')),
-                'format': 'bestaudio/best',
-                'outtmpl': str(job_dir / '%(title).200B.%(ext)s'),
-                'quiet': True,
-                'no_warnings': True,
-                'noprogress': True,
-                'progress_hooks': [_hook],
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '320',
-                }],
-            }
-
             def _download() -> dict[str, Any]:
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(
-                        f'https://www.youtube.com/watch?v={video_id}',
-                        download=True,
-                    )
-                    if isinstance(info, dict):
-                        return info
-                    return {}
+                with _ytdl_session_opts(user.get('username')) as session_opts:
+                    opts = {
+                        **session_opts,
+                        'format': 'bestaudio/best',
+                        'outtmpl': str(job_dir / '%(title).200B.%(ext)s'),
+                        'quiet': True,
+                        'no_warnings': True,
+                        'noprogress': True,
+                        'progress_hooks': [_hook],
+                        'postprocessors': [{
+                            'key': 'FFmpegExtractAudio',
+                            'preferredcodec': 'mp3',
+                            'preferredquality': '320',
+                        }],
+                    }
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        info = ydl.extract_info(
+                            f'https://www.youtube.com/watch?v={video_id}',
+                            download=True,
+                        )
+                if isinstance(info, dict):
+                    return info
+                return {}
 
             info = await asyncio.to_thread(_download)
             if job.cancelled:
@@ -227,13 +251,7 @@ async def start_youtube_download(
                 return
             import traceback
             print(f'[youtube] Job {job.id} failed: {traceback.format_exc()}')
-            msg = str(e) or 'YouTube download failed'
-            if "Sign in to confirm" in msg or 'not a bot' in msg.lower():
-                msg += (
-                    '\n\nYouTube has flagged this server\'s IP. Add a Netscape-format '
-                    'cookies.txt exported from a signed-in browser and set '
-                    'YOUTUBE_COOKIES_FILE in web/.env to its path on disk.'
-                )
+            msg = _bot_wall_hint(str(e) or 'YouTube download failed', user.get('username'))
             await job.send_error(msg)
 
     job.task = asyncio.create_task(_run())
