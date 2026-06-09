@@ -2706,9 +2706,16 @@ export default function BeatmapEditor() {
   }, [])
 
   const [chart, setChart] = useState<ChartState | null>(null)
+  // Always-latest mirror of `chart`, read inside async callbacks (autosave)
+  // that would otherwise close over a stale value. Reassigned every render.
+  const chartRef = useRef<ChartState | null>(chart)
+  chartRef.current = chart
   const [meta, setMeta] = useState<BeatmapMeta | null>(null)
   const [loadError, setLoadError] = useState('')
   const [saving, setSaving] = useState(false)
+  // Mirrors `saving` for synchronous reads inside the autosave timer (so an
+  // autosave that fires mid-save reschedules instead of racing a second PUT).
+  const savingRef = useRef(false)
   const [saveMsg, setSaveMsg] = useState('')
   const [dirty, setDirty] = useState(false)
   const [snapDivisor, setSnapDivisor] = useState(4)
@@ -2804,16 +2811,40 @@ export default function BeatmapEditor() {
   }, [])
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [tool, setTool] = useState<'select' | 'note' | 'real'>('select')
-  // Undo/redo history. Each entry is a snapshot of `notes` (plus the active
-  // section name so undo across difficulty switches is safe). We keep up to
-  // 100 steps and push only on logical operations (add/delete/paste/move-end),
-  // not per-frame during drag.
-  const historyRef = useRef<{ activeName: string; notes: ChartNote[] }[]>([])
-  const futureRef = useRef<{ activeName: string; notes: ChartNote[] }[]>([])
+  // Undo/redo history. Each entry is a full ChartState snapshot. Because every
+  // edit builds the next chart immutably (`{ ...chart, notes: next }`),
+  // unchanged sub-trees (the large `fullText` string, tempo map, tutorial, …)
+  // are structurally shared between snapshots — so a snapshot costs only its
+  // diff and the stack can be effectively unbounded ("infinite" undo). We push
+  // only on logical operations (add/delete/paste/move-end, tempo/scene/tutorial
+  // edits), not per-frame during drag.
+  const historyRef = useRef<ChartState[]>([])
+  const futureRef = useRef<ChartState[]>([])
   const clipboardRef = useRef<ChartNote[]>([])
   // Bumped to force a re-render when undo/redo state changes (so the toolbar
   // buttons enable/disable). The arrays themselves live in refs.
   const [, setHistoryTick] = useState(0)
+  // Whole-chart commit funnel. Pushes the pre-edit chart onto the undo stack,
+  // clears the redo stack, then applies `next` (a value or an updater) and
+  // marks the chart dirty (which arms autosave). Use for any discrete edit —
+  // tempo, sections, tutorial, clips, scene, sources — that Ctrl+Z should
+  // revert. Note edits funnel through commitNotes instead (it adds rule
+  // gating); both share this one history.
+  const commitChart = useCallback(
+    (next: ChartState | ((prev: ChartState) => ChartState)) => {
+      setChart((prev) => {
+        if (!prev) return prev
+        const resolved = typeof next === 'function' ? (next as (p: ChartState) => ChartState)(prev) : next
+        if (resolved === prev) return prev
+        historyRef.current.push(prev)
+        futureRef.current = []
+        setHistoryTick((n) => n + 1)
+        return resolved
+      })
+      setDirty(true)
+    },
+    [],
+  )
   // Playback rate. preservesPitch keeps voices intelligible when slowing down
   // for charting hard sections.
   const [playbackRate, setPlaybackRate] = useState(1)
@@ -2951,11 +2982,10 @@ export default function BeatmapEditor() {
 
   const importSource = (id: string, trackId: string, beatmapId: string, name: string) => {
     if (!chart) return
-    setChart({
-      ...chart,
-      importedSources: [...chart.importedSources, { id, trackId, beatmapId, name }],
-    })
-    setDirty(true)
+    commitChart((prev) => ({
+      ...prev,
+      importedSources: [...prev.importedSources, { id, trackId, beatmapId, name }],
+    }))
     setActiveSourceId(id)
     setPickerOpen(false)
   }
@@ -2965,13 +2995,12 @@ export default function BeatmapEditor() {
     if (!/^[a-z][a-z0-9_]*$/.test(newId)) return
     if (oldId === newId) return
     if (chart.importedSources.some((s) => s.id === newId)) return
-    setChart({
-      ...chart,
-      importedSources: chart.importedSources.map((s) => s.id === oldId ? { ...s, id: newId } : s),
-      clips: chart.clips.map((c) => c.sourceId === oldId ? { ...c, sourceId: newId } : c),
-      tutorial: chart.tutorial.map((e) => (e.kind === 'music' && e.source === oldId) ? { ...e, source: newId } : e),
-    })
-    setDirty(true)
+    commitChart((prev) => ({
+      ...prev,
+      importedSources: prev.importedSources.map((s) => s.id === oldId ? { ...s, id: newId } : s),
+      clips: prev.clips.map((c) => c.sourceId === oldId ? { ...c, sourceId: newId } : c),
+      tutorial: prev.tutorial.map((e) => (e.kind === 'music' && e.source === oldId) ? { ...e, source: newId } : e),
+    }))
     if (activeSourceId === oldId) setActiveSourceId(newId)
   }
 
@@ -2983,14 +3012,13 @@ export default function BeatmapEditor() {
     const sectionsToDrop = new Set(chart.clips.filter((c) => c.sourceId === id).map((c) => c.sectionName))
     const nextSections = { ...chart.musicSections }
     for (const sn of sectionsToDrop) delete nextSections[sn]
-    setChart({
-      ...chart,
-      importedSources: chart.importedSources.filter((s) => s.id !== id),
+    commitChart((prev) => ({
+      ...prev,
+      importedSources: prev.importedSources.filter((s) => s.id !== id),
       musicSections: nextSections,
-      clips: chart.clips.filter((c) => c.sourceId !== id),
-      tutorial: chart.tutorial.filter((e) => !(e.kind === 'music' && e.source === id)),
-    })
-    setDirty(true)
+      clips: prev.clips.filter((c) => c.sourceId !== id),
+      tutorial: prev.tutorial.filter((e) => !(e.kind === 'music' && e.source === id)),
+    }))
     if (activeSourceId === id) setActiveSourceId(null)
   }
 
@@ -3015,20 +3043,18 @@ export default function BeatmapEditor() {
       id, sectionName, name: cleanName, sourceId,
       startSec, endSec, notesCount: slice.notesCount, bpm: slice.bpm,
     }
-    setChart({
-      ...chart,
-      musicSections: { ...chart.musicSections, [sectionName]: slice.sectionBody },
-      clips: [...chart.clips, newClip],
-    })
-    setDirty(true)
+    commitChart((prev) => ({
+      ...prev,
+      musicSections: { ...prev.musicSections, [sectionName]: slice.sectionBody },
+      clips: [...prev.clips, newClip],
+    }))
     setSelectedClipId(id)
     setPendingClip(null)
   }
 
   const renameClip = (id: string, name: string) => {
     if (!chart) return
-    setChart({ ...chart, clips: chart.clips.map((c) => c.id === id ? { ...c, name } : c) })
-    setDirty(true)
+    commitChart((prev) => ({ ...prev, clips: prev.clips.map((c) => c.id === id ? { ...c, name } : c) }))
   }
 
   const deleteClip = (id: string) => {
@@ -3038,13 +3064,12 @@ export default function BeatmapEditor() {
     if (!window.confirm(`Delete "${clip.name}" and any places of it?`)) return
     const nextSections = { ...chart.musicSections }
     delete nextSections[clip.sectionName]
-    setChart({
-      ...chart,
+    commitChart((prev) => ({
+      ...prev,
       musicSections: nextSections,
-      clips: chart.clips.filter((c) => c.id !== id),
-      tutorial: chart.tutorial.filter((e) => !(e.kind === 'music' && e.sectionName === clip.sectionName)),
-    })
-    setDirty(true)
+      clips: prev.clips.filter((c) => c.id !== id),
+      tutorial: prev.tutorial.filter((e) => !(e.kind === 'music' && e.sectionName === clip.sectionName)),
+    }))
     if (selectedClipId === id) setSelectedClipId(null)
   }
 
@@ -3074,8 +3099,7 @@ export default function BeatmapEditor() {
         durationMs: Math.round((clip.endSec - clip.startSec) * 1000),
       } : {}),
     }
-    setChart({ ...chart, tutorial: [...chart.tutorial, ev], tutorialEnabled: true })
-    setDirty(true)
+    commitChart((prev) => ({ ...prev, tutorial: [...prev.tutorial, ev], tutorialEnabled: true }))
     setSelectedTutorialId(ev.id)
   }
 
@@ -3816,8 +3840,7 @@ export default function BeatmapEditor() {
         flashRuleError(checkNoteRules(nextNotes, prev.resolution) ?? 'Edit would break a chart rule')
         return prev
       }
-      historyRef.current.push({ activeName: prev.activeName, notes: prev.notes })
-      if (historyRef.current.length > 100) historyRef.current.shift()
+      historyRef.current.push(prev)
       futureRef.current = []
       setHistoryTick((n) => n + 1)
       return { ...prev, notes: nextNotes }
@@ -3874,12 +3897,8 @@ export default function BeatmapEditor() {
   )
 
   const updateSections = useCallback((updater: (prev: ChartSection[]) => ChartSection[]) => {
-    setChart((prev) => {
-      if (!prev) return prev
-      return { ...prev, sections: updater(prev.sections) }
-    })
-    setDirty(true)
-  }, [])
+    commitChart((prev) => ({ ...prev, sections: updater(prev.sections) }))
+  }, [commitChart])
 
   const addSectionAtPlayhead = useCallback(() => {
     if (!chart) return
@@ -3894,8 +3913,7 @@ export default function BeatmapEditor() {
   const updateTempoMarkerBpm = useCallback((idx: number, bpm: number) => {
     if (!Number.isFinite(bpm) || bpm <= 0) return
     const microBpm = Math.max(1, Math.round(bpm * 1000))
-    setChart((prev) => {
-      if (!prev) return prev
+    commitChart((prev) => {
       const next = prev.tempoMarkers.slice()
       if (!next[idx]) return prev
       next[idx] = { ...next[idx], microBpm }
@@ -3903,13 +3921,11 @@ export default function BeatmapEditor() {
       const bpmRaw = next[0]?.microBpm ?? prev.bpmRaw
       return { ...prev, tempoMarkers: next, bpm: bpmRaw / 1000, bpmRaw }
     })
-    setDirty(true)
-  }, [])
+  }, [commitChart])
 
   const updateTempoMarkerTick = useCallback((idx: number, tick: number) => {
     if (!Number.isFinite(tick) || tick < 0) return
-    setChart((prev) => {
-      if (!prev) return prev
+    commitChart((prev) => {
       if (idx === 0) return prev  // tick-0 origin is fixed
       const next = prev.tempoMarkers.slice()
       if (!next[idx]) return prev
@@ -3917,20 +3933,17 @@ export default function BeatmapEditor() {
       next.sort((a, b) => a.tick - b.tick)
       return { ...prev, tempoMarkers: next }
     })
-    setDirty(true)
-  }, [])
+  }, [commitChart])
 
   const deleteTempoMarker = useCallback((idx: number) => {
-    setChart((prev) => {
-      if (!prev) return prev
+    commitChart((prev) => {
       if (idx === 0) return prev  // can't delete the song-origin marker
       const next = prev.tempoMarkers.filter((_, i) => i !== idx)
       if (next.length === 0) return prev
       const bpmRaw = next[0].microBpm
       return { ...prev, tempoMarkers: next, bpm: bpmRaw / 1000, bpmRaw }
     })
-    setDirty(true)
-  }, [])
+  }, [commitChart])
 
   const addTempoMarkerAtPlayhead = useCallback(() => {
     if (!chart) return
@@ -3943,27 +3956,21 @@ export default function BeatmapEditor() {
     let i = tempoSegments.length - 1
     while (i > 0 && tempoSegments[i].tick > tick) i--
     const microBpm = tempoSegments[i]?.microBpm ?? 120000
-    setChart((prev) => {
-      if (!prev) return prev
+    commitChart((prev) => {
       const next = [...prev.tempoMarkers, { tick, microBpm }].sort((a, b) => a.tick - b.tick)
       const bpmRaw = next[0].microBpm
       return { ...prev, tempoMarkers: next, bpm: bpmRaw / 1000, bpmRaw }
     })
-    setDirty(true)
-  }, [chart, currentTime, tempoSegments])
+  }, [chart, currentTime, tempoSegments, commitChart])
 
   const undo = useCallback(() => {
     setChart((prev) => {
       if (!prev) return prev
       const last = historyRef.current.pop()
       if (!last) return prev
-      // Only restore if the snapshot is for the currently active section. If
-      // the user switched difficulty after the change, we silently skip rather
-      // than corrupt the wrong section.
-      if (last.activeName !== prev.activeName) return prev
-      futureRef.current.push({ activeName: prev.activeName, notes: prev.notes })
+      futureRef.current.push(prev)
       setHistoryTick((n) => n + 1)
-      return { ...prev, notes: last.notes }
+      return last
     })
     setDirty(true)
   }, [])
@@ -3973,10 +3980,9 @@ export default function BeatmapEditor() {
       if (!prev) return prev
       const next = futureRef.current.pop()
       if (!next) return prev
-      if (next.activeName !== prev.activeName) return prev
-      historyRef.current.push({ activeName: prev.activeName, notes: prev.notes })
+      historyRef.current.push(prev)
       setHistoryTick((n) => n + 1)
-      return { ...prev, notes: next.notes }
+      return next
     })
     setDirty(true)
   }, [])
@@ -5701,8 +5707,7 @@ export default function BeatmapEditor() {
           flashRuleError(checkNoteRules(prev.notes, prev.resolution) ?? 'Move would break a chart rule')
           return { ...prev, notes: restored }
         }
-        historyRef.current.push({ activeName: prev.activeName, notes: restored })
-        if (historyRef.current.length > 100) historyRef.current.shift()
+        historyRef.current.push({ ...prev, notes: restored })
         futureRef.current = []
         setHistoryTick((n) => n + 1)
         return prev
@@ -6072,21 +6077,25 @@ export default function BeatmapEditor() {
   }
 
   const handleSave = async () => {
-    if (!chart) return
+    // Serialize from the latest chart (chartRef), not a closure that may be
+    // stale by the time a debounced autosave fires.
+    const base = chartRef.current
+    if (!base) return
+    savingRef.current = true
     setSaving(true)
     setSaveMsg('')
     try {
-      let newFull = replaceSectionNotes(chart.fullText, chart.activeName, chart.notes)
-      newFull = applyTutorialToFullText(newFull, chart.tutorial, chart.tutorialEnabled, chart.musicSections, chart.importedSources, chart.clips)
-      newFull = applySyncTrackToFullText(newFull, chart.tempoMarkers, chart.timeSigs, chart.syncOther)
+      let newFull = replaceSectionNotes(base.fullText, base.activeName, base.notes)
+      newFull = applyTutorialToFullText(newFull, base.tutorial, base.tutorialEnabled, base.musicSections, base.importedSources, base.clips)
+      newFull = applySyncTrackToFullText(newFull, base.tempoMarkers, base.timeSigs, base.syncOther)
       // Merge section markers back into passthrough so applySceneToFullText
       // re-emits them as standard `E "section ..."` rows in [Events].
-      const passthroughWithSections = [...chart.sceneEventsPassthrough, ...sectionLines(chart.sections)]
+      const passthroughWithSections = [...base.sceneEventsPassthrough, ...sectionLines(base.sections)]
       newFull = applySceneToFullText(
         newFull,
-        chart.sceneFlags,
-        chart.sceneFlagsUnknown,
-        chart.sceneEvents,
+        base.sceneFlags,
+        base.sceneFlagsUnknown,
+        base.sceneEvents,
         passthroughWithSections,
       )
       const res = await fetch(`/api/tracks/${trackId}/beatmaps/${beatmapId}/chart`, {
@@ -6098,41 +6107,71 @@ export default function BeatmapEditor() {
         const err = await res.json().catch(() => ({}))
         throw new Error(err.detail || `Save failed (${res.status})`)
       }
-      setChart({ ...chart, fullText: newFull })
+      // Did the user edit while the PUT was in flight? If so, the chart we just
+      // persisted is already behind — fold the freshly serialized fullText into
+      // whatever the latest chart is (functional update, never clobber), and
+      // leave `dirty` set so autosave fires again for the newer edits.
+      const clean = chartRef.current === base
+      setChart((prev) => (prev ? { ...prev, fullText: newFull } : prev))
       setSaveMsg('Saved')
-      setDirty(false)
+      if (clean) setDirty(false)
       setTimeout(() => setSaveMsg(''), 2000)
     } catch (e) {
       setSaveMsg((e as Error).message || 'Save failed')
     } finally {
+      savingRef.current = false
       setSaving(false)
     }
   }
 
-  // Dirty-aware exit guard. With the in-header Back button gone, the browser
-  // back / tab close path needs its own warning so we don't silently drop
-  // edits. beforeunload only fires for hard navigation (tab close, refresh) —
-  // for in-app navigation we still warn via the React Router blocker further
-  // down if/when it gets wired up.
+  // Autosave: persist ~1.5s after the last change settles. Every edit bumps
+  // `dirty` and (because edits replace `chart`) re-runs this effect, which
+  // clears the prior timer and re-arms — so a burst of edits coalesces into a
+  // single PUT once editing pauses. handleSave clears `dirty` on success
+  // (unless newer edits landed mid-save), which tears down the timer.
   useEffect(() => {
     if (!dirty) return
+    let cancelled = false
+    let timer = window.setTimeout(function flush() {
+      if (cancelled) return
+      // A manual Save (or a previous autosave) may still be in flight; wait it
+      // out rather than firing a competing PUT.
+      if (savingRef.current) {
+        timer = window.setTimeout(flush, 400)
+        return
+      }
+      void handleSave()
+    }, 1500)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dirty, chart])
+
+  // Dirty-aware exit guard. With autosave on, `dirty` (a change not yet
+  // flushed) or `saving` (a PUT in flight) is the only window where work could
+  // be lost on a hard navigation (tab close, refresh) — warn only then.
+  // beforeunload doesn't fire for in-app navigation; that path would need the
+  // React Router blocker, wired up further down if/when it lands.
+  useEffect(() => {
+    if (!dirty && !saving) return
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
       e.preventDefault()
       e.returnValue = ''  // legacy Chrome path
     }
     window.addEventListener('beforeunload', onBeforeUnload)
     return () => window.removeEventListener('beforeunload', onBeforeUnload)
-  }, [dirty])
+  }, [dirty, saving])
 
   // ── Tutorial editing helpers ──────────────────────────────────────────────
   const updateTutorial = (next: TutorialEvent[], enabled?: boolean) => {
     if (!chart) return
-    setChart({
-      ...chart,
+    commitChart((prev) => ({
+      ...prev,
       tutorial: next,
-      tutorialEnabled: enabled ?? chart.tutorialEnabled,
-    })
-    setDirty(true)
+      tutorialEnabled: enabled ?? prev.tutorialEnabled,
+    }))
   }
 
   const playheadTick = useMemo(() => {
@@ -6388,13 +6427,12 @@ export default function BeatmapEditor() {
       if (data.section_body) {
         nextSections[data.section_name] = '\n' + data.section_body + '\n'
       }
-      setChart({
-        ...chart,
-        tutorial: [...chart.tutorial, ev],
+      commitChart((prev) => ({
+        ...prev,
+        tutorial: [...prev.tutorial, ev],
         tutorialEnabled: true,
         musicSections: nextSections,
-      })
-      setDirty(true)
+      }))
       setMusicModal(null)
       setSelectedTutorialId(ev.id)
     } catch (e) {
@@ -6412,12 +6450,11 @@ export default function BeatmapEditor() {
     const nextEvents = chart.tutorial.filter((e) => e.id !== ev.id)
     const nextSections = { ...chart.musicSections }
     delete nextSections[ev.sectionName]
-    setChart({
-      ...chart,
+    commitChart((prev) => ({
+      ...prev,
       tutorial: nextEvents,
       musicSections: nextSections,
-    })
-    setDirty(true)
+    }))
     setSelectedTutorialId((cur) => (cur === ev.id ? null : cur))
   }
 
@@ -6533,8 +6570,7 @@ export default function BeatmapEditor() {
 
   const updateScene = (next: SceneEvent[]) => {
     if (!chart) return
-    setChart({ ...chart, sceneEvents: next })
-    setDirty(true)
+    commitChart((prev) => ({ ...prev, sceneEvents: next }))
   }
 
   const moveSceneEvent = (id: string, tick: number) => {
@@ -6994,9 +7030,10 @@ export default function BeatmapEditor() {
         <button
           onClick={handleSave}
           disabled={saving || !chart || !dirty}
+          title="Changes autosave ~1.5s after you stop editing. Click to save now."
           className="shrink-0 px-4 py-2 bg-jam-600 hover:bg-jam-500 disabled:opacity-40 text-white rounded-md text-sm font-medium transition-colors"
         >
-          {saving ? 'Saving…' : dirty ? 'Save chart' : 'Saved'}
+          {saving ? 'Saving…' : dirty ? 'Save now' : 'Saved'}
         </button>
       </header>
 
