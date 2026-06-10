@@ -375,9 +375,32 @@ function YouTubeSearch({ onPicked }: { onPicked: (file: File) => void }) {
         if (d.step === 'done' && d.metadata) {
           es.close()
           try {
+            // The MP3 now has to travel server → browser, which on a slow
+            // link takes minutes. A bare res.blob() shows nothing — stream
+            // the body and surface transfer progress so the card doesn't
+            // look frozen on "Complete".
+            setPulling((p) => (p ? { ...p, progress: 0, message: 'Transferring MP3…' } : p))
             const fileRes = await fetch(`/api/youtube/${job_id}/file`)
             if (!fileRes.ok) throw new Error(`File fetch failed (${fileRes.status})`)
-            const blob = await fileRes.blob()
+            const total = Number(fileRes.headers.get('content-length') || d.metadata.size_bytes || 0)
+            let blob: Blob
+            if (fileRes.body && total > 0) {
+              const reader = fileRes.body.getReader()
+              const chunks: BlobPart[] = []
+              let got = 0
+              for (;;) {
+                const { done, value } = await reader.read()
+                if (done) break
+                chunks.push(value)
+                got += value.byteLength
+                const pct = Math.min(99, Math.round((got / total) * 100))
+                const mib = (n: number) => (n / 1048576).toFixed(1)
+                setPulling((p) => (p ? { ...p, progress: pct, message: `Transferring MP3 · ${mib(got)} / ${mib(total)} MiB` } : p))
+              }
+              blob = new Blob(chunks, { type: 'audio/mpeg' })
+            } else {
+              blob = await fileRes.blob()
+            }
             const safeTitle = (d.metadata.title as string || r.title)
               .replace(/[\\/:*?"<>|]/g, '-')
               .slice(0, 100)
