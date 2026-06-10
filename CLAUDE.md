@@ -116,7 +116,10 @@ A single stem can carry multiple beatmaps (one primary + numbered alternates) an
 ```bash
 # One-shot local-dev install (cross-platform):
 python install.py
-# Verifies prereqs (python>=3.9, node>=18, npm, ffmpeg, git), inits the
+# Verifies prereqs (python>=3.9, node>=18, npm, ffmpeg, git; warns if deno
+# is missing — yt-dlp needs Deno to solve YouTube's signature challenges,
+# without it downloads fail with "Requested format is not available"),
+# inits the
 # madmom/models git submodule, creates web/backend/venv, pip-installs
 # Cython + madmom (editable) + requirements.txt, builds the Cython
 # extensions in-place, runs npm install, and scaffolds web/.env from

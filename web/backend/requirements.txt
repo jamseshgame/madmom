@@ -25,8 +25,11 @@ torchaudio==2.11.0
 torchcodec
 # YouTube search + download for the "search YouTube" upload flow. yt-dlp uses
 # the system ffmpeg for the mp3 extraction post-processor, which we already
-# install at the OS level.
-yt-dlp>=2024.3
+# install at the OS level. The [default] extra pulls in yt-dlp-ejs, the
+# challenge-solver scripts yt-dlp needs to decrypt YouTube stream URLs; those
+# scripts also need a JS runtime on PATH — Deno (recommended; Node 20 is too
+# old) — or every download fails with "Requested format is not available".
+yt-dlp[default]>=2026.3
 # Chatterbox TTS lives in requirements-extras.txt — it pins torch==2.6.0 and
 # numpy<2.0.0 in its metadata, which would block the resolver from
 # installing the trio above. We install it separately with --no-deps so the

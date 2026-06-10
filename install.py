@@ -117,6 +117,15 @@ def check_prereqs() -> None:
     if not git:
         problems.append('Install git')
 
+    # deno — yt-dlp needs a JS runtime to solve YouTube's signature
+    # challenges; without one, YouTube downloads fail with "Requested format
+    # is not available". Warn-only: everything else works without it.
+    deno = _which('deno')
+    print(f'  deno      : {_version_of(["deno", "--version"]) if deno else "MISSING (YouTube downloads will fail)"}')
+    if not deno:
+        print('     -> install Deno for the YouTube flow: https://deno.com '
+              '(brew install deno / winget install DenoLand.Deno)')
+
     if problems:
         print()
         print('!! Missing prerequisites:')

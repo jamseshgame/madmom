@@ -14,12 +14,22 @@ apt-get install -y \
     python3 python3-venv python3-dev python3-pip \
     ffmpeg libfftw3-dev \
     nginx certbot python3-certbot-nginx \
-    git curl build-essential
+    git curl unzip build-essential
 
 # Node.js via nodesource
 if ! command -v node &>/dev/null; then
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
     apt-get install -y nodejs
+fi
+
+# Deno — JS runtime yt-dlp uses to solve YouTube's signature challenges.
+# Without it every YouTube download fails with "Requested format is not
+# available" (Node 20 is below yt-dlp-ejs's minimum, so Deno it is).
+if ! command -v deno &>/dev/null; then
+    curl -fsSL -o /tmp/deno.zip \
+        https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip
+    unzip -o -q /tmp/deno.zip -d /usr/local/bin
+    rm /tmp/deno.zip
 fi
 
 echo "=== Clone repo ==="
