@@ -10,6 +10,17 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.11.0',
+    date: '2026-06-10',
+    summary:
+      'YouTube pulls work again and stop looking frozen. yt-dlp\'s EJS rollout required a JS runtime on the server (Deno) to decrypt stream URLs — without it every download died with "Requested format is not available". The post-download MP3 transfer to the browser now shows live progress instead of sitting on "Complete", and open tabs get a reload nudge when a new Studio build is deployed.',
+    entries: [
+      { kind: 'fixed', text: 'YouTube downloads failed with "Requested format is not available" even with fresh cookies on file. yt-dlp\'s late-2025 EJS change moved YouTube signature/n-challenge solving into external JavaScript needing both the yt-dlp-ejs package (only installed via the yt-dlp[default] pip extra) and a supported JS runtime (the droplet\'s Node 20 is below yt-dlp-ejs\'s minimum). Deno is now installed on the droplet + provisioned by deploy.sh, requirements.txt pins yt-dlp[default]>=2026.3, and install.py warns when deno is missing locally.' },
+      { kind: 'fixed', text: 'After a YouTube download job hit "Complete", the UI looked frozen for up to minutes before jumping to the split step — the 7 MB MP3 was silently transferring server → browser via a bare res.blob(). The fetch now streams the body and reuses the job card to show live progress ("Transferring MP3 · x / y MiB").' },
+      { kind: 'added', text: 'Update nudge — open Studio tabs poll the served index.html (every 90 s + on tab focus) and compare the deployed bundle hash against the one they\'re running. When a new build ships, a bottom-right toast offers one-click Reload, so fixes actually reach long-lived SPA sessions instead of waiting for a manual hard refresh.' },
+    ],
+  },
+  {
     version: '1.10.0',
     date: '2026-05-20',
     summary:

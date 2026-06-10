@@ -11,6 +11,7 @@ import GenerationPresetsPage from './pages/GenerationPresetsPage.tsx'
 import BeatmapEditor from './components/BeatmapEditor.tsx'
 import VocalEditor from './components/VocalEditor.tsx'
 import { VersionBanner } from './components/VersionStatus.tsx'
+import UpdateNudge from './components/UpdateNudge.tsx'
 import { logout } from './components/AuthGate.tsx'
 import { STUDIO_VERSION } from './version.ts'
 
@@ -45,20 +46,27 @@ export default function App() {
 
   if (location.pathname.startsWith('/edit/')) {
     return (
-      <Routes>
-        <Route path="/edit/:trackId/:beatmapId" element={<BeatmapEditor />} />
-      </Routes>
+      <>
+        <UpdateNudge />
+        <Routes>
+          <Route path="/edit/:trackId/:beatmapId" element={<BeatmapEditor />} />
+        </Routes>
+      </>
     )
   }
   if (location.pathname.startsWith('/edit-vocals/')) {
     return (
-      <Routes>
-        <Route path="/edit-vocals/:trackId" element={<VocalEditor />} />
-      </Routes>
+      <>
+        <UpdateNudge />
+        <Routes>
+          <Route path="/edit-vocals/:trackId" element={<VocalEditor />} />
+        </Routes>
+      </>
     )
   }
   return (
     <div className="min-h-screen flex flex-col">
+      <UpdateNudge />
       <header className="border-b border-gray-800 bg-gray-900/80 backdrop-blur sticky top-0 z-50">
         <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-2 text-xl font-bold tracking-tight">
