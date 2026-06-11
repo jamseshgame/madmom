@@ -35,9 +35,9 @@ class SequenceNote(BaseModel):
 
 
 class SequenceCreate(BaseModel):
-    name: str
-    resolution: int = Field(gt=0)
-    notes: list[SequenceNote] = Field(min_length=1)
+    name: str = Field(max_length=200)
+    resolution: int = Field(gt=0, le=10_000)
+    notes: list[SequenceNote] = Field(min_length=1, max_length=5000)
 
 
 class SequenceRename(BaseModel):
