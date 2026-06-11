@@ -22,6 +22,12 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, '_repo_root', lambda: tmp_path)
     mod.reset_voices_cache()
 
+    # Neutralize any key configured via web/.env on the dev machine —
+    # resolve_api_key checks settings BEFORE the elevenapi.txt fallback, so
+    # without this the 503 test fails on hosts with a real key configured.
+    from web.backend.app.config import settings
+    monkeypatch.setattr(settings, 'elevenlabs_api_key', '')
+
     # Mock the HTTP layer. Capture original AsyncClient before patching to
     # avoid the recursive-transport trap.
     real_async_client = httpx.AsyncClient
