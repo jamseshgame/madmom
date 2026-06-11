@@ -358,6 +358,204 @@ def merge_beatmap_charts(
     }
 
 
+# ---------------------------------------------------------------------------
+# Pull-side inverses of merge_beatmap_charts — used by the Game Library pull
+# shim (split a published chart into per-stem editor charts) and push flow
+# (splice edited per-stem charts back into the published chart).
+# ---------------------------------------------------------------------------
+
+# Longest-first so e.g. a future suffix that prefixes another can't shadow it.
+_SUFFIX_ALTERNATION = '|'.join(sorted(set(STEM_TO_SECTION_SUFFIX.values()), key=len, reverse=True))
+_DIFF_SECTION_RE = re.compile(
+    r'\[(Expert|Hard|Medium|Easy)(' + _SUFFIX_ALTERNATION + r')(\d*)\]\s*\{([^}]*)\}'
+)
+_DIFF_NAME_RE = re.compile(r'(Expert|Hard|Medium|Easy)(' + _SUFFIX_ALTERNATION + r')(\d*)')
+_GENERIC_SECTION_RE = re.compile(r'\[([^\]\n]+)\]\s*\{([^}]*)\}')
+_BEATMAPS_KV_RE = re.compile(r'(\w+)="((?:[^"\\]|\\.)*)"')
+
+_DIFF_ORDER = {'Expert': 0, 'Hard': 1, 'Medium': 2, 'Easy': 3}
+
+
+def parse_beatmaps_block(chart_text: str) -> dict[str, dict]:
+    """Parse the [Beatmaps] metadata block written by merge_beatmap_charts.
+
+    Returns {section_name: {'preset', 'tag', 'beatmap_id'}} — one entry per
+    row. Charts without a [Beatmaps] block return {}.
+    """
+    body = _extract_section_body(chart_text, 'Beatmaps')
+    if body is None:
+        return {}
+    out: dict[str, dict] = {}
+    for line in body.splitlines():
+        m = re.match(r'^\s*([A-Za-z0-9]+)\s*=\s*(.+)$', line)
+        if not m:
+            continue
+        fields = {k: v.replace('\\"', '"') for k, v in _BEATMAPS_KV_RE.findall(m.group(2))}
+        out[m.group(1)] = {
+            'preset': fields.get('preset', ''),
+            'tag': fields.get('name', ''),
+            'beatmap_id': fields.get('beatmap_id', ''),
+        }
+    return out
+
+
+def _suffix_to_stem(suffix: str, available_stems: set[str]) -> str:
+    """Pick the stem a merged-chart section suffix most plausibly came from,
+    preferring stems whose audio actually exists in the pulled folder
+    (e.g. DoubleBass → 'rhythm' when rhythm.ogg is present, else 'bass')."""
+    candidates = [s for s, suf in STEM_TO_SECTION_SUFFIX.items() if suf == suffix]
+    for stem in candidates:
+        if stem in available_stems:
+            return stem
+    defaults = {'Single': 'song', 'Drums': 'drums', 'DoubleBass': 'rhythm', 'Keyboard': 'piano'}
+    return defaults.get(suffix) or (candidates[0] if candidates else 'song')
+
+
+def _is_merge_managed_section(name: str) -> bool:
+    """True for sections that splice_stem_charts_into_merged rebuilds from
+    scratch: difficulty sections, their SlideMeta companions, and [Beatmaps]."""
+    if name == 'Beatmaps':
+        return True
+    base = name[len('SlideMeta_'):] if name.startswith('SlideMeta_') else name
+    return _DIFF_NAME_RE.fullmatch(base) is not None
+
+
+def split_merged_chart(chart_text: str, available_stems: set[str] | None = None) -> list[dict]:
+    """Inverse of merge_beatmap_charts: explode a published multi-stem chart
+    into one editor-convention chart per (stem, alternate) group.
+
+    Difficulty sections are grouped by (suffix, alternate number) — all four
+    difficulties of [.*Drums2] form one group — and renamed back to the
+    [*Single] family that per-stem beatmap charts use. [SlideMeta_<merged
+    section>] blocks are renamed to [SlideMeta_<DifficultySingle>] so slide
+    grouping survives the round trip. Header blocks ([Song]/[SyncTrack]/
+    [Events]) are copied into every split chart. Per-group metadata comes
+    from the [Beatmaps] block when present.
+
+    Returns [{'stem', 'suffix', 'n', 'sections', 'preset', 'beatmap_id',
+    'is_active', 'chart_text'}] ordered as the sections appear in the file.
+    """
+    available = available_stems or set()
+    song = _extract_section_body(chart_text, 'Song') or ''
+    sync = _extract_section_body(chart_text, 'SyncTrack') or ''
+    events = _extract_section_body(chart_text, 'Events') or ''
+    meta_rows = parse_beatmaps_block(chart_text)
+
+    groups: dict[tuple[str, int], list[tuple[str, str]]] = {}
+    for m in _DIFF_SECTION_RE.finditer(chart_text):
+        diff, suffix, num, body = m.groups()
+        groups.setdefault((suffix, int(num) if num else 1), []).append((diff, body))
+
+    out: list[dict] = []
+    for (suffix, n), diffs in groups.items():
+        diffs.sort(key=lambda d: _DIFF_ORDER.get(d[0], 99))
+        merged_names = [f'{diff}{suffix}{n if n > 1 else ""}' for diff, _ in diffs]
+        parts = [f'[Song]\n{{{song}}}\n', f'[SyncTrack]\n{{{sync}}}\n', f'[Events]\n{{{events}}}\n']
+        for (diff, body), merged_name in zip(diffs, merged_names):
+            parts.append(f'[{diff}Single]\n{{{body}}}\n')
+            slide = _extract_section_body(chart_text, f'SlideMeta_{merged_name}')
+            if slide is not None:
+                parts.append(f'[SlideMeta_{diff}Single]\n{{{slide}}}\n')
+        row = next((meta_rows[name] for name in merged_names if name in meta_rows), None)
+        out.append({
+            'stem': _suffix_to_stem(suffix, available),
+            'suffix': suffix,
+            'n': n,
+            'sections': merged_names,
+            'preset': (row or {}).get('preset', ''),
+            'beatmap_id': (row or {}).get('beatmap_id', ''),
+            'is_active': (row['tag'] == 'active') if row else (n == 1),
+            'chart_text': ''.join(parts),
+        })
+    return out
+
+
+def splice_stem_charts_into_merged(
+    merged_text: str,
+    contributions: list[tuple[str, str, dict]],
+) -> str:
+    """Push-side counterpart of split_merged_chart: rebuild a published chart
+    from edited per-stem charts while preserving everything the editor
+    doesn't manage.
+
+    Each contribution is (chart_text, stem, meta) with meta
+    {'preset', 'beatmap_id', 'is_active'}, in publish order (primary first
+    per stem — same contract as merge_beatmap_charts). Difficulty sections,
+    their SlideMeta companions, and the [Beatmaps] index are regenerated
+    from the contributions; [Song]/[SyncTrack]/[Events] come from the first
+    contribution (falling back to the old merged chart); every other block
+    in merged_text ([JamseshVocals], [TutorialScript], lyric phrases, …) is
+    carried over verbatim.
+    """
+    old: dict[str, str] = {}
+    preserved: list[tuple[str, str]] = []
+    for m in _GENERIC_SECTION_RE.finditer(merged_text or ''):
+        name, body = m.group(1), m.group(2)
+        old.setdefault(name, body)
+        if name in ('Song', 'SyncTrack', 'Events') or _is_merge_managed_section(name):
+            continue
+        preserved.append((name, body))
+
+    primary_text = contributions[0][0] if contributions else ''
+    song = _extract_section_body(primary_text, 'Song') or old.get('Song', '')
+    sync = _extract_section_body(primary_text, 'SyncTrack') or old.get('SyncTrack', '')
+    events = _extract_section_body(primary_text, 'Events')
+    if events is None:
+        events = old.get('Events', '')
+
+    # Rebuild difficulty sections with merge_beatmap_charts' numbering rules.
+    # Counter keyed by suffix (not stem) so the two stems sharing a suffix
+    # (bass/rhythm, guitar/song) can't emit colliding unnumbered sections.
+    sections_out: list[tuple[str, str, str, int, str]] = []
+    slide_out: dict[str, str] = {}
+    counter: dict[str, int] = {}
+    for chart_text, stem, meta in contributions:
+        suffix = STEM_TO_SECTION_SUFFIX.get(stem)
+        if suffix is None:
+            continue
+        candidate_n = counter.get(suffix, 0) + 1
+        preset = _esc(meta.get('preset', '') or '')
+        bid = _esc(meta.get('beatmap_id', '') or '')
+        tag = 'active' if meta.get('is_active') else 'alt'
+        any_section = False
+        for diff in ('Expert', 'Hard', 'Medium', 'Easy'):
+            body = _extract_section_body(chart_text, f'{diff}Single')
+            if body is None:
+                continue
+            name = f'{diff}{suffix}' if candidate_n == 1 else f'{diff}{suffix}{candidate_n}'
+            row = f'  {name} = preset="{preset}" name="{tag}" beatmap_id="{bid}"'
+            sections_out.append((name, body, suffix, candidate_n, row))
+            slide = _extract_section_body(chart_text, f'SlideMeta_{diff}Single')
+            if slide is not None:
+                slide_out[name] = slide
+            any_section = True
+        if any_section:
+            counter[suffix] = candidate_n
+
+    suffix_first_seen: dict[str, int] = {}
+    for _, _, suf, _, _ in sections_out:
+        suffix_first_seen.setdefault(suf, len(suffix_first_seen))
+
+    def _sort_key(item):
+        name, _body, suffix, n, _row = item
+        diff = name[: name.index(suffix)]
+        return (suffix_first_seen[suffix], n, _DIFF_ORDER.get(diff, 99))
+
+    sections_sorted = sorted(sections_out, key=_sort_key)
+
+    parts = [f'[Song]\n{{{song}}}\n', f'[SyncTrack]\n{{{sync}}}\n', f'[Events]\n{{{events}}}\n']
+    if sections_sorted:
+        rows = '\n'.join(row for _, _, _, _, row in sections_sorted)
+        parts.append(f'[Beatmaps]\n{{\n{rows}\n}}\n')
+    for name, body, _suffix, _n, _row in sections_sorted:
+        parts.append(f'[{name}]\n{{{body}}}\n')
+        if name in slide_out:
+            parts.append(f'[SlideMeta_{name}]\n{{{slide_out[name]}}}\n')
+    for name, body in preserved:
+        parts.append(f'[{name}]\n{{{body}}}\n')
+    return ''.join(parts)
+
+
 def merge_charts(chart_paths: list[str], section_names: list[str], output_path: str):
     """Merge multiple single-difficulty .chart files into one."""
     sections = {}

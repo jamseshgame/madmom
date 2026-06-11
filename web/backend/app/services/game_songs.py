@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import shutil
 import time
@@ -13,6 +14,7 @@ from pathlib import Path
 import httpx
 
 from ..config import settings
+from .chart_generator import _DIFF_SECTION_RE, split_merged_chart, splice_stem_charts_into_merged
 from .github_publisher import _api, _headers, publish_song_folder
 from .tracks import TRACKS_DIR, Track
 
@@ -84,91 +86,159 @@ def _find_track_by_source_game_song(folder: str) -> Track | None:
     return None
 
 
-def clone_game_song_to_studio_track(folder: str) -> tuple[str, str]:
-    """Create (or reuse) a Studio Track whose files symlink back into the
-    pulled game-song folder, so the editor can open it and edits flow back
-    to the same on-disk paths "Push to game repo" reads from.
+# Oggs in a game-song folder that aren't instrument/mix stems.
+_NON_STEM_OGGS = {'preview'}
+# Folder-level files mirrored into the shim track's stems_dir so the Studio
+# track page (metadata form, album art) and the vocals/lyrics editors see them.
+_STEM_DIR_AUX_FILES = ('song.ini', 'album.png', 'vocal_notes.json', 'lyrics.json')
 
-    Returns (track_id, beatmap_id). Raises FileNotFoundError if the
+
+def _find_published_chart(src: Path) -> Path | None:
+    """The canonical published chart in a pulled folder. Game folders may also
+    carry notes.chart / notes_original.chart artifacts from older pipelines."""
+    for name in ('notes_fixed_slides.chart', 'notes.chart'):
+        p = src / name
+        if p.exists():
+            return p
+    return next(iter(src.glob('*.chart')), None)
+
+
+def _stable_beatmap_id(folder: str, suffix: str, n: int) -> str:
+    """Deterministic beatmap id for split chart groups that carry no
+    beatmap_id in [Beatmaps] — keeps ids stable across re-pulls."""
+    return hashlib.sha1(f'{folder}|{suffix}|{n}'.encode('utf-8')).hexdigest()[:12]
+
+
+def clone_game_song_to_studio_track(folder: str) -> tuple[str, str]:
+    """Create (or refresh) a Studio Track shim for a pulled game-song folder.
+
+    Every stem ogg in the folder (drums.ogg, guitar.ogg, rhythm.ogg, …, plus
+    song.ogg as the master mix) is registered as a track stem, linking back
+    into the pulled folder. The published chart is split into per-stem
+    beatmaps — the inverse of merge_beatmap_charts — so each chart is
+    assigned to its stem exactly like freshly generated tracks. Per-beatmap
+    notes.chart files are real files (the split content differs from the
+    merged chart), so push_game_song splices editor edits back into the
+    folder's chart before publishing.
+
+    Rebuilds imported beatmaps on every pull (pull itself resets the local
+    folder to repo state); Studio-generated beatmaps on the shim track
+    (model != 'imported') are left untouched. Ids are stable across re-pulls
+    via the [Beatmaps] block / a folder+section hash.
+
+    Returns (track_id, primary_beatmap_id). Raises FileNotFoundError if the
     game-song hasn't been pulled yet.
     """
     src = _local_path(folder)
     if not src.exists():
         raise FileNotFoundError(f'{folder} not pulled locally')
 
-    existing = _find_track_by_source_game_song(folder)
-    if existing and existing.beatmaps:
-        # Re-pull may have brought down subdirectories (vo/, realnotes/) that
-        # weren't present last time. Refresh the symlinks so the editor can
-        # see them without forcing the user to delete the shim first.
-        bm_id = existing.beatmaps[0]['id']
-        bm_dir = existing.beatmaps_dir / bm_id
-        for subdir in ('vo', 'realnotes'):
-            sub = src / subdir
-            if sub.is_dir() and not (bm_dir / subdir).exists():
-                _link_or_copy_dir(sub, bm_dir / subdir)
-        return existing.id, bm_id
-
     ini_path = src / 'song.ini'
     ini = _parse_song_ini(ini_path.read_text(encoding='utf-8', errors='replace')) if ini_path.exists() else {}
 
-    track = Track(
-        id=uuid.uuid4().hex[:12],
-        name=ini.get('name', folder),
-        created_at=time.time(),
-        stems={'song': 'song.ogg'},
-        model='manual',
-        output_format='ogg',
-        artist=ini.get('artist', ''),
-        album=ini.get('album', ''),
-        genre=ini.get('genre', ''),
-        year=ini.get('year', ''),
-        source_game_song=folder,
-    )
+    stem_oggs = {p.stem: p.name for p in sorted(src.glob('*.ogg')) if p.stem not in _NON_STEM_OGGS}
+
+    track = _find_track_by_source_game_song(folder)
+    if track is None:
+        track = Track(
+            id=uuid.uuid4().hex[:12],
+            name=ini.get('name', folder),
+            created_at=time.time(),
+            stems={},
+            model='manual',
+            output_format='ogg',
+            source_game_song=folder,
+        )
+    track.name = ini.get('name', folder)
+    track.artist = ini.get('artist', '')
+    track.album = ini.get('album', '')
+    track.genre = ini.get('genre', '')
+    track.year = ini.get('year', '')
+    track.stems = dict(stem_oggs)
+
     track.stems_dir.mkdir(parents=True, exist_ok=True)
-    if (src / 'song.ogg').exists():
-        _link_or_copy(src / 'song.ogg', track.stems_dir / 'song.ogg')
-    if ini_path.exists():
-        # Studio's track-level metadata reader looks at stems_dir/song.ini.
-        _link_or_copy(ini_path, track.stems_dir / 'song.ini')
+    for filename in stem_oggs.values():
+        _link_or_copy(src / filename, track.stems_dir / filename)
+    for aux in _STEM_DIR_AUX_FILES:
+        if (src / aux).exists():
+            _link_or_copy(src / aux, track.stems_dir / aux)
 
-    beatmap_id = uuid.uuid4().hex[:12]
-    bm_dir = track.beatmaps_dir / beatmap_id
-    bm_dir.mkdir(parents=True, exist_ok=True)
+    # Drop stale imported beatmaps before rebuilding from the fresh folder.
+    for bm in track.beatmaps:
+        if bm.get('model') == 'imported':
+            shutil.rmtree(track.beatmaps_dir / bm['id'], ignore_errors=True)
+    track.beatmaps = [b for b in track.beatmaps if b.get('model') != 'imported']
+    used_ids = {b['id'] for b in track.beatmaps}
 
-    # Editor prefers `notes.chart`; the pulled file is `notes_fixed_slides.chart`.
-    # Link both names so the chart is found whichever the editor asks for.
-    chart_src = src / 'notes_fixed_slides.chart'
-    if not chart_src.exists():
-        candidate = next(iter(src.glob('*.chart')), None)
-        if candidate:
-            chart_src = candidate
-    if chart_src.exists():
-        _link_or_copy(chart_src, bm_dir / 'notes.chart')
+    chart_path = _find_published_chart(src)
+    chart_text = chart_path.read_text(encoding='utf-8', errors='replace') if chart_path else ''
+    pieces = split_merged_chart(chart_text, set(stem_oggs)) if chart_text else []
 
-    if (src / 'song.ogg').exists():
-        _link_or_copy(src / 'song.ogg', bm_dir / 'song.ogg')
-    if ini_path.exists():
-        _link_or_copy(ini_path, bm_dir / 'song.ini')
-    # vo/ and realnotes/ — link the whole subdir so any new clips/packs added
-    # later show up automatically without re-running this function.
-    for subdir in ('vo', 'realnotes'):
-        sub = src / subdir
-        if sub.is_dir():
-            _link_or_copy_dir(sub, bm_dir / subdir)
+    def _setup_beatmap_dir(bm_id: str, stem: str) -> Path:
+        bm_dir = track.beatmaps_dir / bm_id
+        bm_dir.mkdir(parents=True, exist_ok=True)
+        # The stem's own audio doubles as the beatmap's song.ogg, matching
+        # the fresh-generation flow (the editor's scrubber/waveform read it).
+        stem_file = stem_oggs.get(stem) or stem_oggs.get('song')
+        if stem_file:
+            _link_or_copy(src / stem_file, bm_dir / 'song.ogg')
+        if ini_path.exists():
+            _link_or_copy(ini_path, bm_dir / 'song.ini')
+        # vo/ and realnotes/ — link the whole subdir so any new clips/packs
+        # added later show up automatically without re-running this function.
+        for subdir in ('vo', 'realnotes'):
+            sub = src / subdir
+            if sub.is_dir():
+                _link_or_copy_dir(sub, bm_dir / subdir)
+        return bm_dir
 
-    track.beatmaps.append({
-        'id': beatmap_id,
-        'stem': 'song',
-        'generated_at': time.time(),
-        'folder_name': folder,
-        'song_name': ini.get('name', folder),
-        'active': True,
-        'model': 'imported',
-        'model_version': None,
-    })
+    primary_beatmap_id = ''
+    if pieces:
+        for piece in pieces:
+            bm_id = piece['beatmap_id'] or _stable_beatmap_id(folder, piece['suffix'], piece['n'])
+            if bm_id in used_ids:
+                bm_id = uuid.uuid4().hex[:12]
+            used_ids.add(bm_id)
+            bm_dir = _setup_beatmap_dir(bm_id, piece['stem'])
+            chart_dst = bm_dir / 'notes.chart'
+            if chart_dst.is_symlink():  # legacy write-through shim — replace
+                chart_dst.unlink()
+            chart_dst.write_text(piece['chart_text'], encoding='utf-8')
+            track.beatmaps.append({
+                'id': bm_id,
+                'stem': piece['stem'],
+                'generated_at': time.time(),
+                'folder_name': folder,
+                'song_name': ini.get('name', folder),
+                'active': piece['is_active'],
+                'model': 'imported',
+                'model_version': None,
+                'preset': piece['preset'] or None,
+            })
+            if not primary_beatmap_id:
+                primary_beatmap_id = bm_id
+    elif chart_path is not None:
+        # No recognizable difficulty sections — fall back to the legacy
+        # single-beatmap shim with a write-through chart symlink.
+        bm_id = _stable_beatmap_id(folder, 'whole-chart', 1)
+        bm_dir = _setup_beatmap_dir(bm_id, 'song')
+        _link_or_copy(chart_path, bm_dir / 'notes.chart')
+        track.beatmaps.append({
+            'id': bm_id,
+            'stem': 'song',
+            'generated_at': time.time(),
+            'folder_name': folder,
+            'song_name': ini.get('name', folder),
+            'active': True,
+            'model': 'imported',
+            'model_version': None,
+        })
+        primary_beatmap_id = bm_id
+
+    if not primary_beatmap_id and track.beatmaps:
+        primary_beatmap_id = track.beatmaps[0]['id']
     track.save()
-    return track.id, beatmap_id
+    return track.id, primary_beatmap_id
 
 
 async def list_game_songs() -> list[dict]:
@@ -327,10 +397,59 @@ def update_local_song_ini(folder: str, fields: dict[str, str]) -> dict[str, str]
     return existing
 
 
+def sync_studio_edits_to_game_folder(folder: str) -> bool:
+    """Splice the shim track's per-stem chart edits back into the pulled
+    folder's published chart, the inverse of the split done at pull time.
+
+    Legacy single-beatmap shims write through a notes.chart symlink and are
+    skipped (their bm chart IS the folder chart). Studio-generated beatmaps
+    on the shim track are included as alternates, same as the normal track
+    publish flow. Returns True when the folder chart was rewritten.
+    """
+    local = _local_path(folder)
+    track = _find_track_by_source_game_song(folder)
+    if track is None or not track.beatmaps:
+        return False
+    # Same ordering rules as the Studio publish flow (primary first per
+    # stem, then alternates). Imported from the router lazily — the router
+    # imports this module's sibling services at module load.
+    from ..routers.tracks import order_beatmaps_for_publish
+
+    contributions: list[tuple[str, str, dict]] = []
+    for bm, is_primary in order_beatmaps_for_publish(list(track.beatmaps), {}):
+        chart_path = track.beatmaps_dir / bm.get('id', '') / 'notes.chart'
+        if not chart_path.exists() or chart_path.is_symlink():
+            continue
+        text = chart_path.read_text(encoding='utf-8', errors='replace')
+        # Legacy shims (pre-split, symlink fell back to a file copy) hold the
+        # whole merged chart — splicing one as a per-stem chart would drop
+        # every other stem's sections. Per-stem charts only ever carry
+        # unnumbered [*Single] sections.
+        if any(m.group(2) != 'Single' or m.group(3) for m in _DIFF_SECTION_RE.finditer(text)):
+            continue
+        contributions.append((
+            text,
+            bm.get('stem', ''),
+            {
+                'preset': bm.get('preset', '') or '',
+                'beatmap_id': bm.get('id', ''),
+                'is_active': is_primary,
+            },
+        ))
+    if not contributions:
+        return False
+
+    target = _find_published_chart(local) or (local / 'notes_fixed_slides.chart')
+    merged_text = target.read_text(encoding='utf-8', errors='replace') if target.exists() else ''
+    target.write_text(splice_stem_charts_into_merged(merged_text, contributions), encoding='utf-8')
+    return True
+
+
 async def push_game_song(folder: str) -> str:
     """Push the local folder back to GitHub SongInbox/{folder}/."""
     _ensure_token()
     local = _local_path(folder)
     if not local.exists():
         raise FileNotFoundError(f'{folder} not pulled locally')
+    sync_studio_edits_to_game_folder(folder)
     return await publish_song_folder(local, folder)
