@@ -14,6 +14,7 @@ import { SourcePickerModal } from './SourcePickerModal'
 import { GenerateTab } from './pipeline/GenerateTab'
 import FeedbackPanel from './feedback/FeedbackPanel'
 import { importSlides, buildSlideEmitInfo, groupSlides, nextSlideId, pruneSlides, type SlideEvent } from '../chart/slides'
+import { marqueeHitIds, rangeSelectIds, type MarqueeRect } from '../chart/selection'
 import { checkNoteRules, autoCleanNotes, ruleRemovalCount } from '../chart/noteRules'
 
 // .chart parsing ------------------------------------------------------------
@@ -2778,6 +2779,14 @@ export default function BeatmapEditor() {
     startCurrentTime: number
     moved: boolean
   } | null>(null)
+  // Range-select anchor: the note index last plainly-clicked (or
+  // ctrl-toggled). Shift+click selects every note between this anchor's
+  // tick and the clicked note's tick, file-manager style.
+  const selectAnchorRef = useRef<number | null>(null)
+  // Alt+drag marquee selection. Lives in a ref (not state): the rAF draw
+  // loop reads it every frame, so dragging renders without re-rendering
+  // React. additive = ctrl/cmd held at mousedown (add to selection).
+  const marqueeRef = useRef<(MarqueeRect & { additive: boolean; moved: boolean }) | null>(null)
   const [canvasSize, setCanvasSize] = useState({ w: 800, h: 800 })
 
   const [playing, setPlaying] = useState(false)
@@ -5322,6 +5331,19 @@ export default function BeatmapEditor() {
       ctx.fillStyle = '#67e8f9'
       ctx.fillText('Real note · click drops a gem with the real-note flag (cyan dot)', 12, 62)
     }
+
+    // Marquee selection rectangle (Alt+drag) — ref-driven so it animates
+    // under the rAF loop without React re-renders.
+    const mq = marqueeRef.current
+    if (mq && mq.moved) {
+      const mx = Math.min(mq.x0, mq.x1)
+      const my = Math.min(mq.y0, mq.y1)
+      ctx.fillStyle = 'rgba(56, 189, 248, 0.12)'
+      ctx.fillRect(mx, my, Math.abs(mq.x1 - mq.x0), Math.abs(mq.y1 - mq.y0))
+      ctx.strokeStyle = 'rgba(56, 189, 248, 0.8)'
+      ctx.lineWidth = 1
+      ctx.strokeRect(mx, my, Math.abs(mq.x1 - mq.x0), Math.abs(mq.y1 - mq.y0))
+    }
   }, [chart, currentTime, scrollSpeed, selectedIds, snapDivisor, isDrums, laneLabels, tool, waveformOnHighway, view3d.enabled, view3d.meshName, selectedTutorialId, sceneSelectedId])
 
   // Resize canvas backing store on container size change
@@ -5409,6 +5431,21 @@ export default function BeatmapEditor() {
     // re-opens it when the click actually landed on a VO or scene pill.
     setInspectPopup(null)
 
+    // Alt+drag = marquee selection, in any tool. Handled before everything
+    // else so Alt can never place a gem, seek, or start a scrub. Alt+Ctrl
+    // adds the marquee contents to the existing selection.
+    if (e.altKey) {
+      e.preventDefault()
+      const GUTTER_W = 64
+      if (cx < GUTTER_W) return
+      marqueeRef.current = {
+        x0: cx, y0: cy, x1: cx, y1: cy,
+        additive: e.ctrlKey || e.metaKey,
+        moved: false,
+      }
+      return
+    }
+
     // Click in the left timestamp gutter: seek the playhead to the tick
     // represented by the cursor's vertical position. Same y→tick mapping as
     // note placement, so a click next to a ruler label parks the playhead
@@ -5482,30 +5519,36 @@ export default function BeatmapEditor() {
 
     const id = findNoteAt(cx, cy)
 
-    // Click on existing note: select / shift-toggle, then start a group drag.
+    // Click on existing note: select (plain), range-select (shift),
+    // toggle (ctrl/cmd) — then start a group drag of the result.
     if (id !== null) {
       const orig = chart.notes[id]
       if (!orig) return
-      if (e.shiftKey || e.ctrlKey || e.metaKey) {
-        setSelectedIds((prev) => {
-          const next = new Set(prev)
-          if (next.has(id)) next.delete(id)
-          else next.add(id)
-          return next
-        })
-      } else if (!selectedIds.has(id)) {
-        setSelectedIds(new Set([id]))
+      let nextSel: Set<number>
+      const anchorNote = selectAnchorRef.current !== null ? chart.notes[selectAnchorRef.current] : undefined
+      if (e.shiftKey && anchorNote) {
+        // Range select: everything between the anchor's tick and this
+        // note's tick, inclusive, across all lanes. Anchor stays put so a
+        // further shift+click re-extends from the same origin.
+        nextSel = new Set(rangeSelectIds(chart.notes, anchorNote.tick, orig.tick))
+      } else if (!e.shiftKey && (e.ctrlKey || e.metaKey)) {
+        nextSel = new Set(selectedIds)
+        if (nextSel.has(id)) nextSel.delete(id)
+        else nextSel.add(id)
+        selectAnchorRef.current = id
+      } else {
+        // Plain click (or shift with no anchor yet): single-select unless
+        // the note is already part of the selection (keep it for dragging).
+        nextSel = selectedIds.has(id) ? new Set(selectedIds) : new Set([id])
+        selectAnchorRef.current = id
       }
-      // Build the drag snapshot from the post-update selection: include the
-      // clicked note even if the state update above hasn't flushed yet.
-      const dragIds = new Set(selectedIds)
-      if (e.shiftKey || e.ctrlKey || e.metaKey) {
-        if (dragIds.has(id)) dragIds.delete(id); else dragIds.add(id)
-      } else if (!dragIds.has(id)) {
-        dragIds.clear(); dragIds.add(id)
-      }
+      setSelectedIds(nextSel)
+      // Build the drag snapshot from the post-update selection — state
+      // hasn't flushed yet, so use nextSel directly. A ctrl-toggled-OFF
+      // note is absent, which also disables the drag (anchor not in
+      // snapshot → mousemove no-ops), matching the old behavior.
       const snapshot = new Map<number, { tick: number; lane: number }>()
-      dragIds.forEach((i) => {
+      nextSel.forEach((i) => {
         const n = chart.notes[i]
         if (n) snapshot.set(i, { tick: n.tick, lane: n.lane })
       })
@@ -5564,6 +5607,16 @@ export default function BeatmapEditor() {
     // Cursor affordance: the ruler gutter is a click-to-seek target.
     if (!dragRef.current && !placeRef.current && !scrubRef.current) {
       canvas.style.cursor = cx < 64 ? 'ns-resize' : 'crosshair'
+    }
+
+    // Marquee in progress: stretch the rect to the cursor. Drawing happens
+    // in draw(); selection resolves on mouseup.
+    if (marqueeRef.current) {
+      const m = marqueeRef.current
+      m.x1 = cx
+      m.y1 = cy
+      if (!m.moved && Math.hypot(cx - m.x0, cy - m.y0) >= 4) m.moved = true
+      return
     }
 
     // Empty-area drag = scrub the playhead. Map y-delta (in canvas pixels)
@@ -5687,6 +5740,30 @@ export default function BeatmapEditor() {
   }
 
   const handleMouseUp = () => {
+    // Marquee release: select everything inside the rect. A sub-threshold
+    // drag is a no-op (don't clear the selection on a stray alt-click).
+    if (marqueeRef.current) {
+      const m = marqueeRef.current
+      marqueeRef.current = null
+      const canvas = canvasRef.current
+      if (m.moved && chart && canvas) {
+        const HIT = canvas.height - 110
+        const GUTTER_W = 64
+        const GEM_X0 = GUTTER_W
+        const GEM_W = canvas.width - canvas.width * 0.36 - GUTTER_W
+        const items = chart.notes.map((n) => ({
+          lane: n.lane,
+          y: HIT - (tickToSec(tempoSegments, chart.resolution, n.tick) - currentTime) * scrollSpeed,
+        }))
+        const hits = marqueeHitIds(items, m, { gemX0: GEM_X0, gemX1: GEM_X0 + GEM_W, laneW: GEM_W / 5 })
+        setSelectedIds((prev) => {
+          const next = m.additive ? new Set(prev) : new Set<number>()
+          hits.forEach((i) => next.add(i))
+          return next
+        })
+      }
+      return
+    }
     if (dragRef.current?.moved) {
       // Validate the final drag position. If it violates the chart rules,
       // revert every dragged note to its pre-drag snapshot and flash an
