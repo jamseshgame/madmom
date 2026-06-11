@@ -10,10 +10,12 @@ import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js'
 import { WaveformStrip } from './WaveformStrip'
 import { ImportedSourcesPanel } from './ImportedSourcesPanel'
 import { ClipsLibraryPanel } from './ClipsLibraryPanel'
+import { SequencesPanel, type PasteScale, type SequenceRowData } from './SequencesPanel'
 import { SourcePickerModal } from './SourcePickerModal'
 import { GenerateTab } from './pipeline/GenerateTab'
 import FeedbackPanel from './feedback/FeedbackPanel'
 import { importSlides, buildSlideEmitInfo, groupSlides, nextSlideId, pruneSlides, type SlideEvent } from '../chart/slides'
+import { materializeSequence, normalizeSequence } from '../chart/sequences'
 import { marqueeHitIds, rangeSelectIds, type MarqueeRect } from '../chart/selection'
 import { checkNoteRules, autoCleanNotes, ruleRemovalCount } from '../chart/noteRules'
 
@@ -2831,6 +2833,9 @@ export default function BeatmapEditor() {
   const historyRef = useRef<ChartState[]>([])
   const futureRef = useRef<ChartState[]>([])
   const clipboardRef = useRef<ChartNote[]>([])
+  // Cross-track sequence library (server-backed, shared by all users).
+  const [sequences, setSequences] = useState<SequenceRowData[]>([])
+  const [seqScale, setSeqScale] = useState<PasteScale>(1)
   // Bumped to force a re-render when undo/redo state changes (so the toolbar
   // buttons enable/disable). The arrays themselves live in refs.
   const [, setHistoryTick] = useState(0)
@@ -3882,6 +3887,75 @@ export default function BeatmapEditor() {
     )
     commitNotes(next)
   }, [chart, selectedIds, commitNotes])
+
+  // Sequence library — list/save/rename/clone/delete against /api/sequences,
+  // plus place-at-playhead which goes through the normal commitNotes funnel
+  // so undo/redo and autosave behave like any other edit.
+  const refreshSequences = useCallback(() => {
+    fetch('/api/sequences')
+      .then((r) => (r.ok ? r.json() : []))
+      .then((data: SequenceRowData[]) => setSequences(Array.isArray(data) ? data : []))
+      .catch(() => undefined)
+  }, [])
+
+  useEffect(() => { refreshSequences() }, [refreshSequences])
+
+  const seqRequest = useCallback((path: string, init: RequestInit, errLabel: string) => {
+    fetch(path, init)
+      .then((r) => { if (!r.ok) throw new Error(`${errLabel} failed (${r.status})`) })
+      .then(() => refreshSequences())
+      .catch((err) => flashRuleError(String(err?.message ?? err)))
+  }, [refreshSequences, flashRuleError])
+
+  const saveSelectionAsSequence = useCallback((name: string) => {
+    if (!chart || selectedIds.size === 0) return
+    const sel = Array.from(selectedIds).map((i) => chart.notes[i]).filter(Boolean)
+    seqRequest('/api/sequences', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, resolution: chart.resolution, notes: normalizeSequence(sel) }),
+    }, 'Save sequence')
+  }, [chart, selectedIds, seqRequest])
+
+  const renameSequence = useCallback((id: string, newName: string) => {
+    seqRequest(`/api/sequences/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: newName }),
+    }, 'Rename sequence')
+  }, [seqRequest])
+
+  const cloneSequence = useCallback((id: string) => {
+    seqRequest(`/api/sequences/${id}/clone`, { method: 'POST' }, 'Clone sequence')
+  }, [seqRequest])
+
+  const deleteSequence = useCallback((id: string) => {
+    seqRequest(`/api/sequences/${id}`, { method: 'DELETE' }, 'Delete sequence')
+  }, [seqRequest])
+
+  const placeSequenceAtPlayhead = useCallback((seqId: string) => {
+    if (!chart) return
+    const seq = sequences.find((s) => s.id === seqId)
+    if (!seq || seq.notes.length === 0) return
+    // Anchor = playhead snapped to the current grid — same convention as
+    // Ctrl+V and the clips library.
+    const playheadTickRaw = secToTick(tempoSegments, chart.resolution, currentTime)
+    const snapTicks = Math.max(1, Math.round(chart.resolution / snapDivisor))
+    const baseTick = Math.max(0, Math.round(playheadTickRaw / snapTicks) * snapTicks)
+    const pasted = materializeSequence(seq.notes, {
+      sourceResolution: seq.resolution,
+      targetResolution: chart.resolution,
+      scale: seqScale,
+      baseTick,
+      slideIdStart: nextSlideId(chart.notes),
+    }) as ChartNote[]
+    const merged = [...chart.notes, ...pasted].sort((a, b) => a.tick - b.tick || a.lane - b.lane)
+    const pastedSet = new Set<ChartNote>(pasted)
+    commitNotes(merged)
+    const newSel = new Set<number>()
+    merged.forEach((n, i) => { if (pastedSet.has(n)) newSel.add(i) })
+    setSelectedIds(newSel)
+  }, [chart, sequences, tempoSegments, currentTime, snapDivisor, seqScale, commitNotes])
 
   // One-click cleanup for charts that arrived with rule violations (over-full
   // ticks, open+gem conflicts, misaligned chords) — typically from generation
@@ -9076,6 +9150,22 @@ export default function BeatmapEditor() {
               onPlaceAtPlayhead={placeClipAtPlayhead}
               onRename={renameClip}
               onDelete={deleteClip}
+              Wrapper={CollapsibleSection as any}
+            />
+          )}
+
+          {chart && (
+            <SequencesPanel
+              sequences={sequences}
+              scale={seqScale}
+              canSave={selectedIds.size > 0}
+              selectionCount={selectedIds.size}
+              onScaleChange={setSeqScale}
+              onSaveSelection={saveSelectionAsSequence}
+              onPlace={placeSequenceAtPlayhead}
+              onRename={renameSequence}
+              onClone={cloneSequence}
+              onDelete={deleteSequence}
               Wrapper={CollapsibleSection as any}
             />
           )}
