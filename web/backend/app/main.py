@@ -28,6 +28,7 @@ from .routers import (
     pipeline,
     sample_packs,
     scene_events,
+    sequences,
     stems,
     tracks,
     tutorial,
@@ -92,6 +93,7 @@ app.include_router(scene_events.router, dependencies=_auth_dep)
 app.include_router(gem_meshes.router, dependencies=_auth_dep)
 app.include_router(highways.router, dependencies=_auth_dep)
 app.include_router(generation_presets.router, dependencies=_auth_dep)
+app.include_router(sequences.router, dependencies=_auth_dep)
 # users router has its own require_admin / require_auth Depends per route
 app.include_router(users.router)
 
