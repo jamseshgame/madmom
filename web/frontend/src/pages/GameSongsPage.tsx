@@ -56,11 +56,19 @@ export default function GameSongsPage() {
   const [studioLink, setStudioLink] = useState<{ trackId: string; beatmapId: string } | null>(null)
   const [sortKey, setSortKey] = useState<keyof Song>('name')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
+  const [query, setQuery] = useState('')
 
   const sorted = useMemo(() => {
     if (!songs) return null
     const NUMERIC_KEYS = new Set(['year', 'song_length'])
-    const copy = [...songs]
+    const q = query.trim().toLowerCase()
+    const copy = q
+      ? songs.filter((s) =>
+          [s.name, s.folder, s.artist, s.album, s.genre, s.year, s.charter].some((v) =>
+            String(v ?? '').toLowerCase().includes(q),
+          ),
+        )
+      : [...songs]
     copy.sort((a, b) => {
       const av = String(a[sortKey] ?? '')
       const bv = String(b[sortKey] ?? '')
@@ -77,7 +85,7 @@ export default function GameSongsPage() {
       return sortDir === 'asc' ? cmp : -cmp
     })
     return copy
-  }, [songs, sortKey, sortDir])
+  }, [songs, sortKey, sortDir, query])
 
   const toggleSort = (key: keyof Song) => {
     if (sortKey === key) {
@@ -351,12 +359,33 @@ export default function GameSongsPage() {
           <h1 className="text-2xl font-bold">Game Library</h1>
           <p className="text-gray-500 mt-1">Songs published to the Jamsesh game repo.</p>
         </div>
-        <button
-          onClick={loadList}
-          className="px-3 py-1.5 text-sm text-gray-400 hover:text-gray-200 border border-gray-800 rounded-lg"
-        >
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <div className="relative">
+            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none">⌕</span>
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search songs..."
+              className="w-64 bg-gray-900 border border-gray-800 rounded-lg pl-8 pr-8 py-1.5 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-jam-500"
+            />
+            {query && (
+              <button
+                onClick={() => setQuery('')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-200 text-xs"
+                title="Clear search"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+          <button
+            onClick={loadList}
+            className="px-3 py-1.5 text-sm text-gray-400 hover:text-gray-200 border border-gray-800 rounded-lg"
+          >
+            Refresh
+          </button>
+        </div>
       </div>
 
       {listError && (
@@ -379,6 +408,12 @@ export default function GameSongsPage() {
 
       {songs && songs.length === 0 && !listError && (
         <div className="text-gray-500 text-sm">No songs in SongInbox yet.</div>
+      )}
+
+      {songs && songs.length > 0 && sorted && sorted.length === 0 && (
+        <div className="text-gray-500 text-sm">
+          No songs match <span className="text-gray-300">"{query}"</span>.
+        </div>
       )}
 
       {sorted && sorted.length > 0 && (
