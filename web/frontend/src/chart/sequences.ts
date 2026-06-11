@@ -25,7 +25,8 @@ export interface MaterializeOpts {
 // canonical stored form of a library sequence.
 export function normalizeSequence(notes: SequenceNote[]): SequenceNote[] {
   if (notes.length === 0) return []
-  const minTick = Math.min(...notes.map((n) => n.tick))
+  let minTick = notes[0].tick
+  for (const n of notes) if (n.tick < minTick) minTick = n.tick
   return notes
     .map((n) => ({ ...n, tick: n.tick - minTick }))
     .sort((a, b) => a.tick - b.tick || a.lane - b.lane)
@@ -34,6 +35,8 @@ export function normalizeSequence(notes: SequenceNote[]): SequenceNote[] {
 // Turn a stored sequence into notes ready to merge into the target chart.
 // Rounding after rescale/scale can collapse two notes onto the same
 // (tick, lane); duplicates are dropped, keeping the first.
+// Sustains that scale below 1 tick truncate to 0 (the note becomes a tap).
+// `sourceResolution` must be > 0 (validated upstream at save time).
 export function materializeSequence(seqNotes: SequenceNote[], opts: MaterializeOpts): SequenceNote[] {
   const ratio = (opts.targetResolution / opts.sourceResolution) * opts.scale
   const slideMap = new Map<number, number>()

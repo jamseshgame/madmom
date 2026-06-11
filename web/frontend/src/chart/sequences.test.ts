@@ -82,4 +82,12 @@ describe('materializeSequence', () => {
     )
     expect(out).toEqual([{ tick: 0, lane: 3, sustain: 0 }])
   })
+
+  it('floors non-integer rescale results (192 → 144, ratio 0.75)', () => {
+    const out = materializeSequence(
+      [{ tick: 10, lane: 0, sustain: 0 }],
+      { ...base, sourceResolution: 192, targetResolution: 144 },
+    )
+    expect(out).toEqual([{ tick: 7, lane: 0, sustain: 0 }])
+  })
 })
