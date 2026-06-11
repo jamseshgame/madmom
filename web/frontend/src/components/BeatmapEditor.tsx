@@ -2779,9 +2779,10 @@ export default function BeatmapEditor() {
     startCurrentTime: number
     moved: boolean
   } | null>(null)
-  // Range-select anchor: the note index last plainly-clicked (or
-  // ctrl-toggled). Shift+click selects every note between this anchor's
-  // tick and the clicked note's tick, file-manager style.
+  // Range-select anchor: the tick of the note last plainly-clicked (or
+  // ctrl-toggled). Shift+click selects every note between this tick and
+  // the clicked note's tick, file-manager style. Anchoring by tick (not
+  // index) stays valid across edits that reshuffle the notes array.
   const selectAnchorRef = useRef<number | null>(null)
   // Alt+drag marquee selection. Lives in a ref (not state): the rAF draw
   // loop reads it every frame, so dragging renders without re-rendering
@@ -5525,22 +5526,21 @@ export default function BeatmapEditor() {
       const orig = chart.notes[id]
       if (!orig) return
       let nextSel: Set<number>
-      const anchorNote = selectAnchorRef.current !== null ? chart.notes[selectAnchorRef.current] : undefined
-      if (e.shiftKey && anchorNote) {
+      if (e.shiftKey && selectAnchorRef.current !== null) {
         // Range select: everything between the anchor's tick and this
         // note's tick, inclusive, across all lanes. Anchor stays put so a
         // further shift+click re-extends from the same origin.
-        nextSel = new Set(rangeSelectIds(chart.notes, anchorNote.tick, orig.tick))
+        nextSel = new Set(rangeSelectIds(chart.notes, selectAnchorRef.current, orig.tick))
       } else if (!e.shiftKey && (e.ctrlKey || e.metaKey)) {
         nextSel = new Set(selectedIds)
         if (nextSel.has(id)) nextSel.delete(id)
         else nextSel.add(id)
-        selectAnchorRef.current = id
+        selectAnchorRef.current = orig.tick
       } else {
         // Plain click (or shift with no anchor yet): single-select unless
         // the note is already part of the selection (keep it for dragging).
         nextSel = selectedIds.has(id) ? new Set(selectedIds) : new Set([id])
-        selectAnchorRef.current = id
+        selectAnchorRef.current = orig.tick
       }
       setSelectedIds(nextSel)
       // Build the drag snapshot from the post-update selection — state
