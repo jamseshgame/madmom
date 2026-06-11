@@ -14,28 +14,16 @@ import { SequencesPanel, type PasteScale, type SequenceRowData } from './Sequenc
 import { SourcePickerModal } from './SourcePickerModal'
 import { GenerateTab } from './pipeline/GenerateTab'
 import FeedbackPanel from './feedback/FeedbackPanel'
-import { importSlides, buildSlideEmitInfo, groupSlides, nextSlideId, pruneSlides, type SlideEvent } from '../chart/slides'
+import { groupSlides, nextSlideId, pruneSlides } from '../chart/slides'
+import { parseSectionNotes, replaceSectionNotes, type ChartNote } from '../chart/chartio'
 import { materializeSequence, normalizeSequence } from '../chart/sequences'
 import { marqueeHitIds, rangeSelectIds, type MarqueeRect } from '../chart/selection'
 import { checkNoteRules, autoCleanNotes, ruleRemovalCount } from '../chart/noteRules'
 
 // .chart parsing ------------------------------------------------------------
 
-interface ChartNote {
-  tick: number
-  lane: number       // 0-4 colored frets, 5 force-hopo, 6 tap, 7 open
-  sustain: number    // sustain length in ticks (0 = single hit)
-  // Slide membership. Notes sharing a slideId form one slide run; see
-  // chart/slides.ts. The earliest tick is the start, the latest is the end.
-  slideId?: number
-  // Real-note: emit as `R` instead of `N`. Pack/scale are propagated from the
-  // most recent E realnotes_pack / realnotes_scale event in the section at
-  // parse time, and re-emitted as E events at serialize time when the active
-  // (pack, scale) changes.
-  type?: 'real'
-  pack?: string
-  scale?: string
-}
+// ChartNote now lives in chart/chartio.ts alongside the section parse /
+// serialize helpers so the slide round trip is unit-testable.
 
 // Tutorial-mode events sit in their own [TutorialScript] section in the
 // chart. VOs are timestamped audio playback prompts; STEPs declare a
@@ -370,53 +358,7 @@ function findNoteSections(text: string): string[] {
   return out
 }
 
-function parseSectionNotes(text: string, name: string, resolution: number): ChartNote[] {
-  const start = text.indexOf(`[${name}]`)
-  if (start === -1) return []
-  const open = text.indexOf('{', start)
-  const close = text.indexOf('}', open)
-  if (open === -1 || close === -1) return []
-  const inner = text.slice(open + 1, close)
-  // Walk in tick-stable order, propagating active (pack, scale) state from
-  // E realnotes_pack / E realnotes_scale events into each R note. Lines at
-  // the same tick keep their source order so a declaration written before
-  // its R note applies to it.
-  type RawLine =
-    | { tick: number; kind: 'note' | 'realnote'; lane: number; sustain: number }
-    | { tick: number; kind: 'pack' | 'scale'; value: string }
-  const raws: { i: number; line: RawLine }[] = []
-  const slideEvents: SlideEvent[] = []
-  let i = 0
-  for (const raw of inner.split('\n')) {
-    i++
-    const t = raw.trim()
-    if (!t) continue
-    let m = t.match(/^(\d+)\s*=\s*N\s+(\d+)\s+(\d+)/)
-    if (m) { raws.push({ i, line: { tick: Number(m[1]), kind: 'note', lane: Number(m[2]), sustain: Number(m[3]) } }); continue }
-    m = t.match(/^(\d+)\s*=\s*R\s+(\d+)\s+(\d+)/)
-    if (m) { raws.push({ i, line: { tick: Number(m[1]), kind: 'realnote', lane: Number(m[2]), sustain: Number(m[3]) } }); continue }
-    m = t.match(/^(\d+)\s*=\s*E\s+realnotes_pack\s+(\S+)/)
-    if (m) { raws.push({ i, line: { tick: Number(m[1]), kind: 'pack', value: m[2] } }); continue }
-    m = t.match(/^(\d+)\s*=\s*E\s+realnotes_scale\s+(\S+)/)
-    if (m) { raws.push({ i, line: { tick: Number(m[1]), kind: 'scale', value: m[2] } }); continue }
-    m = t.match(/^(\d+)\s*=\s*E\s+slide\s+(\d+)/)
-    if (m) { slideEvents.push({ tick: Number(m[1]), fret: Number(m[2]) }); continue }
-  }
-  raws.sort((a, b) => a.line.tick - b.line.tick || a.i - b.i)
-  let activePack: string | undefined
-  let activeScale: string | undefined
-  const notes: ChartNote[] = []
-  for (const { line: r } of raws) {
-    if (r.kind === 'pack') activePack = r.value
-    else if (r.kind === 'scale') activeScale = r.value
-    else if (r.kind === 'note') notes.push({ tick: r.tick, lane: r.lane, sustain: r.sustain })
-    else if (r.kind === 'realnote') notes.push({
-      tick: r.tick, lane: r.lane, sustain: r.sustain,
-      type: 'real', pack: activePack, scale: activeScale,
-    })
-  }
-  return importSlides(notes, slideEvents, resolution)
-}
+// parseSectionNotes moved to chart/chartio.ts (now SlideMeta-aware).
 
 // Slice a source beatmap's notes into a [MusicSeg_<id>] section body.
 // Hard clip (notes whose start tick is in [inTick, outTick) get
@@ -488,76 +430,8 @@ function sliceSourceChartForClip(
   }
 }
 
-function emitNoteSectionLines(notes: ChartNote[]): string[] {
-  // Sort by tick then lane, walking the active (pack, scale) state. Emit E
-  // events when state changes — they always precede the R note that triggered
-  // the change, so the reader sees the declaration first.
-  const sorted = [...notes].sort((a, b) => a.tick - b.tick || a.lane - b.lane)
-  const slideRoles = buildSlideEmitInfo(notes)
-  let activePack: string | undefined
-  let activeScale: string | undefined
-  const out: string[] = []
-  for (const n of sorted) {
-    const role = slideRoles.get(n)
-    if (role) {
-      // start -> E slide only · middle -> N + E slide · end -> N only
-      if (role !== 'start') out.push(`  ${n.tick} = N ${n.lane} 0`)
-      if (role !== 'end') out.push(`  ${n.tick} = E slide ${n.lane}`)
-      continue
-    }
-    if (n.type === 'real') {
-      if (n.pack && n.pack !== activePack) {
-        out.push(`  ${n.tick} = E realnotes_pack ${n.pack}`)
-        activePack = n.pack
-      }
-      if (n.scale && n.scale !== activeScale) {
-        out.push(`  ${n.tick} = E realnotes_scale ${n.scale}`)
-        activeScale = n.scale
-      }
-      out.push(`  ${n.tick} = R ${n.lane} ${n.sustain}`)
-    } else {
-      out.push(`  ${n.tick} = N ${n.lane} ${n.sustain}`)
-    }
-  }
-  return out
-}
-
-function replaceSectionNotes(text: string, name: string, notes: ChartNote[]): string {
-  const start = text.indexOf(`[${name}]`)
-  // Section doesn't exist yet — empty difficulties fall through here. Append
-  // the new block (with whatever notes have been authored) to the end so a
-  // fresh-difficulty edit survives the round-trip.
-  if (start === -1) {
-    if (notes.length === 0) return text
-    const block = `[${name}]\n{\n${emitNoteSectionLines(notes).join('\n')}\n}\n`
-    return text.trimEnd() + '\n' + block
-  }
-  const open = text.indexOf('{', start)
-  const close = text.indexOf('}', open)
-  if (open === -1 || close === -1) return text
-  const inner = text.slice(open + 1, close)
-  // Strip everything we re-emit: N + R note lines and E realnotes_* events.
-  // Other E events, S star power, and A anchors pass through. E slide is owned by the model.
-  const keptLines = inner
-    .split('\n')
-    .map((l) => l.replace(/\r$/, ''))
-    .filter((l) => {
-      const t = l.trim()
-      if (!t) return false
-      if (/^\d+\s*=\s*[NR]\s+/.test(t)) return false
-      if (/^\d+\s*=\s*E\s+realnotes_(pack|scale)\b/.test(t)) return false
-      // E slide lines are now owned by the model (emitted by emitNoteSectionLines).
-      if (/^\d+\s*=\s*E\s+slide\b/.test(t)) return false
-      return true
-    })
-  const newLines = emitNoteSectionLines(notes)
-  const combined = [...keptLines, ...newLines].sort((a, b) => {
-    const ta = Number(a.match(/^\s*(\d+)/)?.[1] ?? 0)
-    const tb = Number(b.match(/^\s*(\d+)/)?.[1] ?? 0)
-    return ta - tb
-  })
-  return text.slice(0, open + 1) + '\n' + combined.join('\n') + '\n' + text.slice(close)
-}
+// emitNoteSectionLines and replaceSectionNotes moved to chart/chartio.ts —
+// they now persist exact slide grouping in [SlideMeta_<section>] blocks.
 
 // ── Tutorial section parsing ────────────────────────────────────────────────
 // The chart-side schema is intentionally simple: every line in [TutorialScript]
@@ -3871,10 +3745,21 @@ export default function BeatmapEditor() {
   const makeSlide = useCallback(() => {
     if (!chart || selectedIds.size < 2) return
     const id = nextSlideId(chart.notes)
+    // Start/middle positions can't hold — the game treats them as instant
+    // slide markers — so zero their sustains in the model up front instead
+    // of silently dropping them at serialize time. The end note keeps its
+    // hold (it's a plain note to the game).
+    let lastTick = 0
+    selectedIds.forEach((i) => {
+      const n = chart.notes[i]
+      if (n && n.tick > lastTick) lastTick = n.tick
+    })
     // pruneSlides dissolves any existing slide left below 2 ticks when some of
     // its notes are re-tagged into this new slide.
     const next = pruneSlides(
-      chart.notes.map((n, i) => (selectedIds.has(i) ? { ...n, slideId: id } : n)),
+      chart.notes.map((n, i) => (selectedIds.has(i)
+        ? { ...n, slideId: id, sustain: n.tick < lastTick ? 0 : n.sustain }
+        : n)),
     )
     commitNotes(next)
   }, [chart, selectedIds, commitNotes])

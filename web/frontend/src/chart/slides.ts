@@ -142,6 +142,71 @@ function distinctTicks(group: SlideNote[]): number[] {
   return [...new Set(group.map((n) => n.tick))].sort((a, b) => a - b)
 }
 
+// ── Slide metadata (`[SlideMeta_<section>]`) ────────────────────────────────
+// The in-section chart format (`E slide` markers, end = plain N) carries no
+// group identity, so re-deriving slides from it is heuristic and lossy —
+// nearby slides merge, and an unrelated note between the last marker and the
+// true end steals the end. The editor therefore persists exact grouping in a
+// sidecar `[SlideMeta_<section>]` block of `<tick> = SL <lane> <slideId>`
+// rows. The game and Clone Hero ignore unknown sections; when the block is
+// present it is authoritative and the heuristic import is skipped entirely.
+
+/** One `<tick> = SL <lane> <slideId>` row from a [SlideMeta_*] section. */
+export interface SlideMetaRow {
+  tick: number
+  lane: number
+  id: number
+}
+
+/** Serialize the valid slide groups (≥2 distinct ticks) to SlideMeta rows. */
+export function emitSlideMetaLines(notes: SlideNote[]): string[] {
+  const roles = buildSlideEmitInfo(notes)
+  return [...roles.keys()]
+    .sort((a, b) => a.tick - b.tick || a.lane - b.lane)
+    .map((n) => `  ${n.tick} = SL ${n.lane} ${n.slideId}`)
+}
+
+/** Parse the inner lines of a [SlideMeta_*] section. Unknown lines skipped. */
+export function parseSlideMetaRows(lines: string[]): SlideMetaRow[] {
+  const rows: SlideMetaRow[] = []
+  for (const raw of lines) {
+    const m = raw.trim().match(/^(\d+)\s*=\s*SL\s+(\d+)\s+(\d+)$/)
+    if (m) rows.push({ tick: Number(m[1]), lane: Number(m[2]), id: Number(m[3]) })
+  }
+  return rows
+}
+
+/**
+ * Apply SlideMeta rows to a parsed note array: matching (tick, lane) notes
+ * get the row's slideId; a row with no matching note is synthesized as a
+ * zero-sustain note only when it sits at its group's first tick (slide
+ * starts carry no N line in the chart) — any other unmatched row is stale
+ * drift (note deleted by hand or another tool) and is dropped. Degenerate
+ * groups left with fewer than two distinct ticks are pruned.
+ *
+ * Pure: the input array and its objects are never mutated.
+ */
+export function applySlideMeta(notes: SlideNote[], rows: SlideMetaRow[]): SlideNote[] {
+  if (rows.length === 0) return notes
+  const result: SlideNote[] = notes.map((n) => ({ ...n }))
+  const minTickById = new Map<number, number>()
+  for (const r of rows) {
+    const cur = minTickById.get(r.id)
+    if (cur == null || r.tick < cur) minTickById.set(r.id, r.tick)
+  }
+  for (const r of rows) {
+    const existing = result.find(
+      (n) => n.tick === r.tick && n.lane === r.lane && n.slideId == null,
+    )
+    if (existing) {
+      existing.slideId = r.id
+    } else if (r.tick === minTickById.get(r.id)) {
+      result.push({ tick: r.tick, lane: r.lane, sustain: 0, slideId: r.id })
+    }
+  }
+  return pruneSlides(result)
+}
+
 /**
  * Compute each slide-tagged note's serialization role. Groups with fewer than
  * two distinct ticks are not real slides and are omitted (their notes
