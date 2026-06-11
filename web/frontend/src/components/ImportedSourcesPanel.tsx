@@ -13,7 +13,7 @@ interface Props {
   onOpenPicker: () => void
   onRename: (id: string, newId: string) => void
   onDelete: (id: string) => void
-  Wrapper: ({ children, title, right }: { children: ReactNode; title: string; right?: ReactNode }) => ReactNode
+  Wrapper: ({ children, title, right, id }: { children: ReactNode; title: string; right?: ReactNode; id: string }) => ReactNode
 }
 
 export function ImportedSourcesPanel({
@@ -21,6 +21,7 @@ export function ImportedSourcesPanel({
 }: Props) {
   return (
     <Wrapper
+      id="imported-sources"
       title="Imported sources"
       right={rows.length > 0 ? (
         <span className="text-[10px] text-cyan-300 font-mono">{rows.length}</span>

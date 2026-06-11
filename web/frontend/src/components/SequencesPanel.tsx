@@ -21,7 +21,7 @@ interface Props {
   onRename: (id: string, newName: string) => void
   onClone: (id: string) => void
   onDelete: (id: string) => void
-  Wrapper: ({ children, title, right }: { children: ReactNode; title: string; right?: ReactNode }) => ReactNode
+  Wrapper: ({ children, title, right, id }: { children: ReactNode; title: string; right?: ReactNode; id: string }) => ReactNode
 }
 
 const SCALES: { value: PasteScale; label: string }[] = [
@@ -67,6 +67,7 @@ export function SequencesPanel({
 }: Props) {
   return (
     <Wrapper
+      id="sequences-library"
       title="Sequences"
       right={sequences.length > 0 ? (
         <span className="text-[10px] text-cyan-300 font-mono">{sequences.length}</span>

@@ -19,7 +19,7 @@ interface Props {
   onPlaceAtPlayhead: (id: string) => void
   onRename: (id: string, newName: string) => void
   onDelete: (id: string) => void
-  Wrapper: ({ children, title, right }: { children: ReactNode; title: string; right?: ReactNode }) => ReactNode
+  Wrapper: ({ children, title, right, id }: { children: ReactNode; title: string; right?: ReactNode; id: string }) => ReactNode
 }
 
 export function ClipsLibraryPanel({
@@ -27,6 +27,7 @@ export function ClipsLibraryPanel({
 }: Props) {
   return (
     <Wrapper
+      id="clips-library"
       title="Clips"
       right={clips.length > 0 ? (
         <span className="text-[10px] text-cyan-300 font-mono">{clips.length}</span>

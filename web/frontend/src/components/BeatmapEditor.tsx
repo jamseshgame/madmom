@@ -3840,7 +3840,11 @@ export default function BeatmapEditor() {
   // Use this for any change the user would expect Ctrl+Z to revert: add, delete,
   // paste, drag-end, arrow-nudge, sustain-toggle. Avoid pushing on every frame
   // mid-drag (handleMouseMove writes through directly).
-  const commitNotes = useCallback((nextNotes: ChartNote[]) => {
+  // Returns true if the edit was committed, false if the rule gate rejected it
+  // — callers that follow up on the new notes (e.g. paste reselect) must bail
+  // on false. (The setChart updater runs synchronously here, so `rejected` is
+  // settled before we return.)
+  const commitNotes = useCallback((nextNotes: ChartNote[]): boolean => {
     let rejected = false
     setChart((prev) => {
       if (!prev) return prev
@@ -3861,6 +3865,7 @@ export default function BeatmapEditor() {
       return { ...prev, notes: nextNotes }
     })
     if (!rejected) setDirty(true)
+    return !rejected
   }, [flashRuleError])
 
   const makeSlide = useCallback(() => {
@@ -3951,7 +3956,7 @@ export default function BeatmapEditor() {
     }) as ChartNote[]
     const merged = [...chart.notes, ...pasted].sort((a, b) => a.tick - b.tick || a.lane - b.lane)
     const pastedSet = new Set<ChartNote>(pasted)
-    commitNotes(merged)
+    if (!commitNotes(merged)) return
     const newSel = new Set<number>()
     merged.forEach((n, i) => { if (pastedSet.has(n)) newSel.add(i) })
     setSelectedIds(newSel)
@@ -5956,12 +5961,15 @@ export default function BeatmapEditor() {
         }))
         const merged = [...chart.notes, ...pasted].sort((a, b) => a.tick - b.tick || a.lane - b.lane)
         // Reselect the freshly pasted notes by identity. We tagged none so
-        // identify them by membership in `pasted`.
+        // identify them by membership in `pasted`. Skip the reselect when the
+        // rule gate rejects the merge — those indices belong to a discarded
+        // array, not the chart the user is looking at.
         const pastedSet = new Set(pasted)
-        commitNotes(merged)
-        const newSel = new Set<number>()
-        merged.forEach((n, i) => { if (pastedSet.has(n)) newSel.add(i) })
-        setSelectedIds(newSel)
+        if (commitNotes(merged)) {
+          const newSel = new Set<number>()
+          merged.forEach((n, i) => { if (pastedSet.has(n)) newSel.add(i) })
+          setSelectedIds(newSel)
+        }
         e.preventDefault()
         return
       }
@@ -9128,7 +9136,7 @@ export default function BeatmapEditor() {
               onOpenPicker={() => setPickerOpen(true)}
               onRename={renameSource}
               onDelete={deleteSource}
-              Wrapper={CollapsibleSection as any}
+              Wrapper={CollapsibleSection}
             />
           )}
 
@@ -9150,7 +9158,7 @@ export default function BeatmapEditor() {
               onPlaceAtPlayhead={placeClipAtPlayhead}
               onRename={renameClip}
               onDelete={deleteClip}
-              Wrapper={CollapsibleSection as any}
+              Wrapper={CollapsibleSection}
             />
           )}
 
@@ -9166,7 +9174,7 @@ export default function BeatmapEditor() {
               onRename={renameSequence}
               onClone={cloneSequence}
               onDelete={deleteSequence}
-              Wrapper={CollapsibleSection as any}
+              Wrapper={CollapsibleSection}
             />
           )}
 
