@@ -6429,6 +6429,71 @@ export default function BeatmapEditor() {
     }
   }
 
+  // Probe an audio file's duration (seconds) without playing it. Resolves 0 on error.
+  const probeAudioDuration = (url: string): Promise<number> =>
+    new Promise((resolve) => {
+      const a = new Audio()
+      a.preload = 'metadata'
+      a.onloadedmetadata = () => resolve(Number.isFinite(a.duration) ? a.duration : 0)
+      a.onerror = () => resolve(0)
+      a.src = url
+    })
+
+  // Insert every clip in the selected batch back-to-back, starting at the playhead.
+  // Each clip is placed after the previous one (its audio duration + a small gap),
+  // so the whole batch lands as a sequenced run rather than stacked at one tick.
+  const insertAllLibraryFiles = async (batch: string) => {
+    if (!chart || libBatchFiles.length === 0) return
+    setLibBusyName('__all__')
+    setStudioImportError('')
+    setStudioImportStatus('')
+    const GAP_SEC = 0.25
+    try {
+      let cursorSec = tickToSec(tempoSegments, chart.resolution, playheadTick)
+      const newEvents: TutorialVoEvent[] = []
+      for (let i = 0; i < libBatchFiles.length; i++) {
+        const file = libBatchFiles[i]
+        setStudioImportStatus(`Inserting ${i + 1}/${libBatchFiles.length}…`)
+        const res = await fetch(
+          `/api/tutorial/${trackId}/beatmaps/${beatmapId}/vo/from-library`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ batch, name: file.name }),
+          },
+        )
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}))
+          throw new Error(err.detail || `Insert failed (${res.status})`)
+        }
+        const data = (await res.json()) as { rel_path: string; text: string }
+        const url = `/api/tutorial/vo-library/file/${encodeURIComponent(batch)}/${encodeURIComponent(file.name)}`
+        newEvents.push({
+          kind: 'vo',
+          id: `vo-${Date.now()}-${i}`,
+          tick: secToTick(tempoSegments, chart.resolution, cursorSec),
+          file: data.rel_path,
+          text: data.text || file.text,
+          engine: 'elevenlabs',
+          voiceId: '',
+        })
+        const dur = await probeAudioDuration(url)
+        cursorSec += (dur || 1) + GAP_SEC
+      }
+      updateTutorial([...chart.tutorial, ...newEvents], true)
+      if (newEvents.length) setSelectedTutorialId(newEvents[newEvents.length - 1].id)
+      setStudioImportStatus(
+        `Inserted all ${newEvents.length} clips back-to-back from ${
+          playheadTick === 0 ? 'the start' : fmtTick(playheadTick)
+        }.`,
+      )
+    } catch (e) {
+      setStudioImportError((e as Error).message)
+    } finally {
+      setLibBusyName('')
+    }
+  }
+
   // ── Music segments — upload modal state + handler ────────────────────────
   const [musicModal, setMusicModal] = useState<{ tick: number; difficulty: string } | null>(null)
   const [musicBusy, setMusicBusy] = useState(false)
@@ -9772,9 +9837,25 @@ export default function BeatmapEditor() {
                       ))}
                     </select>
                     {libSelectedBatch && libBatchFiles.length > 0 && (
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[10px] text-gray-500">
+                          {libBatchFiles.length} clip{libBatchFiles.length === 1 ? '' : 's'}
+                        </span>
+                        <button
+                          onClick={() => insertAllLibraryFiles(libSelectedBatch)}
+                          disabled={!!libBusyName || studioImportBusy}
+                          className="px-2 py-1 bg-amber-700 hover:bg-amber-600 disabled:opacity-40 text-white rounded text-[11px] font-medium flex-shrink-0"
+                          title={`Insert all ${libBatchFiles.length} clips back-to-back starting at ${fmtTick(playheadTick)}`}
+                        >
+                          {libBusyName === '__all__' ? 'Adding…' : `+ Add all (${libBatchFiles.length})`}
+                        </button>
+                      </div>
+                    )}
+                    {libSelectedBatch && libBatchFiles.length > 0 && (
                       <div className="max-h-72 overflow-y-auto border border-gray-800 rounded divide-y divide-gray-800">
                         {libBatchFiles.map((f) => {
                           const busy = libBusyName === f.name
+                          const allBusy = libBusyName === '__all__'
                           return (
                             <div key={f.name} className="flex items-center gap-2 px-2 py-1.5 bg-gray-900 hover:bg-gray-800">
                               <audio
@@ -9790,7 +9871,7 @@ export default function BeatmapEditor() {
                               </div>
                               <button
                                 onClick={() => insertLibraryFile(libSelectedBatch, f)}
-                                disabled={busy || studioImportBusy}
+                                disabled={busy || allBusy || studioImportBusy}
                                 className="px-2 py-1 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white rounded text-[11px] font-medium flex-shrink-0"
                                 title={`Insert at ${fmtTick(playheadTick)}`}
                               >
