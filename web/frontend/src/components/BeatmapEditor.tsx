@@ -2689,6 +2689,24 @@ export default function BeatmapEditor() {
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
   const [scrollSpeed, setScrollSpeed] = useState(450)
+  // Scroll-speed range. The slowest setting is pinned to whatever px/s packs
+  // the *entire song* into the visible future-runway (the canvas height above
+  // the strike line), so the slider's most-condensed end shows the whole chart
+  // with no scrolling. Long songs push the floor very low; short ones keep a
+  // sane minimum. The fast end stays fixed for fine authoring detail.
+  const fitSongSpeed = useMemo(() => {
+    if (!duration || duration <= 0) return null
+    const futurePx = Math.max(1, canvasSize.h - 110)
+    return futurePx / duration
+  }, [duration, canvasSize.h])
+  const scrollMin = fitSongSpeed ? Math.max(1, Math.floor(fitSongSpeed)) : 60
+  const scrollMax = 1200
+  // Visual length of the rotated vertical scroll slider on the highway's left.
+  const vScrollH = Math.max(160, Math.round(canvasSize.h * 0.55))
+  // Keep the live value inside the (song-dependent) range as it shifts.
+  useEffect(() => {
+    setScrollSpeed((s) => Math.min(scrollMax, Math.max(scrollMin, s)))
+  }, [scrollMin])
   // 3D-perspective preview. The canvas keeps drawing in 2D pixel space; we
   // tilt the rendered surface via CSS so the existing draw loop is untouched.
   // Editing (click/drag) is gated off in 3D since hit-testing assumes a
@@ -8212,17 +8230,26 @@ export default function BeatmapEditor() {
           <CollapsibleSection
             id="scroll-speed"
             title="Scroll speed"
-            right={<span className="text-[11px] font-mono text-gray-500 tabular-nums">{scrollSpeed} px/s</span>}
+            right={<span className="text-[11px] font-mono text-gray-500 tabular-nums">{Math.round(scrollSpeed)} px/s</span>}
           >
             <input
               type="range"
-              min={150}
-              max={1200}
-              step={25}
+              min={scrollMin}
+              max={scrollMax}
+              step={1}
               value={scrollSpeed}
               onChange={(e) => setScrollSpeed(Number(e.target.value))}
               className="w-full accent-jam-500"
             />
+            {fitSongSpeed && (
+              <button
+                onClick={() => setScrollSpeed(scrollMin)}
+                className="mt-1.5 w-full px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded text-[11px]"
+                title="Condense the whole song onto one screen (no scrolling)"
+              >
+                ⤓ Fit whole song
+              </button>
+            )}
           </CollapsibleSection>
 
           <CollapsibleSection
@@ -8581,6 +8608,38 @@ export default function BeatmapEditor() {
               currentTime={currentTime}
               playing={playing}
             />
+          )}
+          {/* Vertical scroll-speed slider — a clone of the sidebar control
+              parked on the left of the highway for one-handed zoom while
+              charting. Top = fastest scroll (most authoring detail); bottom =
+              the whole song on one screen (most condensed). A native range is
+              rotated -90° so it keeps the themed thumb + fill. Hidden in 3D
+              mesh mode where the runway fills the column. */}
+          {!(view3d.enabled && view3d.meshName) && (
+            <div className="absolute left-1 top-1/2 -translate-y-1/2 z-20 flex flex-col items-center gap-1 select-none pointer-events-none">
+              <span className="text-[9px] font-mono text-gray-400 tabular-nums">{Math.round(scrollSpeed)}</span>
+              <div className="relative pointer-events-auto" style={{ height: vScrollH, width: 22 }}>
+                <input
+                  type="range"
+                  min={scrollMin}
+                  max={scrollMax}
+                  step={1}
+                  value={scrollSpeed}
+                  onChange={(e) => setScrollSpeed(Number(e.target.value))}
+                  title={`Scroll speed — ${Math.round(scrollSpeed)} px/s. Bottom condenses the whole song onto one screen.`}
+                  className="accent-jam-500 cursor-pointer absolute top-1/2 left-1/2"
+                  style={{ width: vScrollH, transform: 'translate(-50%, -50%) rotate(-90deg)' }}
+                />
+              </div>
+              <button
+                onClick={() => setScrollSpeed(scrollMin)}
+                disabled={!fitSongSpeed}
+                title="Condense the whole song onto one screen (no scrolling)"
+                className="text-[9px] font-mono text-gray-500 hover:text-gray-200 disabled:opacity-30 pointer-events-auto"
+              >
+                ⤓fit
+              </button>
+            </div>
           )}
           <div
             ref={containerRef}
