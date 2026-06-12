@@ -2664,6 +2664,25 @@ export default function BeatmapEditor() {
   // loop reads it every frame, so dragging renders without re-rendering
   // React. additive = ctrl/cmd held at mousedown (add to selection).
   const marqueeRef = useRef<(MarqueeRect & { additive: boolean; moved: boolean }) | null>(null)
+  // Click-and-drag of a sidecar pill (VO / step / music / scene) along the time
+  // axis. Armed on mousedown over a pill; the move handler shifts the event's
+  // tick by the cursor's time-delta. A sub-threshold drag is treated as a plain
+  // click on mouseup and surfaces the deferred inspect popup instead of moving.
+  const pillDragRef = useRef<{
+    id: string
+    kind: 'tutorial' | 'scene'
+    origTick: number
+    startCx: number
+    startCy: number
+    moved: boolean
+    popup:
+      | {
+          x: number; y: number
+          accent: 'sky' | 'emerald'
+          heading: string; primary: string; secondary: string
+        }
+      | null
+  } | null>(null)
   const [canvasSize, setCanvasSize] = useState({ w: 800, h: 800 })
 
   const [playing, setPlaying] = useState(false)
@@ -5431,8 +5450,10 @@ export default function BeatmapEditor() {
       }
     }
 
-    // Click on a sidecar pill (VO / STEP / MUSIC / scene): select the
-    // corresponding event so its editor opens in the side panel.
+    // Mousedown on a sidecar pill (VO / STEP / MUSIC / scene): select the
+    // corresponding event (so its editor opens in the side panel) and arm a
+    // drag. A plain click — no significant movement — resolves on mouseup to
+    // the inspect popup we stash here; a drag instead shifts the event's tick.
     {
       const regions = pillRegionsRef.current
       // Search top-down so the most-recently-drawn pill wins on overlap.
@@ -5442,6 +5463,8 @@ export default function BeatmapEditor() {
           const contRect = containerRef.current?.getBoundingClientRect()
           const px = e.clientX - (contRect?.left ?? 0)
           const py = e.clientY - (contRect?.top ?? 0)
+          let origTick = 0
+          let popup: NonNullable<typeof inspectPopup> | null = null
           if (r.kind === 'tutorial') {
             setSelectedTutorialId(r.id)
             setSceneSelectedId(null)
@@ -5449,12 +5472,13 @@ export default function BeatmapEditor() {
             // the runway truncate, so this is the only place the whole path is
             // visible without opening the side panel.
             const ev = chart.tutorial.find((t) => t.id === r.id)
+            if (ev) origTick = ev.tick
             if (ev && ev.kind === 'vo') {
-              setInspectPopup({
+              popup = {
                 x: px, y: py, accent: 'sky', heading: 'VO file',
                 primary: ev.file || '(no file)',
                 secondary: ev.text ? `“${ev.text}”` : '',
-              })
+              }
             }
           } else {
             setSceneSelectedId(r.id)
@@ -5463,6 +5487,7 @@ export default function BeatmapEditor() {
             // (the pill itself only shows the onboard_-stripped short name).
             const ev = chart.sceneEvents.find((s) => s.id === r.id)
             if (ev) {
+              origTick = ev.tick
               const entry = findCatalogEntry(ev.name, customSceneTypes)
               const parts: string[] = []
               if (entry) parts.push(`${entry.groupLabel} · ${entry.itemLabel}`)
@@ -5470,12 +5495,16 @@ export default function BeatmapEditor() {
               if (ev.duration > 0) parts.push(`Duration: ${ev.duration} ticks`)
               else if (ev.value) parts.push(`Value: ${ev.value}`)
               else parts.push('Instantaneous (no duration)')
-              setInspectPopup({
+              popup = {
                 x: px, y: py, accent: 'emerald', heading: 'Scene event',
                 primary: ev.name,
                 secondary: parts.join('\n\n'),
-              })
+              }
             }
+          }
+          pillDragRef.current = {
+            id: r.id, kind: r.kind, origTick,
+            startCx: cx, startCy: cy, moved: false, popup,
           }
           return
         }
@@ -5568,9 +5597,16 @@ export default function BeatmapEditor() {
     const canvas = canvasRef.current!
     const { cx, cy } = canvasToCoords(e)
 
-    // Cursor affordance: the ruler gutter is a click-to-seek target.
-    if (!dragRef.current && !placeRef.current && !scrubRef.current) {
-      canvas.style.cursor = cx < 64 ? 'ns-resize' : 'crosshair'
+    // Cursor affordance: the ruler gutter is a click-to-seek target; sidecar
+    // pills show a grab cursor to advertise drag-to-move.
+    if (!dragRef.current && !placeRef.current && !scrubRef.current && !pillDragRef.current && !marqueeRef.current) {
+      let overPill = false
+      const regions = pillRegionsRef.current
+      for (let i = regions.length - 1; i >= 0; i--) {
+        const r = regions[i]
+        if (cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h) { overPill = true; break }
+      }
+      canvas.style.cursor = overPill ? 'grab' : cx < 64 ? 'ns-resize' : 'crosshair'
     }
 
     // Marquee in progress: stretch the rect to the cursor. Drawing happens
@@ -5580,6 +5616,33 @@ export default function BeatmapEditor() {
       m.x1 = cx
       m.y1 = cy
       if (!m.moved && Math.hypot(cx - m.x0, cy - m.y0) >= 4) m.moved = true
+      return
+    }
+
+    // Dragging a sidecar pill (VO / scene) along the time axis. Shift the
+    // event's tick by the cursor's time-delta so the grab point stays under
+    // the cursor (no jump). Live-updates bypass history; mouseup commits one
+    // entry. A sub-threshold drag stays a click (resolved on mouseup).
+    if (pillDragRef.current) {
+      const pd = pillDragRef.current
+      if (!pd.moved && Math.hypot(cx - pd.startCx, cy - pd.startCy) < 4) return
+      pd.moved = true
+      canvas.style.cursor = 'grabbing'
+      const deltaSec = (pd.startCy - cy) / Math.max(1, scrollSpeed)
+      const origSec = tickToSec(tempoSegments, chart.resolution, pd.origTick)
+      const rawTick = secToTick(tempoSegments, chart.resolution, Math.max(0, origSec + deltaSec))
+      const snapTicks = Math.max(1, Math.round(chart.resolution / snapDivisor))
+      const newTick = Math.max(0, Math.round(rawTick / snapTicks) * snapTicks)
+      if (pd.kind === 'tutorial') {
+        const cur = chart.tutorial.find((t) => t.id === pd.id)
+        if (!cur || cur.tick === newTick) return
+        setChart({ ...chart, tutorial: chart.tutorial.map((t) => (t.id === pd.id ? { ...t, tick: newTick } : t)) })
+      } else {
+        const cur = chart.sceneEvents.find((s) => s.id === pd.id)
+        if (!cur || cur.tick === newTick) return
+        setChart({ ...chart, sceneEvents: chart.sceneEvents.map((s) => (s.id === pd.id ? { ...s, tick: newTick } : s)) })
+      }
+      setDirty(true)
       return
     }
 
@@ -5704,6 +5767,32 @@ export default function BeatmapEditor() {
   }
 
   const handleMouseUp = () => {
+    // Sidecar-pill gesture resolution. A real drag commits one history entry
+    // (revert = the pre-drag tick); a click that never moved surfaces the
+    // inspect popup we deferred on mousedown.
+    if (pillDragRef.current) {
+      const pd = pillDragRef.current
+      pillDragRef.current = null
+      const canvas = canvasRef.current
+      if (canvas) canvas.style.cursor = 'crosshair'
+      if (pd.moved) {
+        setChart((prev) => {
+          if (!prev) return prev
+          const restored =
+            pd.kind === 'tutorial'
+              ? { ...prev, tutorial: prev.tutorial.map((t) => (t.id === pd.id ? { ...t, tick: pd.origTick } : t)) }
+              : { ...prev, sceneEvents: prev.sceneEvents.map((s) => (s.id === pd.id ? { ...s, tick: pd.origTick } : s)) }
+          historyRef.current.push(restored)
+          futureRef.current = []
+          setHistoryTick((n) => n + 1)
+          return prev
+        })
+      } else if (pd.popup) {
+        setInspectPopup(pd.popup)
+      }
+      return
+    }
+
     // Marquee release: select everything inside the rect. A sub-threshold
     // drag is a no-op (don't clear the selection on a stray alt-click).
     if (marqueeRef.current) {
@@ -6731,6 +6820,26 @@ export default function BeatmapEditor() {
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [sceneSelectedId, chart])
+
+  // Delete the selected sidecar tutorial event (VO / step / music) with the
+  // Delete/Backspace key. Skipped while gem notes are selected — those own the
+  // key via the main canvas keyboard handler. Music events also drop their
+  // audio file + section, so route them through removeMusicEvent.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (selectedTutorialId === null || selectedIds.size > 0) return
+      if (e.target instanceof HTMLElement && /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault()
+        const ev = chart?.tutorial.find((t) => t.id === selectedTutorialId)
+        if (ev && ev.kind === 'music') removeMusicEvent(ev)
+        else removeTutorialEvent(selectedTutorialId)
+        setInspectPopup(null)
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [selectedTutorialId, selectedIds, chart])
 
   const seekToTick = (tick: number) => {
     if (!chart || !audioRef.current) return
