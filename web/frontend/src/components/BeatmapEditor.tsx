@@ -19,6 +19,7 @@ import { parseSectionNotes, replaceSectionNotes, type ChartNote } from '../chart
 import { materializeSequence, normalizeSequence } from '../chart/sequences'
 import { marqueeHitIds, rangeSelectIds, type MarqueeRect } from '../chart/selection'
 import { checkNoteRules, autoCleanNotes, ruleRemovalCount } from '../chart/noteRules'
+import { fitTapTempoBpm } from '../chart/tapsync'
 
 // .chart parsing ------------------------------------------------------------
 
@@ -145,6 +146,12 @@ interface ChartState {
   tempoMarkers: TempoMarker[]
   timeSigs: TimeSig[]
   syncOther: SyncOtherRow[]
+  // Seconds to add to chart-time to get audio-time — the song's lead-in.
+  // Folded into the tempo map (see the tempoSegments memo) so notes, beat
+  // lines, the playhead and the click track all shift together against the
+  // raw audio. Round-trips through [Song] Offset. Positive = chart events
+  // occur later in the audio than their bare tick position implies.
+  audioOffsetSec: number
 }
 
 interface ChartSection {
@@ -287,7 +294,10 @@ function buildTempoSegments(markers: TempoMarker[], _resolution: number): TempoS
 // at that segment's tempo. Constant-tempo charts hit the first segment and
 // degenerate to the old (tick / resolution) * (60 / bpm) formula.
 function tickToSec(segs: TempoSegment[], resolution: number, tick: number): number {
-  if (tick <= 0 || segs.length === 0) return 0
+  // NB: no `tick <= 0` short-circuit. When an audio offset is folded into the
+  // segments' `seconds` (segs[0].seconds === offset), tick 0 must map to the
+  // offset, not 0. The segment math handles tick 0 (and negatives) correctly.
+  if (segs.length === 0) return 0
   let i = segs.length - 1
   while (i > 0 && segs[i].tick > tick) i--
   const seg = segs[i]
@@ -296,13 +306,32 @@ function tickToSec(segs: TempoSegment[], resolution: number, tick: number): numb
 }
 
 function secToTick(segs: TempoSegment[], resolution: number, sec: number): number {
-  if (sec <= 0 || segs.length === 0) return 0
+  // NB: no `sec <= 0` short-circuit — see tickToSec. The final Math.max(0, …)
+  // still clamps the result so audio time inside the offset lead-in (before
+  // chart tick 0) resolves to tick 0 rather than a negative tick.
+  if (segs.length === 0) return 0
   let i = segs.length - 1
   while (i > 0 && segs[i].seconds > sec) i--
   const seg = segs[i]
   const ds = sec - seg.seconds
   const dt = (ds * seg.microBpm * resolution) / 60000
   return Math.max(0, Math.round(seg.tick + dt))
+}
+
+// Write the audio offset back into the [Song] block's `Offset = …` line so it
+// round-trips. Replaces an existing Offset, inserts one after Resolution if the
+// block has none, and is a no-op if there's no [Song] block to write into.
+function applyOffsetToFullText(fullText: string, offsetSec: number): string {
+  // Trim trailing zeros but keep it a plain decimal (CH parsers dislike "1e-1").
+  const val = Number.isInteger(offsetSec) ? String(offsetSec) : String(Number(offsetSec.toFixed(6)))
+  if (/Offset\s*=\s*-?[0-9]*\.?[0-9]+/.test(fullText)) {
+    return fullText.replace(/Offset\s*=\s*-?[0-9]*\.?[0-9]+/, `Offset = ${val}`)
+  }
+  // No Offset line — insert one right after Resolution inside [Song].
+  if (/Resolution\s*=\s*\d+/.test(fullText)) {
+    return fullText.replace(/(Resolution\s*=\s*\d+[^\n]*\n)/, `$1  Offset = ${val}\n`)
+  }
+  return fullText
 }
 
 function applySyncTrackToFullText(
@@ -880,6 +909,10 @@ function parseChart(text: string, prefer?: string, customNames: Set<string> = ne
   const resolution = resMatch ? Number(resMatch[1]) : 192
   const nameMatch = text.match(/Name\s*=\s*"([^"]*)"/)
   const songName = nameMatch ? nameMatch[1] : 'Untitled'
+  // [Song] Offset — the lead-in in seconds (CH-style, may be fractional or
+  // negative). Drives the audio-vs-chart alignment; 0 if absent.
+  const offMatch = text.match(/Offset\s*=\s*(-?[0-9]*\.?[0-9]+)/)
+  const audioOffsetSec = offMatch ? Number(offMatch[1]) : 0
   const { tempoMarkers, timeSigs, syncOther } = parseSyncTrack(text)
   // Legacy chart.bpm/bpmRaw expose the tick-0 tempo for tooltips and the
   // approximate beat-grid in the timeline strips. Tempo-aware playback and
@@ -930,6 +963,7 @@ function parseChart(text: string, prefer?: string, customNames: Set<string> = ne
     sceneEventsPassthrough: passthroughWithoutSections,
     sections: chartSections,
     tempoMarkers, timeSigs, syncOther,
+    audioOffsetSec,
   }
 }
 
@@ -2587,6 +2621,19 @@ export default function BeatmapEditor() {
   // that would otherwise close over a stale value. Reassigned every render.
   const chartRef = useRef<ChartState | null>(chart)
   chartRef.current = chart
+  // Volatile context for live tap-to-place, read inside the (bind-once) keydown
+  // listener so it never has to re-subscribe on every playhead tick. Assigned
+  // each render once its inputs (binding, commitNotes, …) are in scope.
+  const livePlaceRef = useRef<{
+    enabled: boolean
+    playing: boolean
+    snapDivisor: number
+    fretKeys: string[][]
+    tempoSegments: TempoSegment[]
+    commit: (notes: ChartNote[]) => boolean
+  } | null>(null)
+  // Tap-sync, read by the bind-once keydown listener. `armed` gates the T key.
+  const tapSyncRef = useRef<{ armed: boolean; record: () => void } | null>(null)
   const [meta, setMeta] = useState<BeatmapMeta | null>(null)
   const [loadError, setLoadError] = useState('')
   const [saving, setSaving] = useState(false)
@@ -2609,7 +2656,13 @@ export default function BeatmapEditor() {
   // timelines) reads this so multi-tempo charts stay phase-locked.
   const tempoSegments = useMemo(() => {
     if (!chart) return [{ tick: 0, seconds: 0, microBpm: 120000 }]
-    return buildTempoSegments(chart.tempoMarkers, chart.resolution)
+    const base = buildTempoSegments(chart.tempoMarkers, chart.resolution)
+    // Fold the audio offset (song lead-in) into every segment's wall-clock
+    // `seconds`. This is the single chokepoint that shifts notes, beat lines,
+    // the playhead, click track and placement together against the raw audio
+    // timeline — currentTime stays pure audio time everywhere.
+    const off = chart.audioOffsetSec || 0
+    return off ? base.map((s) => ({ ...s, seconds: s.seconds + off })) : base
   }, [chart])
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
@@ -2686,6 +2739,14 @@ export default function BeatmapEditor() {
   const [canvasSize, setCanvasSize] = useState({ w: 800, h: 800 })
 
   const [playing, setPlaying] = useState(false)
+  // "Record" / live tap-to-chart mode: while playing, pressing a bound fret
+  // key drops a gem in that lane at the playhead (snapped to the grid).
+  const [recordPlace, setRecordPlace] = useState(false)
+  // Tap-sync tool: while armed, pressing T logs the playhead time. Averaging
+  // the deltas vs the current grid cancels reaction-time jitter and yields an
+  // offset correction; the slope of taps-over-beats yields the true tempo.
+  const [tapSync, setTapSync] = useState(false)
+  const [tapTimes, setTapTimes] = useState<number[]>([])
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
   const [scrollSpeed, setScrollSpeed] = useState(450)
@@ -3482,6 +3543,39 @@ export default function BeatmapEditor() {
         e.preventDefault()
         return
       }
+      // Tap-sync: when armed, T logs the current playhead time. Sits ahead of
+      // every other interpreter so the tap can't double as a fret/gameplay key.
+      const tsync = tapSyncRef.current
+      if (tsync && tsync.armed && code === 'KeyT' && !e.repeat) {
+        e.preventDefault()
+        tsync.record()
+        return
+      }
+      // Live tap-to-chart: while in record mode and playing, a bound fret key
+      // drops a gem in that lane at the playhead. Runs regardless of the
+      // selected gameplay device (you author with the keyboard), and ahead of
+      // the gameplay gate so it doesn't depend on Keyboard being active.
+      const lp = livePlaceRef.current
+      if (lp && lp.enabled && lp.playing && !e.repeat) {
+        const lane = lp.fretKeys.findIndex((keys) => keys.includes(code))
+        if (lane >= 0) {
+          e.preventDefault()
+          const c = chartRef.current
+          if (c) {
+            const snap = Math.max(1, Math.round(c.resolution / lp.snapDivisor))
+            const raw = secToTick(lp.tempoSegments, c.resolution, currentTimeRef.current)
+            const tick = Math.round(raw / snap) * snap
+            // Skip if a gem already sits on this exact tick+lane (re-taps).
+            if (!c.notes.some((n) => n.tick === tick && n.lane === lane)) {
+              const next = [...c.notes, { tick, lane, sustain: 0 }].sort(
+                (a, b) => a.tick - b.tick || a.lane - b.lane,
+              )
+              lp.commit(next)
+            }
+          }
+          return
+        }
+      }
       // Past this point, keyboard only drives gameplay when the Keyboard
       // device is selected — otherwise we let the page handle the keypress.
       if (!isKeyboardDevice) return
@@ -3778,6 +3872,28 @@ export default function BeatmapEditor() {
     if (!rejected) setDirty(true)
     return !rejected
   }, [flashRuleError])
+
+  // Refresh the live-place context every render. Cheap object; lets the
+  // bind-once keydown listener read current binding/playback state by ref.
+  livePlaceRef.current = {
+    enabled: recordPlace,
+    playing,
+    snapDivisor,
+    fretKeys: [binding.fret1.keys, binding.fret2.keys, binding.fret3.keys, binding.fret4.keys, binding.fret5.keys],
+    tempoSegments,
+    commit: commitNotes,
+  }
+
+  const recordTap = useCallback(() => {
+    setTapTimes((ts) => {
+      const t = currentTimeRef.current
+      // Debounce a double-trigger (key + button, or a bounced press): two
+      // "taps" within 120 ms can't be two real beats above ~250 BPM.
+      if (ts.length && t - ts[ts.length - 1] < 0.12) return ts
+      return [...ts, t]
+    })
+  }, [])
+  tapSyncRef.current = { armed: tapSync, record: recordTap }
 
   const makeSlide = useCallback(() => {
     if (!chart || selectedIds.size < 2) return
@@ -4165,10 +4281,17 @@ export default function BeatmapEditor() {
       // anchor predicts (a seek happened, or the audio paused/buffered),
       // reseed both the anchor and the beat counter.
       const expected = anchorAudio + (ctx.currentTime - anchorCtx) * playbackRate
-      if (Math.abs(a.currentTime - expected) > 0.06 || a.paused) {
+      const drift = Math.abs(a.currentTime - expected)
+      if (drift > 0.06 || a.paused) {
+        // Re-anchor the ctx⇄audio clock mapping on any drift so scheduled beats
+        // stay accurate. But only re-walk the beat counter on a *real* seek
+        // (a big jump). Re-seeding on small currentTime jitter would rewind or
+        // skip nextBeat and double-/miss-fire clicks — which sounds exactly
+        // like the click "not holding tempo".
+        const realSeek = drift > 0.25
         anchorAudio = a.currentTime
         anchorCtx = ctx.currentTime
-        nextBeat = reseedBeat()
+        if (realSeek) nextBeat = reseedBeat()
         if (a.paused) {
           timer = window.setTimeout(tick, TICK_MS)
           return
@@ -6147,6 +6270,7 @@ export default function BeatmapEditor() {
     let newFull = replaceSectionNotes(chart.fullText, chart.activeName, chart.notes)
     newFull = applyTutorialToFullText(newFull, chart.tutorial, chart.tutorialEnabled, chart.musicSections, chart.importedSources, chart.clips)
     newFull = applySyncTrackToFullText(newFull, chart.tempoMarkers, chart.timeSigs, chart.syncOther)
+    newFull = applyOffsetToFullText(newFull, chart.audioOffsetSec)
     const passthroughWithSections = [...chart.sceneEventsPassthrough, ...sectionLines(chart.sections)]
     newFull = applySceneToFullText(
       newFull,
@@ -6239,6 +6363,7 @@ export default function BeatmapEditor() {
       let newFull = replaceSectionNotes(base.fullText, base.activeName, base.notes)
       newFull = applyTutorialToFullText(newFull, base.tutorial, base.tutorialEnabled, base.musicSections, base.importedSources, base.clips)
       newFull = applySyncTrackToFullText(newFull, base.tempoMarkers, base.timeSigs, base.syncOther)
+      newFull = applyOffsetToFullText(newFull, base.audioOffsetSec)
       // Merge section markers back into passthrough so applySceneToFullText
       // re-emits them as standard `E "section ..."` rows in [Events].
       const passthroughWithSections = [...base.sceneEventsPassthrough, ...sectionLines(base.sections)]
@@ -7448,6 +7573,18 @@ export default function BeatmapEditor() {
                 <span className="text-gray-600"> / </span>
                 {Math.floor(duration / 60)}:{Math.floor(duration % 60).toString().padStart(2, '0')}
               </span>
+              <button
+                onClick={() => setRecordPlace((v) => !v)}
+                className={`ml-auto px-2 h-7 rounded text-[10px] font-bold tracking-wide flex items-center gap-1 transition-colors ${
+                  recordPlace
+                    ? 'bg-red-600 text-white' + (playing ? ' animate-pulse' : '')
+                    : 'bg-gray-800 hover:bg-gray-700 text-gray-300'
+                }`}
+                aria-pressed={recordPlace}
+                title="Record mode: while playing, press a bound fret key to drop a gem in that lane at the playhead (snapped to the grid). Bind fret keys in the Input section."
+              >
+                ● REC
+              </button>
             </div>
             <input
               type="range"
@@ -8225,6 +8362,265 @@ export default function BeatmapEditor() {
             <p className="text-[11px] text-gray-600 mt-1">
               Drag-to-move and arrow nudge snap to this beat fraction.
             </p>
+          </CollapsibleSection>
+
+          <CollapsibleSection
+            id="audio-sync"
+            title="Audio sync (offset + tempo)"
+            right={
+              <span className="text-[11px] font-mono text-gray-500 tabular-nums">
+                {Math.round((chart?.audioOffsetSec ?? 0) * 1000)} ms · {(chart?.bpm ?? 0).toFixed(2)} BPM
+              </span>
+            }
+          >
+            {(() => {
+              const ms = Math.round((chart?.audioOffsetSec ?? 0) * 1000)
+              const setMs = (next: number) =>
+                setChart((prev) => {
+                  if (!prev) return prev
+                  setDirty(true)
+                  return { ...prev, audioOffsetSec: next / 1000 }
+                })
+              const nudge = (d: number) => setMs(ms + d)
+              return (
+                <>
+                  <div className="flex items-center gap-1">
+                    {[-50, -10, -1].map((d) => (
+                      <button
+                        key={d}
+                        onClick={() => nudge(d)}
+                        className="px-2 py-1.5 rounded text-xs font-medium bg-gray-800 text-gray-300 hover:bg-gray-700"
+                      >
+                        {d}
+                      </button>
+                    ))}
+                    <input
+                      type="number"
+                      value={ms}
+                      step={1}
+                      onChange={(e) => setMs(Number(e.target.value) || 0)}
+                      className="w-16 px-2 py-1.5 rounded text-xs font-mono text-center bg-gray-900 border border-gray-700 text-gray-200"
+                    />
+                    {[1, 10, 50].map((d) => (
+                      <button
+                        key={d}
+                        onClick={() => nudge(d)}
+                        className="px-2 py-1.5 rounded text-xs font-medium bg-gray-800 text-gray-300 hover:bg-gray-700"
+                      >
+                        +{d}
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => setMs(0)}
+                      className="ml-auto px-2 py-1.5 rounded text-xs font-medium bg-gray-800 text-gray-400 hover:bg-gray-700"
+                      title="Reset offset to 0"
+                    >
+                      0
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-gray-600 mt-1">
+                    Shifts the whole chart (notes + beat lines + click) against the
+                    audio to fix the song lead-in. Increase until the beat lines land
+                    on the beat. Saved as <span className="font-mono">[Song] Offset</span>.
+                  </p>
+
+                  {/* Tempo fine-tune. Edits the tick-0 BPM marker; notes + beat
+                      lines both render through this so they stay locked and
+                      track the audio. Use after offset: offset anchors beat 1,
+                      BPM kills the drift over the rest of the song. */}
+                  {(() => {
+                    const bpm = chart?.bpm ?? 0
+                    const markerCount = chart?.tempoMarkers.length ?? 0
+                    // Scale EVERY tempo marker by the same ratio so a global
+                    // tempo correction applies across the whole song — editing
+                    // only the tick-0 marker would leave later segments (and
+                    // therefore the click track in them) at the old tempo.
+                    const setBpm = (next: number) =>
+                      setChart((prev) => {
+                        if (!prev) return prev
+                        const cur0 = prev.tempoMarkers[0]?.microBpm ?? 120000
+                        const target = Math.max(1000, Math.round(next * 1000))
+                        const ratio = target / cur0
+                        const markers = prev.tempoMarkers.map((m, i) =>
+                          i === 0 ? { ...m, microBpm: target } : { ...m, microBpm: Math.max(1000, Math.round(m.microBpm * ratio)) },
+                        )
+                        setDirty(true)
+                        return { ...prev, tempoMarkers: markers, bpm: target / 1000, bpmRaw: target }
+                      })
+                    const nudge = (d: number) => setBpm(Math.round((bpm + d) * 1000) / 1000)
+                    const multiMarker = markerCount > 1
+                    return (
+                      <div className="mt-3 pt-2 border-t border-gray-800">
+                        <div className="flex items-center gap-1">
+                          {[-1, -0.1, -0.01].map((d) => (
+                            <button
+                              key={d}
+                              onClick={() => nudge(d)}
+                              className="px-1.5 py-1.5 rounded text-[11px] font-medium bg-gray-800 text-gray-300 hover:bg-gray-700"
+                            >
+                              {d}
+                            </button>
+                          ))}
+                          <input
+                            type="number"
+                            value={Number(bpm.toFixed(3))}
+                            step={0.01}
+                            onChange={(e) => setBpm(Number(e.target.value) || bpm)}
+                            className="w-20 px-2 py-1.5 rounded text-xs font-mono text-center bg-gray-900 border border-gray-700 text-gray-200"
+                          />
+                          {[0.01, 0.1, 1].map((d) => (
+                            <button
+                              key={d}
+                              onClick={() => nudge(d)}
+                              className="px-1.5 py-1.5 rounded text-[11px] font-medium bg-gray-800 text-gray-300 hover:bg-gray-700"
+                            >
+                              +{d}
+                            </button>
+                          ))}
+                          <span className="ml-auto text-[10px] text-gray-500 font-mono">BPM</span>
+                        </div>
+                        <p className="text-[11px] text-gray-600 mt-1">
+                          Fixes drift after the offset lines up the start. Pivots around
+                          beat&nbsp;1, so set the offset first, then nudge BPM until a late
+                          beat re-aligns.{' '}
+                          {multiMarker && (
+                            <span className="text-amber-600/80">
+                              This chart has {markerCount} tempo markers — all are scaled together by the same ratio.
+                            </span>
+                          )}
+                        </p>
+                      </div>
+                    )
+                  })()}
+                </>
+              )
+            })()}
+          </CollapsibleSection>
+
+          <CollapsibleSection
+            id="tap-sync"
+            title="Tap sync"
+            right={<span className="text-[11px] font-mono text-gray-500 tabular-nums">{tapTimes.length} taps</span>}
+          >
+            {(() => {
+              const res = chart?.resolution ?? 192
+              const taps = tapTimes
+              let avgSec: number | null = null
+              let stdMs: number | null = null
+              let bpmFit: number | null = null
+              if (chart && taps.length >= 2) {
+                const deltas = taps.map((t) => {
+                  const k = Math.round(secToTick(tempoSegments, res, t) / res)
+                  return t - tickToSec(tempoSegments, res, k * res)
+                })
+                avgSec = deltas.reduce((a, b) => a + b, 0) / deltas.length
+                const v = deltas.reduce((a, d) => a + (d - (avgSec as number)) ** 2, 0) / deltas.length
+                stdMs = Math.sqrt(v) * 1000
+                // Grid-independent tempo fit (see src/chart/tapsync.ts).
+                bpmFit = fitTapTempoBpm(taps)
+              }
+              const avgMs = avgSec === null ? null : avgSec * 1000
+              const applyOffset = () =>
+                setChart((prev) => {
+                  if (!prev || avgSec === null) return prev
+                  setDirty(true)
+                  return { ...prev, audioOffsetSec: prev.audioOffsetSec + avgSec }
+                })
+              const applyTempo = () =>
+                setChart((prev) => {
+                  if (!prev || bpmFit === null) return prev
+                  // Scale all markers by the ratio (matches the BPM panel) so a
+                  // multi-tempo chart's whole map shifts, not just tick 0.
+                  const cur0 = prev.tempoMarkers[0]?.microBpm ?? 120000
+                  const target = Math.max(1000, Math.round(bpmFit * 1000))
+                  const ratio = target / cur0
+                  setDirty(true)
+                  return {
+                    ...prev,
+                    tempoMarkers: prev.tempoMarkers.map((m, i) =>
+                      i === 0 ? { ...m, microBpm: target } : { ...m, microBpm: Math.max(1000, Math.round(m.microBpm * ratio)) },
+                    ),
+                    bpm: target / 1000,
+                    bpmRaw: target,
+                  }
+                })
+              return (
+                <>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onPointerDown={recordTap}
+                      className="flex-1 py-2 rounded text-sm font-bold bg-jam-600 hover:bg-jam-500 text-white"
+                      title="Tap on each beat (or press T). Play the song first."
+                    >
+                      TAP
+                    </button>
+                    <label className="flex items-center gap-1 text-[11px] text-gray-300 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={tapSync}
+                        onChange={(e) => setTapSync(e.target.checked)}
+                        className="h-3.5 w-3.5 rounded border-gray-600 bg-gray-900 accent-jam-500"
+                      />
+                      <span className="font-mono">T</span> key
+                    </label>
+                    <button
+                      onClick={() => setTapTimes([])}
+                      disabled={taps.length === 0}
+                      className="px-2 py-1.5 rounded text-xs font-medium bg-gray-800 text-gray-400 hover:bg-gray-700 disabled:opacity-30"
+                    >
+                      Clear
+                    </button>
+                  </div>
+
+                  <div className="mt-2 grid grid-cols-2 gap-2 text-center">
+                    <div className="rounded bg-gray-900/60 py-1.5">
+                      <div className="text-[10px] text-gray-500 uppercase tracking-wide">Avg offset Δ</div>
+                      <div className="text-sm font-mono text-gray-200 tabular-nums">
+                        {avgMs === null ? '—' : `${avgMs >= 0 ? '+' : ''}${avgMs.toFixed(0)} ms`}
+                      </div>
+                      <div className="text-[10px] text-gray-600 tabular-nums">
+                        {stdMs === null ? ' ' : `±${stdMs.toFixed(0)} ms`}
+                      </div>
+                    </div>
+                    <div className="rounded bg-gray-900/60 py-1.5">
+                      <div className="text-[10px] text-gray-500 uppercase tracking-wide">Fitted tempo</div>
+                      <div className="text-sm font-mono text-gray-200 tabular-nums">
+                        {bpmFit === null ? '—' : `${bpmFit.toFixed(2)}`}
+                      </div>
+                      <div className="text-[10px] text-gray-600 tabular-nums">
+                        {bpmFit === null || !chart ? ' ' : `now ${chart.bpm.toFixed(2)}`}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-2 flex items-center gap-1">
+                    <button
+                      onClick={applyTempo}
+                      disabled={bpmFit === null}
+                      className="flex-1 px-2 py-1.5 rounded text-xs font-medium bg-gray-800 text-gray-200 hover:bg-gray-700 disabled:opacity-30"
+                      title="Set the chart BPM to the fitted tempo (fixes drift)"
+                    >
+                      Apply tempo
+                    </button>
+                    <button
+                      onClick={applyOffset}
+                      disabled={avgMs === null}
+                      className="flex-1 px-2 py-1.5 rounded text-xs font-medium bg-gray-800 text-gray-200 hover:bg-gray-700 disabled:opacity-30"
+                      title="Shift the offset by the average delta (aligns the start)"
+                    >
+                      Apply offset
+                    </button>
+                  </div>
+
+                  <p className="text-[11px] text-gray-600 mt-2">
+                    Play the song and tap each beat (quarter notes). For drift,{' '}
+                    <span className="text-gray-400">Apply tempo</span> first, then{' '}
+                    <span className="text-gray-400">Apply offset</span> — the average
+                    recomputes against the corrected grid. More taps = tighter average.
+                  </p>
+                </>
+              )
+            })()}
           </CollapsibleSection>
 
           <CollapsibleSection

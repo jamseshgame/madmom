@@ -10,5 +10,6 @@ backend/__pycache__/
 backend/app/__pycache__/
 backend/app/**/__pycache__/
 
-# Local uploads (user audio + extracted stems)
+# Local uploads (user audio + extracted stems + per-beatmap chart data)
 backend/uploads/
+backend/beatmap-uploads/
