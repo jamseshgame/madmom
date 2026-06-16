@@ -783,9 +783,55 @@ async def get_beatmap_chart(track_id: str, beatmap_id: str):
     return {'chart': chart_path.read_text(encoding='utf-8', errors='replace')}
 
 
+_SYNCTRACK_BLOCK_RE = re.compile(r'\[SyncTrack\]\s*\{[^}]*\}')
+_OFFSET_LINE_RE = re.compile(r'(?m)^(\s*Offset\s*=\s*)-?[0-9]*\.?[0-9]+\s*$')
+
+
+def _propagate_tempo_to_siblings(track_id: str, source_id: str, source_text: str) -> list[str]:
+    """Copy the just-saved beatmap's [SyncTrack] block and [Song] Offset onto
+    every sibling beatmap of the track.
+
+    All of a track's beatmaps are meant to share one tempo grid, and the
+    publish-time merge (chart_generator.merge_beatmap_charts) takes [SyncTrack]
+    from whichever beatmap it processes first. So a tempo/offset edit on one
+    beatmap that *isn't* mirrored to its siblings can ship a stale tempo in the
+    merged chart — which plays correctly in the editor (you're viewing the
+    edited beatmap) but drifts in-game. Returns the ids that actually changed.
+    """
+    sync_m = _SYNCTRACK_BLOCK_RE.search(source_text)
+    if not sync_m:
+        return []
+    sync_block = sync_m.group(0)  # full "[SyncTrack]\n{ ... }"
+    off_m = re.search(r'Offset\s*=\s*(-?[0-9]*\.?[0-9]+)', source_text)
+    offset_val = off_m.group(1) if off_m else None
+
+    track = get_track(track_id)
+    if track is None:
+        return []
+    synced: list[str] = []
+    for bm in track.beatmaps:
+        bid = bm.get('id')
+        if not bid or bid == source_id:
+            continue
+        cp = track.beatmaps_dir / bid / 'notes.chart'
+        if not cp.exists():
+            continue
+        original = cp.read_text(encoding='utf-8', errors='replace')
+        # Replace the whole [SyncTrack] block (lambda avoids backref expansion).
+        updated = _SYNCTRACK_BLOCK_RE.sub(lambda _m: sync_block, original, count=1)
+        if offset_val is not None:
+            updated = _OFFSET_LINE_RE.sub(lambda _m: _m.group(1) + offset_val, updated, count=1)
+        if updated != original:
+            cp.write_text(updated, encoding='utf-8')
+            synced.append(bid)
+    return synced
+
+
 @router.put('/{track_id}/beatmaps/{beatmap_id}/chart')
 async def put_beatmap_chart(track_id: str, beatmap_id: str, body: dict):
-    """Overwrite notes.chart with edited text from the editor."""
+    """Overwrite notes.chart with edited text from the editor, then mirror the
+    tempo grid ([SyncTrack] + [Song] Offset) onto the track's other beatmaps so
+    the published merge can't ship a stale, drifting tempo."""
     bm_dir = get_beatmap_dir(track_id, beatmap_id)
     if not bm_dir:
         raise HTTPException(404, 'Beatmap not found')
@@ -796,7 +842,8 @@ async def put_beatmap_chart(track_id: str, beatmap_id: str, body: dict):
         raise HTTPException(413, 'Chart too large')
     chart_path = bm_dir / 'notes.chart'
     chart_path.write_text(text, encoding='utf-8')
-    return {'ok': True, 'bytes': len(text)}
+    tempo_synced = _propagate_tempo_to_siblings(track_id, beatmap_id, text)
+    return {'ok': True, 'bytes': len(text), 'tempo_synced_to': tempo_synced}
 
 
 @router.delete('/{track_id}/beatmaps/{beatmap_id}')
