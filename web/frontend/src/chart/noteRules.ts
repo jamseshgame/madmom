@@ -29,19 +29,30 @@ function chordNear(resolution: number): number {
 
 // Pure check — returns null when the chart is clean, or a human-readable
 // message describing the first violation found.
-export function checkNoteRules(notes: RuleNote[], resolution: number): string | null {
+export function checkNoteRules(notes: RuleNote[], resolution: number, isDrums = false): string | null {
   const CHORD_NEAR = chordNear(resolution)
   const tickLanes = new Map<number, number[]>()
   for (const n of notes) {
-    if (n.lane > 4 && n.lane !== 7) continue
+    // Drums use lanes 0–5 (incl. Floor Tom on 5); guitar uses 0–4 gems + 7 open
+    // and reserves 5/6 as hopo/tap modifiers that never count as a chord note.
+    if (isDrums ? n.lane > 5 : n.lane > 4 && n.lane !== 7) continue
     if (n.slideId != null) continue // slides are runs, not chords
     const arr = tickLanes.get(n.tick)
     if (arr) arr.push(n.lane)
     else tickLanes.set(n.tick, [n.lane])
   }
   // R1: max 2 notes per tick. An open + any gem at the same tick is a
-  // gameplay-conflict (open = full strum) → also flagged.
+  // gameplay-conflict (open = full strum) → also flagged. For drums the kick
+  // (lane 0) is a foot pedal and doesn't count toward the 2-note hand limit, so
+  // kick + 2 hands (3 total) is allowed.
   for (const [tick, lanes] of tickLanes) {
+    if (isDrums) {
+      const hands = lanes.filter((l) => l !== 0).length
+      if (hands > 2) {
+        return `Max 2 drum notes (plus kick) per beat (tick ${tick} has ${lanes.length})`
+      }
+      continue
+    }
     if (lanes.length > 2) {
       return `Max 2 notes per beat (tick ${tick} has ${lanes.length})`
     }
@@ -52,7 +63,7 @@ export function checkNoteRules(notes: RuleNote[], resolution: number): string | 
   // R2: near-miss chord check. Walk gem notes in tick order — any two within
   // CHORD_NEAR ticks that are NOT at the same tick are a misaligned chord.
   const gems = notes
-    .filter((n) => n.lane <= 4)
+    .filter((n) => n.lane <= (isDrums ? 5 : 4))
     .map((n) => ({ tick: n.tick, lane: n.lane }))
     .sort((a, b) => a.tick - b.tick)
   for (let i = 0; i < gems.length; i++) {
@@ -77,20 +88,35 @@ export function checkNoteRules(notes: RuleNote[], resolution: number): string | 
 //   R2  drop the later of any two gems within CHORD_NEAR ticks that don't share
 //       a tick (a misaligned chord partner).
 // Returns the cleaned note array, or null when the chart is already clean.
-export function autoCleanNotes<T extends RuleNote>(notes: T[], resolution: number): T[] | null {
+export function autoCleanNotes<T extends RuleNote>(notes: T[], resolution: number, isDrums = false): T[] | null {
   const CHORD_NEAR = chordNear(resolution)
   const remove = new Set<number>()
   // R1: group gem + open notes by tick (skip modifiers + slide-tagged notes,
   // exactly as checkNoteRules does).
   const byTick = new Map<number, number[]>()
   notes.forEach((n, i) => {
-    if (n.lane > 4 && n.lane !== 7) return
+    if (isDrums ? n.lane > 5 : n.lane > 4 && n.lane !== 7) return
     if (n.slideId != null) return
     const arr = byTick.get(n.tick)
     if (arr) arr.push(i)
     else byTick.set(n.tick, [i])
   })
   for (const idxs of byTick.values()) {
+    if (isDrums) {
+      // Keep the kick (lane 0, exempt) plus up to 2 distinct-lane hand gems;
+      // drop duplicate lanes and any hands beyond two.
+      const seenLane = new Set<number>()
+      let hands = 0
+      for (const i of idxs) {
+        const lane = notes[i].lane
+        if (lane > 5) { remove.add(i); continue } // no opens/modifiers in drums
+        if (seenLane.has(lane)) { remove.add(i); continue }
+        if (lane === 0) { seenLane.add(0); continue } // kick always kept
+        if (hands >= 2) { remove.add(i); continue }
+        seenLane.add(lane); hands++
+      }
+      continue
+    }
     const opens = idxs.filter((i) => notes[i].lane === 7)
     const gems = idxs.filter((i) => notes[i].lane <= 4)
     if (opens.length && gems.length) opens.forEach((i) => remove.add(i))
@@ -110,7 +136,7 @@ export function autoCleanNotes<T extends RuleNote>(notes: T[], resolution: numbe
   // R2: walk surviving gems in tick order, dropping misaligned chord partners.
   const gems = notes
     .map((n, i) => ({ i, tick: n.tick, lane: n.lane }))
-    .filter((g) => notes[g.i].lane <= 4 && !remove.has(g.i))
+    .filter((g) => notes[g.i].lane <= (isDrums ? 5 : 4) && !remove.has(g.i))
     .sort((a, b) => a.tick - b.tick)
   for (let a = 0; a < gems.length; a++) {
     if (remove.has(gems[a].i)) continue
@@ -130,7 +156,7 @@ export function autoCleanNotes<T extends RuleNote>(notes: T[], resolution: numbe
 // gate treats this as a monotone "dirtiness" score: an edit is allowed unless it
 // raises the score (i.e. introduces a brand-new violation). A chart that arrives
 // already dirty can therefore still be edited — and deleted out of — freely.
-export function ruleRemovalCount(notes: RuleNote[], resolution: number): number {
-  const cleaned = autoCleanNotes(notes, resolution)
+export function ruleRemovalCount(notes: RuleNote[], resolution: number, isDrums = false): number {
+  const cleaned = autoCleanNotes(notes, resolution, isDrums)
   return cleaned ? notes.length - cleaned.length : 0
 }

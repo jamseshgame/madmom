@@ -177,3 +177,91 @@ describe('slide round-trip via SlideMeta', () => {
     expect(out).toContain('0 = E realnotes_pack guitar1')
   })
 })
+
+describe('drum Pro Drums mapping', () => {
+  const lanesByTick = (notes: ChartNote[]) =>
+    notes.slice().sort((a, b) => a.tick - b.tick || a.lane - b.lane).map((n) => [n.tick, n.lane])
+
+  it('serializes hi-hat and cymbal lanes with their cymbal modifier notes', () => {
+    const text = replaceSectionNotes(BASE, 'ExpertDrums', [
+      { tick: 0, lane: 2, sustain: 0 }, // hi-hat
+      { tick: 0, lane: 4, sustain: 0 }, // cymbal
+    ])
+    expect(text).toContain('0 = N 2 0')
+    expect(text).toContain('0 = N 66 0') // yellow cymbal flag → Hats
+    expect(text).toContain('0 = N 4 0')
+    expect(text).toContain('0 = N 68 0') // green cymbal flag → Crash
+  })
+
+  it('round-trips all five editor drum lanes losslessly', () => {
+    const notes: ChartNote[] = [
+      { tick: 0, lane: 0, sustain: 0 }, // kick
+      { tick: 0, lane: 2, sustain: 0 }, // hi-hat
+      { tick: 192, lane: 1, sustain: 0 }, // snare
+      { tick: 192, lane: 4, sustain: 0 }, // cymbal
+      { tick: 384, lane: 3, sustain: 0 }, // tom
+    ]
+    expect(lanesByTick(roundTrip(notes, 'ExpertDrums'))).toEqual([
+      [0, 0], [0, 2], [192, 1], [192, 4], [384, 3],
+    ])
+  })
+
+  it('legacy drum charts (no modifiers) keep note-number = lane', () => {
+    const legacy = `[ExpertDrums]
+{
+  0 = N 2 0
+  192 = N 4 0
+  384 = N 3 0
+}
+`
+    expect(lanesByTick(parseSectionNotes(legacy, 'ExpertDrums', RES))).toEqual([[0, 2], [192, 4], [384, 3]])
+  })
+
+  it('Pro Drums charts: modifiers promote pads, bare pads stay toms', () => {
+    const pro = `[ExpertDrums]
+{
+  0 = N 2 0
+  0 = N 66 0
+  192 = N 3 0
+  384 = N 4 0
+  384 = N 68 0
+}
+`
+    // 0: yellow+flag → hi-hat(2); 192: bare blue pad → tom(3); 384: green+flag → cymbal(4)
+    expect(lanesByTick(parseSectionNotes(pro, 'ExpertDrums', RES))).toEqual([[0, 2], [192, 3], [384, 4]])
+  })
+
+  it('numbered drum sections are detected too', () => {
+    const text = replaceSectionNotes(BASE, 'ExpertDrums2', [{ tick: 0, lane: 2, sustain: 0 }])
+    expect(text).toContain('0 = N 66 0')
+  })
+
+  it('Floor Tom (lane 5) is the bare green pad; Cymbal keeps the flag', () => {
+    const text = replaceSectionNotes(BASE, 'ExpertDrums', [
+      { tick: 0, lane: 5, sustain: 0 }, // floor tom → bare N4
+      { tick: 192, lane: 4, sustain: 0 }, // cymbal → N4 + N68
+    ])
+    // tick 0: bare green pad, no flag
+    expect(text).toMatch(/0 = N 4 0/)
+    expect(text).not.toMatch(/0 = N 68 0/)
+    // tick 192: green pad + crash flag
+    expect(text).toMatch(/192 = N 4 0/)
+    expect(text).toMatch(/192 = N 68 0/)
+    // round-trips: floor tom on 5, cymbal on 4
+    expect(lanesByTick(parseSectionNotes(text, 'ExpertDrums', RES))).toEqual([[0, 5], [192, 4]])
+  })
+
+  it('round-trips all six drum lanes', () => {
+    const notes: ChartNote[] = [
+      { tick: 0, lane: 0, sustain: 0 },
+      { tick: 0, lane: 2, sustain: 0 },
+      { tick: 192, lane: 1, sustain: 0 },
+      { tick: 192, lane: 3, sustain: 0 },
+      { tick: 384, lane: 4, sustain: 0 },
+      { tick: 576, lane: 5, sustain: 0 },
+    ]
+    expect(lanesByTick(roundTrip(notes, 'ExpertDrums'))).toEqual([
+      [0, 0], [0, 2], [192, 1], [192, 3], [384, 4], [576, 5],
+    ])
+  })
+})

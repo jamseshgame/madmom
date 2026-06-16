@@ -971,8 +971,11 @@ function parseChart(text: string, prefer?: string, customNames: Set<string> = ne
 
 const LANE_FILL = ['#22c55e', '#ef4444', '#eab308', '#3b82f6', '#f97316'] // 0-4
 const GUITAR_LABELS = ['Green', 'Red', 'Yellow', 'Blue', 'Orange']
-// 5-lane Jamsesh drums convention (kick, snare, hi-hat, tom, cymbal)
-const DRUM_LABELS = ['Kick', 'Snare', 'Hi-hat', 'Tom', 'Cymbal']
+// 6-lane Jamsesh drums convention (kick, snare, hi-hat, tom, cymbal, floor tom).
+// Floor Tom (5) rides the same green pad as Cymbal (4) in the game but is its
+// own authoring lane; given a distinct colour so the two read apart on screen.
+const DRUM_LABELS = ['Kick', 'Snare', 'Hi-hat', 'Tom', 'Cymbal', 'Floor Tom']
+const DRUM_FILL = ['#22c55e', '#ef4444', '#eab308', '#3b82f6', '#f97316', '#a855f7'] // 0-5
 
 const SNAP_OPTIONS = [
   { label: '1/4', divisor: 1 },
@@ -1517,7 +1520,7 @@ function ScenePicker({
 // note positions are computed using the same y = HIT - (noteSec - currentTime)
 // * scrollSpeed formula used by draw().
 
-const LANE_COLOR_HEX = [0x22c55e, 0xef4444, 0xeab308, 0x3b82f6, 0xf97316] // 0-4
+const LANE_COLOR_HEX = [0x22c55e, 0xef4444, 0xeab308, 0x3b82f6, 0xf97316, 0xa855f7] // 0-5 (5 = drums Floor Tom)
 
 // Unit cylinder reused for every hold/slide bar — scaled per segment.
 const BAR_GEOMETRY = new THREE.CylinderGeometry(1, 1, 1, 12)
@@ -1572,6 +1575,7 @@ const GemMeshLayer = forwardRef<GemMeshLayerHandle, {
   battleReverseScroll: boolean    // flips the highway scroll direction
   battleInkSplatter: boolean      // overrides highway → black, hides separators, gems go glossy black
   heldFretsRef: React.MutableRefObject<Set<number>>  // shared with BeatmapEditor's gamepad poll
+  laneCount: number               // 5 (guitar) or 6 (drums, incl. Floor Tom)
 }>(function GemMeshLayer({
   meshUrl, explosionUrl, notes, tempoSegments, resolution, currentTime, scrollSpeed,
   canvasW, canvasH, scale, spinDegPerSec, explosionScale, angleDeg, perspectivePx,
@@ -1579,8 +1583,11 @@ const GemMeshLayer = forwardRef<GemMeshLayerHandle, {
   highwayTextureUrl, highwayScroll, highwayTint, highwayTintOpacity,
   laneSeparators, laneSeparatorColor, laneSeparatorWidth, laneSeparatorGlow,
   battleReverseScroll, battleInkSplatter,
-  heldFretsRef,
+  heldFretsRef, laneCount,
 }, ref) {
+  // Centre offset so lanes straddle x=0: 2 for 5 lanes, 2.5 for 6. For guitar
+  // (laneCount 5) this is exactly 2, so nothing about guitar rendering moves.
+  const laneCenter = (laneCount - 1) / 2
   const containerRef = useRef<HTMLDivElement | null>(null)
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null)
   const sceneRef = useRef<THREE.Scene | null>(null)
@@ -1630,7 +1637,7 @@ const GemMeshLayer = forwardRef<GemMeshLayerHandle, {
 
   useImperativeHandle(ref, () => ({
     spawnExplosion: (lane: number) => {
-      if (lane < 0 || lane > 4) return
+      if (lane < 0 || lane > laneCount - 1) return
       explosionQueueRef.current.push(lane)
     },
   }))
@@ -2079,12 +2086,12 @@ const GemMeshLayer = forwardRef<GemMeshLayerHandle, {
 
       const visible: { worldX: number; worldZ: number; lane: number }[] = []
       for (const n of props.notes) {
-        if (n.lane > 4) continue
+        if (n.lane > laneCount - 1) continue
         const ns = t2s(n.tick)
         if (ns < bottomSec || ns > topSec) continue
         const ahead = ns - props.currentTime  // seconds, positive = future
         visible.push({
-          worldX: (n.lane - 2) * LANE_UNIT,  // -2 = lane 0 leftmost
+          worldX: (n.lane - laneCenter) * LANE_UNIT,  // -2 = lane 0 leftmost
           worldZ: -ahead * Z_PER_SECOND,
           lane: n.lane,
         })
@@ -2143,7 +2150,7 @@ const GemMeshLayer = forwardRef<GemMeshLayerHandle, {
       // ── Ghost gems ────────────────────────────────────────────────────────
       // Lazy-create one ghost per lane the first time we have a template.
       if (ghostGemsRef.current.length === 0) {
-        for (let lane = 0; lane < 5; lane++) {
+        for (let lane = 0; lane < laneCount; lane++) {
           const inst = template.clone(true)
           inst.traverse((c) => {
             const m = c as THREE.Mesh
@@ -2160,7 +2167,7 @@ const GemMeshLayer = forwardRef<GemMeshLayerHandle, {
           wrap.add(inst)
           // Park at the raised rest position from the start so the first
           // frame doesn't lerp from world origin.
-          wrap.position.set((lane - 2) * LANE_UNIT, baseGemSize * props.ghostRestY, 0)
+          wrap.position.set((lane - laneCenter) * LANE_UNIT, baseGemSize * props.ghostRestY, 0)
           wrap.scale.setScalar(baseGemSize)
           scene.add(wrap)
           ghostGemsRef.current.push(wrap)
@@ -2179,14 +2186,14 @@ const GemMeshLayer = forwardRef<GemMeshLayerHandle, {
       ;(window as unknown as { __ghostHeld?: number[] }).__ghostHeld = [...held].sort((a, b) => a - b)
       const RESTING_Y = baseGemSize * props.ghostRestY
       const PRESSED_Y = baseGemSize * (props.ghostRestY - props.ghostDropRange)
-      for (let lane = 0; lane < 5; lane++) {
+      for (let lane = 0; lane < laneCount; lane++) {
         const ghost = ghostGemsRef.current[lane]
         if (!ghost) continue
         const isPressed = held.has(lane)
         const targetY = isPressed ? PRESSED_Y : RESTING_Y
         const targetScale = baseGemSize * (isPressed ? 0.95 : 1.0)
         const lerp = Math.min(1, dtSec * 18)
-        ghost.position.x = (lane - 2) * LANE_UNIT
+        ghost.position.x = (lane - laneCenter) * LANE_UNIT
         ghost.position.y += (targetY - ghost.position.y) * lerp
         ghost.position.z = 0
         const curScale = ghost.scale.x
@@ -2270,7 +2277,7 @@ const GemMeshLayer = forwardRef<GemMeshLayerHandle, {
         // gem mesh — for less visual chaos on busy strums.
         const wrap = new THREE.Group()
         wrap.add(root)
-        wrap.position.set((lane - 2) * LANE_UNIT, baseGemSize * 0.5, 0)
+        wrap.position.set((lane - laneCenter) * LANE_UNIT, baseGemSize * 0.5, 0)
         wrap.scale.setScalar(baseGemSize * Math.max(0.05, props.explosionScale))
         scene.add(wrap)
 
@@ -2368,11 +2375,11 @@ const GemMeshLayer = forwardRef<GemMeshLayerHandle, {
 
       // Holds: a bar from the head gem back along the runway for the sustain.
       for (const n of props.notes) {
-        if (n.lane > 4 || n.sustain <= 0) continue
+        if (n.lane > laneCount - 1 || n.sustain <= 0) continue
         const sHead = t2s(n.tick)
         const sTail = t2s(n.tick + n.sustain)
         if (!inWindow(sHead, sTail)) continue
-        const x = (n.lane - 2) * LANE_UNIT
+        const x = (n.lane - laneCenter) * LANE_UNIT
         barSegs.push({
           ax: x,
           az: -(sHead - props.currentTime) * Z_PER_SECOND,
@@ -2409,9 +2416,9 @@ const GemMeshLayer = forwardRef<GemMeshLayerHandle, {
             // Bars only span the five coloured fret lanes (LANE_COLOR_HEX has 0-4).
             if (laneA > 4 || laneB > 4) continue
             barSegs.push({
-              ax: (laneA - 2) * LANE_UNIT,
+              ax: (laneA - laneCenter) * LANE_UNIT,
               az: -(sA - props.currentTime) * Z_PER_SECOND,
-              bx: (laneB - 2) * LANE_UNIT,
+              bx: (laneB - laneCenter) * LANE_UNIT,
               bz: -(sB - props.currentTime) * Z_PER_SECOND,
               colorHex: LANE_COLOR_HEX[laneA],
             })
@@ -3420,12 +3427,13 @@ export default function BeatmapEditor() {
   interface BindingSlot { buttons: number[]; keys: string[] }
   interface InputBinding {
     fret1: BindingSlot; fret2: BindingSlot; fret3: BindingSlot; fret4: BindingSlot; fret5: BindingSlot
+    fret6: BindingSlot // drums Floor Tom (lane 5); unused on 5-lane guitar
     strumUp: BindingSlot; strumDown: BindingSlot
   }
   const emptySlot = (): BindingSlot => ({ buttons: [], keys: [] })
   const DEFAULT_BINDING: InputBinding = {
     fret1: emptySlot(), fret2: emptySlot(), fret3: emptySlot(),
-    fret4: emptySlot(), fret5: emptySlot(),
+    fret4: emptySlot(), fret5: emptySlot(), fret6: emptySlot(),
     strumUp: emptySlot(), strumDown: emptySlot(),
   }
   // Migrate any legacy shape (single int, plain array, or partial slot)
@@ -3434,7 +3442,7 @@ export default function BeatmapEditor() {
     if (!raw || typeof raw !== 'object') return DEFAULT_BINDING
     const out: InputBinding = {
       fret1: emptySlot(), fret2: emptySlot(), fret3: emptySlot(),
-      fret4: emptySlot(), fret5: emptySlot(),
+      fret4: emptySlot(), fret5: emptySlot(), fret6: emptySlot(),
       strumUp: emptySlot(), strumDown: emptySlot(),
     }
     for (const k of Object.keys(DEFAULT_BINDING) as (keyof InputBinding)[]) {
@@ -3616,8 +3624,8 @@ export default function BeatmapEditor() {
           for (const k of slot.keys) if (pressedKeysRef.current.has(k)) return true
           return false
         }
-        const lanes: BindingSlot[] = [binding.fret1, binding.fret2, binding.fret3, binding.fret4, binding.fret5]
-        for (let lane = 0; lane < 5; lane++) {
+        const lanes: BindingSlot[] = [binding.fret1, binding.fret2, binding.fret3, binding.fret4, binding.fret5, binding.fret6]
+        for (let lane = 0; lane < lanes.length; lane++) {
           if (computeSlotHeld(lanes[lane])) heldFretsRef.current.add(lane)
           else heldFretsRef.current.delete(lane)
         }
@@ -3690,9 +3698,9 @@ export default function BeatmapEditor() {
         return false
       }
       const laneSlots: BindingSlot[] = [
-        binding.fret1, binding.fret2, binding.fret3, binding.fret4, binding.fret5,
+        binding.fret1, binding.fret2, binding.fret3, binding.fret4, binding.fret5, binding.fret6,
       ]
-      for (let lane = 0; lane < 5; lane++) {
+      for (let lane = 0; lane < laneSlots.length; lane++) {
         if (computeSlotHeld(laneSlots[lane])) heldFretsRef.current.add(lane)
         else heldFretsRef.current.delete(lane)
       }
@@ -3718,9 +3726,12 @@ export default function BeatmapEditor() {
   // Auto-map wizard — steps the user through each binding in sequence.
   // null = idle; otherwise the binding key currently waiting on a press.
   const [autoMapStep, setAutoMapStep] = useState<keyof InputBinding | null>(null)
+  const autoMapDrums = /drums/i.test(chart?.activeName ?? '')
   const autoMapOrder: (keyof InputBinding)[] = useMemo(
-    () => ['fret1', 'fret2', 'fret3', 'fret4', 'fret5', 'strumUp', 'strumDown'],
-    [],
+    () => autoMapDrums
+      ? ['fret1', 'fret2', 'fret3', 'fret4', 'fret5', 'fret6', 'strumUp', 'strumDown']
+      : ['fret1', 'fret2', 'fret3', 'fret4', 'fret5', 'strumUp', 'strumDown'],
+    [autoMapDrums],
   )
   const startAutoMap = () => {
     if (!gamepadId) return
@@ -3769,7 +3780,7 @@ export default function BeatmapEditor() {
 
   const BINDING_LABELS: Record<keyof InputBinding, string> = {
     fret1: 'Green',     fret2: 'Red',       fret3: 'Yellow',
-    fret4: 'Blue',      fret5: 'Orange',
+    fret4: 'Blue',      fret5: 'Orange',    fret6: 'Floor Tom',
     strumUp: 'Strum ↑', strumDown: 'Strum ↓',
   }
 
@@ -3857,11 +3868,12 @@ export default function BeatmapEditor() {
       // is perfectly clean. This lets users keep editing — and delete their way
       // out of — a chart that arrived already containing violations (e.g. from
       // generation/import), while still blocking edits that add new violations.
-      const before = ruleRemovalCount(prev.notes, prev.resolution)
-      const after = ruleRemovalCount(nextNotes, prev.resolution)
+      const drums = /drums/i.test(prev.activeName)
+      const before = ruleRemovalCount(prev.notes, prev.resolution, drums)
+      const after = ruleRemovalCount(nextNotes, prev.resolution, drums)
       if (after > before) {
         rejected = true
-        flashRuleError(checkNoteRules(nextNotes, prev.resolution) ?? 'Edit would break a chart rule')
+        flashRuleError(checkNoteRules(nextNotes, prev.resolution, drums) ?? 'Edit would break a chart rule')
         return prev
       }
       historyRef.current.push(prev)
@@ -3879,7 +3891,7 @@ export default function BeatmapEditor() {
     enabled: recordPlace,
     playing,
     snapDivisor,
-    fretKeys: [binding.fret1.keys, binding.fret2.keys, binding.fret3.keys, binding.fret4.keys, binding.fret5.keys],
+    fretKeys: [binding.fret1.keys, binding.fret2.keys, binding.fret3.keys, binding.fret4.keys, binding.fret5.keys, binding.fret6.keys],
     tempoSegments,
     commit: commitNotes,
   }
@@ -4006,7 +4018,7 @@ export default function BeatmapEditor() {
   // again. The commit gate allows this since it only ever reduces dirtiness.
   const autoFix = useCallback(() => {
     if (!chart) return
-    const cleaned = autoCleanNotes(chart.notes, chart.resolution)
+    const cleaned = autoCleanNotes(chart.notes, chart.resolution, /drums/i.test(chart.activeName))
     if (!cleaned) {
       flashRuleError('Chart is already clean — nothing to fix')
       return
@@ -4019,8 +4031,8 @@ export default function BeatmapEditor() {
   // Number of notes Auto-fix would strip — drives the button's badge + disabled
   // state so the user can see at a glance whether the chart has rule problems.
   const ruleIssues = useMemo(
-    () => (chart ? ruleRemovalCount(chart.notes, chart.resolution) : 0),
-    [chart?.notes, chart?.resolution],
+    () => (chart ? ruleRemovalCount(chart.notes, chart.resolution, /drums/i.test(chart.activeName)) : 0),
+    [chart?.notes, chart?.resolution, chart?.activeName],
   )
 
   const updateSections = useCallback((updater: (prev: ChartSection[]) => ChartSection[]) => {
@@ -4828,7 +4840,8 @@ export default function BeatmapEditor() {
     const W = canvas.width
     const H = canvas.height
     const HIT = H - 110
-    const NUM_LANES = 5
+    const NUM_LANES = isDrums ? 6 : 5
+    const fill = isDrums ? DRUM_FILL : LANE_FILL
     // Left gutter holds the beat / bar / time ruler labels so they don't
     // collide with gems in lane 0 (Green).
     const GUTTER_W = 64
@@ -4997,7 +5010,7 @@ export default function BeatmapEditor() {
       ctx.arc(x, HIT, NOTE_R, 0, Math.PI * 2)
       ctx.fillStyle = '#1f2937'
       ctx.fill()
-      ctx.strokeStyle = LANE_FILL[lane]
+      ctx.strokeStyle = fill[lane]
       ctx.lineWidth = 2
       ctx.stroke()
     }
@@ -5330,7 +5343,7 @@ export default function BeatmapEditor() {
       if (s != null) selectedSlideIds.add(s)
     }
     drawSlideRibbons(ctx, chart.notes, {
-      laneFill: LANE_FILL,
+      laneFill: fill,
       gemX0: GEM_X0,
       laneW: LANE_W,
       hit: HIT,
@@ -5340,10 +5353,10 @@ export default function BeatmapEditor() {
       selectedSlideIds,
     })
 
-    // Single-lane notes
+    // Single-lane notes (gem lanes only — drums add Floor Tom on lane 5)
     for (let i = 0; i < chart.notes.length; i++) {
       const n = chart.notes[i]
-      if (n.lane > 4) continue
+      if (n.lane > NUM_LANES - 1) continue
       const noteSec = t2s(n.tick)
       const dy = (noteSec - currentTime) * scrollSpeed
       const y = HIT - dy
@@ -5355,7 +5368,7 @@ export default function BeatmapEditor() {
       const x = GEM_X0 + (n.lane + 0.5) * LANE_W
 
       if (n.sustain > 0) {
-        ctx.fillStyle = LANE_FILL[n.lane] + '88'
+        ctx.fillStyle = fill[n.lane] + '88'
         ctx.fillRect(x - LANE_W * 0.1, y - tailLen, LANE_W * 0.2, tailLen)
       }
 
@@ -5368,7 +5381,7 @@ export default function BeatmapEditor() {
       if (!meshActive) {
         ctx.beginPath()
         ctx.arc(x, y, NOTE_R, 0, Math.PI * 2)
-        ctx.fillStyle = LANE_FILL[n.lane]
+        ctx.fillStyle = fill[n.lane]
         ctx.fill()
         ctx.lineWidth = isSelected ? 4 : 2
         ctx.strokeStyle = isSelected ? '#ffffff'
@@ -5414,13 +5427,14 @@ export default function BeatmapEditor() {
     ctx.textAlign = 'center'
     for (let lane = 0; lane < NUM_LANES; lane++) {
       const x = GEM_X0 + (lane + 0.5) * LANE_W
-      ctx.fillStyle = LANE_FILL[lane]
+      ctx.fillStyle = fill[lane]
       ctx.font = 'bold 13px sans-serif'
       ctx.fillText(laneLabels[lane], x, H - 50)
       if (isDrums) {
         ctx.fillStyle = '#6b7280'
         ctx.font = '10px monospace'
-        ctx.fillText(GUITAR_LABELS[lane], x, H - 32)
+        // Floor Tom (5) has no guitar-fret equivalent — it shares the green pad.
+        ctx.fillText(GUITAR_LABELS[lane] ?? 'Green', x, H - 32)
       }
     }
 
@@ -5533,9 +5547,9 @@ export default function BeatmapEditor() {
         if (d < 12 && d < bestDist) { bestDist = d; bestId = i }
         continue
       }
-      // HOPO/tap modifiers (lane 5/6) aren't directly clickable — they're
-      // toggled via F/T on the underlying note.
-      if (n.lane > 4) continue
+      // Guitar HOPO/tap modifiers (lane 5/6) aren't directly clickable. Drums
+      // have no modifiers — lane 5 is the Floor Tom gem, so it's selectable.
+      if (n.lane > (isDrums ? 5 : 4)) continue
       if (n.lane !== lane) continue
       const d = Math.abs(y - cy)
       if (d < bestDist) {
@@ -5705,8 +5719,12 @@ export default function BeatmapEditor() {
       const GEM_W = canvas.width - canvas.width * 0.36 - GUTTER_W
       const GEM_X1 = GEM_X0 + GEM_W
       if (cx < GEM_X0 || cx >= GEM_X1) return  // gutter or sidecar — ignore
-      const LANE_W = GEM_W / 5
-      const lane = e.shiftKey ? 7 : Math.max(0, Math.min(4, Math.floor((cx - GEM_X0) / LANE_W)))
+      const laneCount = isDrums ? 6 : 5
+      const LANE_W = GEM_W / laneCount
+      // Drums: 6 lanes, no Open. Guitar: 5 lanes, shift+click = Open (7).
+      const lane = !isDrums && e.shiftKey
+        ? 7
+        : Math.max(0, Math.min(laneCount - 1, Math.floor((cx - GEM_X0) / LANE_W)))
       const targetSec = currentTime + (HIT - cy) / scrollSpeed
       const targetTickRaw = secToTick(tempoSegments, chart.resolution, Math.max(0, targetSec))
       const snapTicks = Math.max(1, Math.round(chart.resolution / snapDivisor))
@@ -5856,11 +5874,12 @@ export default function BeatmapEditor() {
     const GUTTER_W = 64
     const GEM_X0 = GUTTER_W
     const GEM_W = canvas.width - canvas.width * 0.36 - GUTTER_W
-    const LANE_W = GEM_W / 5
+    const maxLane = isDrums ? 5 : 4
+    const LANE_W = GEM_W / (maxLane + 1)
     const anchor = dragRef.current.snapshot.get(dragRef.current.anchorId)
     if (!anchor) return
 
-    const newAnchorLane = Math.max(0, Math.min(4, Math.floor((cx - GEM_X0) / LANE_W)))
+    const newAnchorLane = Math.max(0, Math.min(maxLane, Math.floor((cx - GEM_X0) / LANE_W)))
     const targetSec = currentTime + (HIT - cy) / scrollSpeed
     const targetTickRaw = secToTick(tempoSegments, chart.resolution, Math.max(0, targetSec))
     const snapTicks = Math.max(1, Math.round(chart.resolution / snapDivisor))
@@ -5875,9 +5894,9 @@ export default function BeatmapEditor() {
       const cur = next[idx]
       if (!cur) return
       const proposedTick = Math.max(0, orig.tick + tickDelta)
-      // Open notes (lane 7) and modifiers (5/6) only move along the time axis;
-      // gem notes can also change lane within 0–4.
-      const proposedLane = orig.lane > 4 ? orig.lane : Math.max(0, Math.min(4, orig.lane + laneDelta))
+      // Guitar: Open (7) and modifiers (5/6) only move in time; gems move within
+      // 0–4. Drums: gems span 0–5 (incl. Floor Tom) and there are no modifiers.
+      const proposedLane = orig.lane > maxLane ? orig.lane : Math.max(0, Math.min(maxLane, orig.lane + laneDelta))
       if (cur.tick !== proposedTick || cur.lane !== proposedLane) {
         next[idx] = { ...cur, tick: proposedTick, lane: proposedLane }
         touched = true
@@ -5972,10 +5991,11 @@ export default function BeatmapEditor() {
           const cur = restored[idx]
           if (cur) restored[idx] = { ...cur, tick: orig.tick, lane: orig.lane }
         })
-        const before = ruleRemovalCount(restored, prev.resolution)
-        const after = ruleRemovalCount(prev.notes, prev.resolution)
+        const drums = /drums/i.test(prev.activeName)
+        const before = ruleRemovalCount(restored, prev.resolution, drums)
+        const after = ruleRemovalCount(prev.notes, prev.resolution, drums)
         if (after > before) {
-          flashRuleError(checkNoteRules(prev.notes, prev.resolution) ?? 'Move would break a chart rule')
+          flashRuleError(checkNoteRules(prev.notes, prev.resolution, drums) ?? 'Move would break a chart rule')
           return { ...prev, notes: restored }
         }
         historyRef.current.push({ ...prev, notes: restored })
@@ -6229,11 +6249,12 @@ export default function BeatmapEditor() {
         return
       }
 
+      const maxLane = /drums/i.test(chart.activeName) ? 5 : 4
       const transform = (n: ChartNote): ChartNote | null => {
         if (e.key === 'ArrowLeft') return { ...n, tick: Math.max(0, n.tick - stepTicks) }
         if (e.key === 'ArrowRight') return { ...n, tick: n.tick + stepTicks }
-        if (n.lane <= 4) {
-          if (e.key === 'ArrowUp') return { ...n, lane: Math.min(4, n.lane + 1) }
+        if (n.lane <= maxLane) {
+          if (e.key === 'ArrowUp') return { ...n, lane: Math.min(maxLane, n.lane + 1) }
           if (e.key === 'ArrowDown') return { ...n, lane: Math.max(0, n.lane - 1) }
         }
         if (e.key === 'h' || e.key === 'H') return { ...n, sustain: n.sustain > 0 ? 0 : chart.resolution }
@@ -6361,6 +6382,14 @@ export default function BeatmapEditor() {
     setSaveMsg('')
     try {
       let newFull = replaceSectionNotes(base.fullText, base.activeName, base.notes)
+      // Upgrade every *other* drum difficulty to Pro Drums notation too, not
+      // just the active one. Round-tripping through chartio is idempotent for
+      // already-upgraded sections and migrates legacy ones (bare 0-4 → pads +
+      // cymbal flags) so unvisited difficulties don't ship as toms in-game.
+      for (const sec of base.availableSections) {
+        if (sec === base.activeName || !/drums/i.test(sec)) continue
+        newFull = replaceSectionNotes(newFull, sec, parseSectionNotes(newFull, sec, base.resolution))
+      }
       newFull = applyTutorialToFullText(newFull, base.tutorial, base.tutorialEnabled, base.musicSections, base.importedSources, base.clips)
       newFull = applySyncTrackToFullText(newFull, base.tempoMarkers, base.timeSigs, base.syncOther)
       newFull = applyOffsetToFullText(newFull, base.audioOffsetSec)
@@ -8072,7 +8101,9 @@ export default function BeatmapEditor() {
                     {autoMapStep ? 'mapping…' : 'auto-map'}
                   </button>
                 </div>
-                {(Object.keys(BINDING_LABELS) as (keyof InputBinding)[]).map((k) => {
+                {(Object.keys(BINDING_LABELS) as (keyof InputBinding)[])
+                  .filter((k) => k !== 'fret6' || isDrums) // Floor Tom bind is drums-only
+                  .map((k) => {
                   const v = binding[k]
                   const listening = captureNextPressRef.current !== null && autoMapStep === k
                   const isCurrentWizardStep = autoMapStep === k
@@ -9087,6 +9118,7 @@ export default function BeatmapEditor() {
             {view3d.enabled && view3d.meshName && chart && (
               <GemMeshLayer
                 ref={gemMeshLayerRef}
+                laneCount={isDrums ? 6 : 5}
                 meshUrl={`/api/gem-meshes/${encodeURIComponent(view3d.meshName)}`}
                 explosionUrl="/api/gem-meshes/GemExplosion.fbx"
                 notes={chart.notes}

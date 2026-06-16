@@ -104,3 +104,42 @@ describe('ruleRemovalCount — the commit-gate dirtiness score', () => {
     expect(after).toBe(before)
   })
 })
+
+describe('drum kick exception (isDrums)', () => {
+  it('allows kick + 2 hand gems (3 total) on one tick', () => {
+    // Kick(0) + Snare(1) + Hi-hat(2): illegal for guitar, legal for drums.
+    expect(checkNoteRules([n(0, 0), n(0, 1), n(0, 2)], RES)).toMatch(/Max 2 notes/)
+    expect(checkNoteRules([n(0, 0), n(0, 1), n(0, 2)], RES, true)).toBeNull()
+  })
+
+  it('still blocks 3 hand gems even with no kick', () => {
+    // Snare+Hi-hat+Tom = 3 hands, no kick → over the limit.
+    expect(checkNoteRules([n(0, 1), n(0, 2), n(0, 3)], RES, true)).toMatch(/Max 2 drum notes/)
+  })
+
+  it('still blocks 4 notes even with a kick (only 2 hands)', () => {
+    expect(checkNoteRules([n(0, 0), n(0, 1), n(0, 2), n(0, 3)], RES, true)).toMatch(/Max 2 drum notes/)
+  })
+
+  it('autoClean keeps the kick + 2 hands, drops the extra hand', () => {
+    const cleaned = autoCleanNotes([n(0, 0), n(0, 1), n(0, 2), n(0, 3)], RES, true)
+    expect(cleaned).toHaveLength(3)
+    expect(cleaned!.some((x) => x.lane === 0)).toBe(true) // kick survives
+    expect(checkNoteRules(cleaned!, RES, true)).toBeNull()
+  })
+
+  it('a kick+2-hand drum tick is clean (no removals)', () => {
+    expect(ruleRemovalCount([n(0, 0), n(0, 1), n(0, 2)], RES, true)).toBe(0)
+  })
+
+  it('counts Floor Tom (lane 5) as a hand gem in drums', () => {
+    // kick + snare + floor-tom = kick + 2 hands → legal
+    expect(checkNoteRules([n(0, 0), n(0, 1), n(0, 5)], RES, true)).toBeNull()
+    // snare + cymbal + floor-tom = 3 hands, no kick → illegal
+    expect(checkNoteRules([n(0, 1), n(0, 4), n(0, 5)], RES, true)).toMatch(/Max 2 drum notes/)
+  })
+
+  it('for guitar, lane 5 stays a modifier (not a gem)', () => {
+    expect(checkNoteRules([n(0, 1), n(0, 4), n(0, 5)], RES, false)).toBeNull()
+  })
+})
