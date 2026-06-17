@@ -1522,6 +1522,9 @@ function ScenePicker({
 
 const LANE_COLOR_HEX = [0x22c55e, 0xef4444, 0xeab308, 0x3b82f6, 0xf97316, 0xa855f7] // 0-5 (5 = drums Floor Tom)
 
+// Target colour gems lerp toward as they cross the strike line.
+const WHITE_FLASH = new THREE.Color(0xffffff)
+
 // Unit cylinder reused for every hold/slide bar — scaled per segment.
 const BAR_GEOMETRY = new THREE.CylinderGeometry(1, 1, 1, 12)
 // Scratch vectors reused each frame by the bar-positioning loop.
@@ -2129,6 +2132,10 @@ const GemMeshLayer = forwardRef<GemMeshLayerHandle, {
         inst.position.set(worldX, baseGemSize * 0.5, worldZ)
         inst.scale.setScalar(baseGemSize)
         inst.rotation.y += spin
+        // Flash white as the gem crosses the strike line (worldZ ≈ 0) so the
+        // exact hit moment is easy to eyeball when syncing. ~40ms window.
+        const flashZ = 0.04 * Z_PER_SECOND
+        const flash = Math.abs(worldZ) < flashZ ? 1 - Math.abs(worldZ) / flashZ : 0
         inst.traverse((c) => {
           const m = c as THREE.Mesh
           if (m.isMesh) {
@@ -2143,6 +2150,7 @@ const GemMeshLayer = forwardRef<GemMeshLayerHandle, {
               mat.metalness = 0.35
               mat.roughness = 0.4
             }
+            if (flash > 0) mat.color.lerp(WHITE_FLASH, flash)
           }
         })
       }
@@ -5385,6 +5393,12 @@ export default function BeatmapEditor() {
 
       const isSelected = selectedIds.has(i)
       const mods = modByTick.get(n.tick)
+      // Flash the gem white as it crosses the strike line so the exact hit
+      // moment is easy to eyeball when syncing. Brightest at dt=0, fading out
+      // over a ~40ms window on either side.
+      const hitDelta = Math.abs(noteSec - currentTime)
+      const HIT_FLASH_WINDOW = 0.04 // seconds either side of the line
+      const flash = hitDelta < HIT_FLASH_WINDOW ? 1 - hitDelta / HIT_FLASH_WINDOW : 0
       // 3D mesh layer is rendering this gem on top — skip the 2D circle so the
       // mesh isn't competing with a flat disc behind it. Sustain tail above
       // still draws (it's a thin line, mesh covers the head).
@@ -5394,6 +5408,13 @@ export default function BeatmapEditor() {
         ctx.arc(x, y, NOTE_R, 0, Math.PI * 2)
         ctx.fillStyle = fill[n.lane]
         ctx.fill()
+        if (flash > 0) {
+          ctx.save()
+          ctx.globalAlpha = flash
+          ctx.fillStyle = '#ffffff'
+          ctx.fill()
+          ctx.restore()
+        }
         ctx.lineWidth = isSelected ? 4 : 2
         ctx.strokeStyle = isSelected ? '#ffffff'
           : mods?.tap ? '#22d3ee'   // cyan ring on tap notes

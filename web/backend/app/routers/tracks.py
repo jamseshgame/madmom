@@ -785,6 +785,34 @@ async def get_beatmap_chart(track_id: str, beatmap_id: str):
 
 _SYNCTRACK_BLOCK_RE = re.compile(r'\[SyncTrack\]\s*\{[^}]*\}')
 _OFFSET_LINE_RE = re.compile(r'(?m)^(\s*Offset\s*=\s*)-?[0-9]*\.?[0-9]+\s*$')
+_RESOLUTION_LINE_RE = re.compile(r'(?m)^(\s*Resolution\s*=\s*\d+[^\n]*\n)')
+_SONG_OPEN_RE = re.compile(r'(\[Song\]\s*\{)')
+
+
+def _apply_synctrack(text: str, sync_block: str) -> str:
+    """Replace the [SyncTrack] block, or insert it if the chart has none."""
+    if _SYNCTRACK_BLOCK_RE.search(text):
+        return _SYNCTRACK_BLOCK_RE.sub(lambda _m: sync_block, text, count=1)
+    # No [SyncTrack] — slot it in just before [Events] (its canonical spot),
+    # else append. Mirrors the editor's applySyncTrackToFullText placement.
+    idx = text.find('[Events]')
+    if idx >= 0:
+        return text[:idx] + sync_block + '\n' + text[idx:]
+    return text + ('' if text.endswith('\n') else '\n') + sync_block + '\n'
+
+
+def _apply_offset(text: str, offset_val: str) -> str:
+    """Replace the [Song] Offset line, or insert it if the chart has none."""
+    if _OFFSET_LINE_RE.search(text):
+        return _OFFSET_LINE_RE.sub(lambda _m: _m.group(1) + offset_val, text, count=1)
+    line = f'  Offset = {offset_val}\n'
+    # No Offset line — insert after Resolution inside [Song], else right after
+    # the [Song] open brace. Mirrors the editor's applyOffsetToFullText.
+    if _RESOLUTION_LINE_RE.search(text):
+        return _RESOLUTION_LINE_RE.sub(lambda _m: _m.group(1) + line, text, count=1)
+    if _SONG_OPEN_RE.search(text):
+        return _SONG_OPEN_RE.sub(lambda _m: _m.group(1) + '\n' + line.rstrip('\n'), text, count=1)
+    return text
 
 
 def _propagate_tempo_to_siblings(track_id: str, source_id: str, source_text: str) -> list[str]:
@@ -797,6 +825,10 @@ def _propagate_tempo_to_siblings(track_id: str, source_id: str, source_text: str
     beatmap that *isn't* mirrored to its siblings can ship a stale tempo in the
     merged chart — which plays correctly in the editor (you're viewing the
     edited beatmap) but drifts in-game. Returns the ids that actually changed.
+
+    Siblings that are *missing* a [SyncTrack] block or Offset line get one
+    inserted (not just replaced) so a freshly generated instrument chart can't
+    silently keep a stale/zero offset or tempo grid.
     """
     sync_m = _SYNCTRACK_BLOCK_RE.search(source_text)
     if not sync_m:
@@ -817,10 +849,9 @@ def _propagate_tempo_to_siblings(track_id: str, source_id: str, source_text: str
         if not cp.exists():
             continue
         original = cp.read_text(encoding='utf-8', errors='replace')
-        # Replace the whole [SyncTrack] block (lambda avoids backref expansion).
-        updated = _SYNCTRACK_BLOCK_RE.sub(lambda _m: sync_block, original, count=1)
+        updated = _apply_synctrack(original, sync_block)
         if offset_val is not None:
-            updated = _OFFSET_LINE_RE.sub(lambda _m: _m.group(1) + offset_val, updated, count=1)
+            updated = _apply_offset(updated, offset_val)
         if updated != original:
             cp.write_text(updated, encoding='utf-8')
             synced.append(bid)
