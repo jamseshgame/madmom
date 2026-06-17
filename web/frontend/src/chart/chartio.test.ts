@@ -251,6 +251,21 @@ describe('drum Pro Drums mapping', () => {
     expect(lanesByTick(parseSectionNotes(text, 'ExpertDrums', RES))).toEqual([[0, 5], [192, 4]])
   })
 
+  it('explicit isDrums applies Pro Drums mapping to a [*Single] section', () => {
+    // The editor stores drum beatmaps in [*Single] sections, so name-based
+    // detection is false — the isDrums arg must drive the translation.
+    const text = replaceSectionNotes(BASE, 'ExpertSingle', [
+      { tick: 0, lane: 2, sustain: 0 }, // hi-hat
+      { tick: 192, lane: 5, sustain: 0 }, // floor tom
+    ], true)
+    expect(text).toContain('0 = N 66 0') // hi-hat cymbal flag emitted
+    expect(text).toMatch(/192 = N 4 0/) // floor tom = bare green pad
+    // Without the flag, parsing back as drums recovers the lanes:
+    expect(lanesByTick(parseSectionNotes(text, 'ExpertSingle', RES, true))).toEqual([[0, 2], [192, 5]])
+    // And the same text parsed as guitar (isDrums=false) does NOT translate:
+    expect(parseSectionNotes(text, 'ExpertSingle', RES, false).some((n) => n.lane === 66)).toBe(true)
+  })
+
   it('round-trips all six drum lanes', () => {
     const notes: ChartNote[] = [
       { tick: 0, lane: 0, sustain: 0 },

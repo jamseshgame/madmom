@@ -122,7 +122,14 @@ function sectionInner(text: string, name: string): string | null {
   return text.slice(open + 1, close)
 }
 
-export function parseSectionNotes(text: string, name: string, resolution: number): ChartNote[] {
+// Drum-ness can't always be read from the section name: the editor stores drum
+// beatmaps in [*Single] sections (the publish merge renames them to [*Drums]),
+// so callers that know the stem pass `isDrums` explicitly. When omitted we fall
+// back to the section name (true for already-merged/published [*Drums] charts).
+export function parseSectionNotes(
+  text: string, name: string, resolution: number, isDrums?: boolean,
+): ChartNote[] {
+  const drums = isDrums ?? isDrumSection(name)
   const inner = sectionInner(text, name)
   if (inner === null) return []
   // Walk in tick-stable order, propagating active (pack, scale) state from
@@ -153,7 +160,7 @@ export function parseSectionNotes(text: string, name: string, resolution: number
   raws.sort((a, b) => a.line.tick - b.line.tick || a.i - b.i)
   // Drum sections use Pro Drums notation (pads + cymbal modifiers), not the
   // guitar lane/slide/real-note model — translate and return early.
-  if (isDrumSection(name)) {
+  if (drums) {
     const drumRows: { tick: number; note: number; sustain: number }[] = []
     for (const { line: l } of raws) {
       if (l.kind === 'note') drumRows.push({ tick: l.tick, note: l.lane, sustain: l.sustain })
@@ -234,8 +241,10 @@ function replaceSlideMeta(text: string, name: string, notes: ChartNote[]): strin
   return text.slice(0, open + 1) + '\n' + rows.join('\n') + (rows.length ? '\n' : '') + text.slice(close)
 }
 
-export function replaceSectionNotes(text: string, name: string, notes: ChartNote[]): string {
-  const drums = isDrumSection(name)
+export function replaceSectionNotes(
+  text: string, name: string, notes: ChartNote[], isDrums?: boolean,
+): string {
+  const drums = isDrums ?? isDrumSection(name)
   const start = text.indexOf(`[${name}]`)
   // Section doesn't exist yet — empty difficulties fall through here. Append
   // the new block (with whatever notes have been authored) to the end so a

@@ -904,7 +904,7 @@ function defaultValueForParam(p: SceneEventParam | undefined): string {
   return ''
 }
 
-function parseChart(text: string, prefer?: string, customNames: Set<string> = new Set()): ChartState {
+function parseChart(text: string, prefer?: string, customNames: Set<string> = new Set(), isDrums = false): ChartState {
   const resMatch = text.match(/Resolution\s*=\s*(\d+)/)
   const resolution = resMatch ? Number(resMatch[1]) : 192
   const nameMatch = text.match(/Name\s*=\s*"([^"]*)"/)
@@ -933,7 +933,7 @@ function parseChart(text: string, prefer?: string, customNames: Set<string> = ne
   // there's always a current target. The first save creates the section.
   if (!activeName) activeName = 'EasySingle'
 
-  const notes = activeName ? parseSectionNotes(text, activeName, resolution) : []
+  const notes = activeName ? parseSectionNotes(text, activeName, resolution, isDrums) : []
   const tutorial = parseTutorialSection(text)
   const musicSections = parseMusicSections(text)
   const importedSources = parseImportedSources(text)
@@ -2642,6 +2642,12 @@ export default function BeatmapEditor() {
   // Tap-sync, read by the bind-once keydown listener. `armed` gates the T key.
   const tapSyncRef = useRef<{ armed: boolean; record: () => void } | null>(null)
   const [meta, setMeta] = useState<BeatmapMeta | null>(null)
+  // Drum-ness comes from the stem metadata, NOT the section name: the editor's
+  // charts use [*Single] sections for every stem (the publish merge renames
+  // drum stems to [*Drums]). So this is the single source of truth for all
+  // drum-specific behaviour — 6 lanes, the kick/floor-tom rules, and the Pro
+  // Drums chart mapping. Defined early so every consumer below can read it.
+  const isDrums = meta?.stem === 'drums'
   const [loadError, setLoadError] = useState('')
   const [saving, setSaving] = useState(false)
   // Mirrors `saving` for synchronous reads inside the autosave timer (so an
@@ -3726,7 +3732,7 @@ export default function BeatmapEditor() {
   // Auto-map wizard — steps the user through each binding in sequence.
   // null = idle; otherwise the binding key currently waiting on a press.
   const [autoMapStep, setAutoMapStep] = useState<keyof InputBinding | null>(null)
-  const autoMapDrums = /drums/i.test(chart?.activeName ?? '')
+  const autoMapDrums = isDrums
   const autoMapOrder: (keyof InputBinding)[] = useMemo(
     () => autoMapDrums
       ? ['fret1', 'fret2', 'fret3', 'fret4', 'fret5', 'fret6', 'strumUp', 'strumDown']
@@ -3868,7 +3874,7 @@ export default function BeatmapEditor() {
       // is perfectly clean. This lets users keep editing — and delete their way
       // out of — a chart that arrived already containing violations (e.g. from
       // generation/import), while still blocking edits that add new violations.
-      const drums = /drums/i.test(prev.activeName)
+      const drums = isDrums
       const before = ruleRemovalCount(prev.notes, prev.resolution, drums)
       const after = ruleRemovalCount(nextNotes, prev.resolution, drums)
       if (after > before) {
@@ -3883,7 +3889,7 @@ export default function BeatmapEditor() {
     })
     if (!rejected) setDirty(true)
     return !rejected
-  }, [flashRuleError])
+  }, [flashRuleError, isDrums])
 
   // Refresh the live-place context every render. Cheap object; lets the
   // bind-once keydown listener read current binding/playback state by ref.
@@ -4018,7 +4024,7 @@ export default function BeatmapEditor() {
   // again. The commit gate allows this since it only ever reduces dirtiness.
   const autoFix = useCallback(() => {
     if (!chart) return
-    const cleaned = autoCleanNotes(chart.notes, chart.resolution, /drums/i.test(chart.activeName))
+    const cleaned = autoCleanNotes(chart.notes, chart.resolution, isDrums)
     if (!cleaned) {
       flashRuleError('Chart is already clean — nothing to fix')
       return
@@ -4026,13 +4032,13 @@ export default function BeatmapEditor() {
     const removed = chart.notes.length - cleaned.length
     commitNotes(pruneSlides(cleaned))
     flashRuleError(`Auto-fixed: removed ${removed} conflicting note${removed === 1 ? '' : 's'}`)
-  }, [chart, commitNotes, flashRuleError])
+  }, [chart, commitNotes, flashRuleError, isDrums])
 
   // Number of notes Auto-fix would strip — drives the button's badge + disabled
   // state so the user can see at a glance whether the chart has rule problems.
   const ruleIssues = useMemo(
-    () => (chart ? ruleRemovalCount(chart.notes, chart.resolution, /drums/i.test(chart.activeName)) : 0),
-    [chart?.notes, chart?.resolution, chart?.activeName],
+    () => (chart ? ruleRemovalCount(chart.notes, chart.resolution, isDrums) : 0),
+    [chart?.notes, chart?.resolution, isDrums],
   )
 
   const updateSections = useCallback((updater: (prev: ChartSection[]) => ChartSection[]) => {
@@ -4139,33 +4145,39 @@ export default function BeatmapEditor() {
   // custom types must be resolved before parsing so the parser knows which
   // non-`onboard_*` event names to claim (vs. leave in passthrough).
   useEffect(() => {
+    // The track fetch is folded in here (not a separate effect) because the
+    // chart parse needs the stem: drum beatmaps store [*Single] sections, so
+    // the parser can only apply Pro Drums note translation if it's told the
+    // stem is drums up front.
     Promise.all([
       fetch(`/api/tracks/${trackId}/beatmaps/${beatmapId}/chart`)
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`${r.status}`)))),
       fetch('/api/scene-events/types')
         .then((r) => (r.ok ? r.json() : []))
         .catch(() => []),
+      fetch(`/api/tracks/${trackId}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null),
     ])
-      .then(([data, types]) => {
+      .then(([data, types, track]) => {
         const adapted = (types as RawCustomType[]).map(adaptCustomType)
         setCustomSceneTypes(adapted)
         const customNames = new Set(adapted.map((t) => t.name))
-        setChart(parseChart(data.chart, undefined, customNames))
+        let drums = false
+        if (track) {
+          const bm = (track.beatmaps || []).find((b: { id: string }) => b.id === beatmapId)
+          // track.stems is a dict keyed by stem name; album_png is the cover-art
+          // entry written when the track is published. If it's absent we skip
+          // rendering the <img> entirely instead of triggering a 404 + onError.
+          const hasAlbumArt = !!(track.stems && track.stems.album_png)
+          if (bm) {
+            setMeta({ name: bm.song_name, stem: bm.stem, hasAlbumArt })
+            drums = bm.stem === 'drums'
+          }
+        }
+        setChart(parseChart(data.chart, undefined, customNames, drums))
       })
       .catch((e) => setLoadError((e as Error).message))
-
-    fetch(`/api/tracks/${trackId}`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((track) => {
-        if (!track) return
-        const bm = (track.beatmaps || []).find((b: { id: string }) => b.id === beatmapId)
-        // track.stems is a dict keyed by stem name; album_png is the cover-art
-        // entry written when the track is published. If it's absent we skip
-        // rendering the <img> entirely instead of triggering a 404 + onError.
-        const hasAlbumArt = !!(track.stems && track.stems.album_png)
-        if (bm) setMeta({ name: bm.song_name, stem: bm.stem, hasAlbumArt })
-      })
-      .catch(() => undefined)
   }, [trackId, beatmapId])
 
   // Resize canvas to container
@@ -4827,7 +4839,6 @@ export default function BeatmapEditor() {
     return () => ctrl.abort()
   }, [audioSrc])
 
-  const isDrums = meta?.stem === 'drums'
   const laneLabels = useMemo(() => (isDrums ? DRUM_LABELS : GUITAR_LABELS), [isDrums])
 
   // Canvas drawing
@@ -5531,7 +5542,7 @@ export default function BeatmapEditor() {
     const GEM_W = canvas.width - canvas.width * 0.36 - GUTTER_W
     const GEM_X1 = GEM_X0 + GEM_W
     if (cx < GEM_X0 || cx >= GEM_X1) return null  // Gutter or sidecar — no hit
-    const LANE_W = GEM_W / 5
+    const LANE_W = GEM_W / (isDrums ? 6 : 5)
     const lane = Math.floor((cx - GEM_X0) / LANE_W)
     let bestId: number | null = null
     let bestDist = 36
@@ -5968,7 +5979,7 @@ export default function BeatmapEditor() {
           lane: n.lane,
           y: HIT - (tickToSec(tempoSegments, chart.resolution, n.tick) - currentTime) * scrollSpeed,
         }))
-        const hits = marqueeHitIds(items, m, { gemX0: GEM_X0, gemX1: GEM_X0 + GEM_W, laneW: GEM_W / 5 })
+        const hits = marqueeHitIds(items, m, { gemX0: GEM_X0, gemX1: GEM_X0 + GEM_W, laneW: GEM_W / (isDrums ? 6 : 5) })
         setSelectedIds((prev) => {
           const next = m.additive ? new Set(prev) : new Set<number>()
           hits.forEach((i) => next.add(i))
@@ -5991,7 +6002,7 @@ export default function BeatmapEditor() {
           const cur = restored[idx]
           if (cur) restored[idx] = { ...cur, tick: orig.tick, lane: orig.lane }
         })
-        const drums = /drums/i.test(prev.activeName)
+        const drums = isDrums
         const before = ruleRemovalCount(restored, prev.resolution, drums)
         const after = ruleRemovalCount(prev.notes, prev.resolution, drums)
         if (after > before) {
@@ -6249,7 +6260,7 @@ export default function BeatmapEditor() {
         return
       }
 
-      const maxLane = /drums/i.test(chart.activeName) ? 5 : 4
+      const maxLane = isDrums ? 5 : 4
       const transform = (n: ChartNote): ChartNote | null => {
         if (e.key === 'ArrowLeft') return { ...n, tick: Math.max(0, n.tick - stepTicks) }
         if (e.key === 'ArrowRight') return { ...n, tick: n.tick + stepTicks }
@@ -6281,14 +6292,14 @@ export default function BeatmapEditor() {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [chart, selectedIds, snapDivisor, commitNotes, undo, redo, currentTime, makeSlide])
+  }, [chart, selectedIds, snapDivisor, commitNotes, undo, redo, currentTime, makeSlide, isDrums])
 
   const switchDifficulty = (name: string) => {
     if (!chart || name === chart.activeName) return
     if (dirty && !window.confirm('Switch difficulty? Unsaved edits in this section will be kept in memory but you must Save to write them back.')) {
       return
     }
-    let newFull = replaceSectionNotes(chart.fullText, chart.activeName, chart.notes)
+    let newFull = replaceSectionNotes(chart.fullText, chart.activeName, chart.notes, isDrums)
     newFull = applyTutorialToFullText(newFull, chart.tutorial, chart.tutorialEnabled, chart.musicSections, chart.importedSources, chart.clips)
     newFull = applySyncTrackToFullText(newFull, chart.tempoMarkers, chart.timeSigs, chart.syncOther)
     newFull = applyOffsetToFullText(newFull, chart.audioOffsetSec)
@@ -6300,7 +6311,7 @@ export default function BeatmapEditor() {
       chart.sceneEvents,
       passthroughWithSections,
     )
-    const newNotes = parseSectionNotes(newFull, name, chart.resolution)
+    const newNotes = parseSectionNotes(newFull, name, chart.resolution, isDrums)
     // Tutorial section is shared across difficulties — just keep current state.
     // Track the new section in availableSections so the dropdown reflects it as
     // "live" even before the first save creates the on-disk block.
@@ -6323,14 +6334,14 @@ export default function BeatmapEditor() {
     if (!chart || from === to) return
     // Flush the active section's in-memory notes back into fullText so a clone
     // that reads from (or the active difficulty) sees the latest edits.
-    let newFull = replaceSectionNotes(chart.fullText, chart.activeName, chart.notes)
+    let newFull = replaceSectionNotes(chart.fullText, chart.activeName, chart.notes, isDrums)
     const sourceNotes =
-      from === chart.activeName ? chart.notes : parseSectionNotes(newFull, from, chart.resolution)
+      from === chart.activeName ? chart.notes : parseSectionNotes(newFull, from, chart.resolution, isDrums)
     const targetCount =
       to === chart.activeName
         ? chart.notes.length
         : chart.availableSections.includes(to)
-          ? parseSectionNotes(newFull, to, chart.resolution).length
+          ? parseSectionNotes(newFull, to, chart.resolution, isDrums).length
           : 0
     if (
       targetCount > 0 &&
@@ -6342,7 +6353,7 @@ export default function BeatmapEditor() {
     ) {
       return
     }
-    newFull = replaceSectionNotes(newFull, to, sourceNotes)
+    newFull = replaceSectionNotes(newFull, to, sourceNotes, isDrums)
     const nextAvailable = chart.availableSections.includes(to)
       ? chart.availableSections
       : [...chart.availableSections, to]
@@ -6350,7 +6361,7 @@ export default function BeatmapEditor() {
       // Cloning into the section we're viewing — reflect the new notes right
       // away and reset history (a wholesale replacement isn't a single
       // undoable edit).
-      const newNotes = parseSectionNotes(newFull, to, chart.resolution)
+      const newNotes = parseSectionNotes(newFull, to, chart.resolution, isDrums)
       setChart({ ...chart, fullText: newFull, notes: newNotes, availableSections: nextAvailable })
       setSelectedIds(new Set())
       historyRef.current = []
@@ -6381,14 +6392,16 @@ export default function BeatmapEditor() {
     setSaving(true)
     setSaveMsg('')
     try {
-      let newFull = replaceSectionNotes(base.fullText, base.activeName, base.notes)
+      let newFull = replaceSectionNotes(base.fullText, base.activeName, base.notes, isDrums)
       // Upgrade every *other* drum difficulty to Pro Drums notation too, not
       // just the active one. Round-tripping through chartio is idempotent for
       // already-upgraded sections and migrates legacy ones (bare 0-4 → pads +
       // cymbal flags) so unvisited difficulties don't ship as toms in-game.
-      for (const sec of base.availableSections) {
-        if (sec === base.activeName || !/drums/i.test(sec)) continue
-        newFull = replaceSectionNotes(newFull, sec, parseSectionNotes(newFull, sec, base.resolution))
+      if (isDrums) {
+        for (const sec of base.availableSections) {
+          if (sec === base.activeName) continue
+          newFull = replaceSectionNotes(newFull, sec, parseSectionNotes(newFull, sec, base.resolution, true), true)
+        }
       }
       newFull = applyTutorialToFullText(newFull, base.tutorial, base.tutorialEnabled, base.musicSections, base.importedSources, base.clips)
       newFull = applySyncTrackToFullText(newFull, base.tempoMarkers, base.timeSigs, base.syncOther)
@@ -7473,7 +7486,7 @@ export default function BeatmapEditor() {
             const noteCountOf = (name: string): number => {
               if (name === chart.activeName) return chart.notes.length
               if (!chart.availableSections.includes(name)) return 0
-              return parseSectionNotes(chart.fullText, name, chart.resolution).length
+              return parseSectionNotes(chart.fullText, name, chart.resolution, isDrums).length
             }
             return (
               <CollapsibleSection id="difficulty" title="Difficulty">
