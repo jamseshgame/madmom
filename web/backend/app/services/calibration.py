@@ -40,6 +40,9 @@ def compute_calibration(track_ids: list[str]) -> dict:
                 continue
             beatmap_id = bm.get('id', '')
             stem = bm.get('stem', '')
+            # 'active' marks the primary beatmap for its stem. Missing field is
+            # treated as primary (backward compat, mirrors the included default).
+            is_active = bool(bm.get('active', True))
             chart_path = track.beatmaps_dir / beatmap_id / 'notes.chart'
             if not chart_path.exists():
                 skipped.append({'track_id': track_id, 'beatmap_id': beatmap_id, 'reason': 'no notes.chart'})
@@ -75,6 +78,7 @@ def compute_calibration(track_ids: list[str]) -> dict:
                     'instrument': _INSTRUMENT.get(stem, stem.title() if stem else 'Unknown'),
                     'beatmap_id': beatmap_id,
                     'preset': bm.get('preset'),
+                    'active': is_active,
                     'difficulty': difficulty,
                     'section': section,
                     'pct_of_expert_gpm': None,

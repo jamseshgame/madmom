@@ -10,6 +10,7 @@ interface Row {
   instrument: string
   beatmap_id: string
   preset: string | null
+  active: boolean
   difficulty: string
   section: string
   pct_of_expert_gpm: number | null
@@ -107,6 +108,7 @@ export default function CalibrationPage() {
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
   const [instrumentFilter, setInstrumentFilter] = useState<string>('')
   const [difficultyFilter, setDifficultyFilter] = useState<string>('')
+  const [primaryOnly, setPrimaryOnly] = useState(false)
 
   useEffect(() => {
     if (!trackIds.length) {
@@ -137,6 +139,7 @@ export default function CalibrationPage() {
 
   const rows = useMemo(() => {
     let rs = data?.rows || []
+    if (primaryOnly) rs = rs.filter((r) => r.active)
     if (instrumentFilter) rs = rs.filter((r) => r.instrument === instrumentFilter)
     if (difficultyFilter) rs = rs.filter((r) => r.difficulty === difficultyFilter)
     const dir = sortDir === 'asc' ? 1 : -1
@@ -149,7 +152,7 @@ export default function CalibrationPage() {
       if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir
       return String(av).localeCompare(String(bv)) * dir
     })
-  }, [data, instrumentFilter, difficultyFilter, sortKey, sortDir])
+  }, [data, primaryOnly, instrumentFilter, difficultyFilter, sortKey, sortDir])
 
   function setSort(key: keyof Row) {
     if (key === sortKey) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
@@ -217,6 +220,18 @@ export default function CalibrationPage() {
           <option value="">All difficulties</option>
           {DIFFICULTY_ORDER.map((d) => (<option key={d} value={d}>{d}</option>))}
         </select>
+        <label
+          className="flex items-center gap-2 cursor-pointer select-none text-gray-300"
+          title="Show only each stem's primary (active) chart, hiding alternate beatmaps."
+        >
+          <input
+            type="checkbox"
+            className="w-4 h-4 accent-jam-500 cursor-pointer"
+            checked={primaryOnly}
+            onChange={(e) => setPrimaryOnly(e.target.checked)}
+          />
+          Primary chart(s) only
+        </label>
       </div>
 
       {loading && <p className="text-gray-400">Loading…</p>}
