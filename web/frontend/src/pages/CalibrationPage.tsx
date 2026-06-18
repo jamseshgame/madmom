@@ -46,32 +46,32 @@ interface CompareResponse {
 
 const DIFFICULTY_ORDER = ['Expert', 'Hard', 'Medium', 'Easy']
 
-// Columns: [key, header, formatter]. Numeric keys also drive sort + outliers.
-const COLUMNS: { key: keyof Row; label: string; numeric: boolean; fmt?: (r: Row) => string }[] = [
-  { key: 'song_name', label: 'Song', numeric: false, fmt: (r) => (r.artist ? `${r.artist} — ${r.song_name}` : r.song_name) },
-  { key: 'instrument', label: 'Instrument', numeric: false },
-  { key: 'difficulty', label: 'Difficulty', numeric: false },
-  { key: 'total_gems', label: 'Gems', numeric: true },
-  { key: 'gems_per_min', label: 'Gems/min', numeric: true },
-  { key: 'pct_of_expert_gpm', label: '% of Expert', numeric: true, fmt: (r) => (r.pct_of_expert_gpm == null ? '—' : `${r.pct_of_expert_gpm}%`) },
-  { key: 'peak_nps', label: 'Peak NPS', numeric: true },
+// Columns: key, header, numeric (drives sort + outliers), desc (hover tooltip), optional formatter.
+const COLUMNS: { key: keyof Row; label: string; numeric: boolean; desc: string; fmt?: (r: Row) => string }[] = [
+  { key: 'song_name', label: 'Song', numeric: false, desc: 'Track — artist and title.', fmt: (r) => (r.artist ? `${r.artist} — ${r.song_name}` : r.song_name) },
+  { key: 'instrument', label: 'Instrument', numeric: false, desc: 'Instrument this chart is for, derived from the stem (e.g. Guitar, Drums, Bass).' },
+  { key: 'difficulty', label: 'Difficulty', numeric: false, desc: 'Difficulty tier: Expert, Hard, Medium, or Easy.' },
+  { key: 'total_gems', label: 'Gems', numeric: true, desc: 'Total individual gem objects. A 2-fret chord counts as 2 gems.' },
+  { key: 'gems_per_min', label: 'Gems/min', numeric: true, desc: "Gems per minute over the chart's full length — overall note density." },
+  { key: 'pct_of_expert_gpm', label: '% of Expert', numeric: true, desc: "This chart's gems/min as a percentage of its own Expert tier. Flags uneven Easy→Expert difficulty staircases.", fmt: (r) => (r.pct_of_expert_gpm == null ? '—' : `${r.pct_of_expert_gpm}%`) },
+  { key: 'peak_nps', label: 'Peak NPS', numeric: true, desc: 'Peak density: the most note-groups packed into any 1-second window (a chord counts as one hit).' },
   // numeric: false intentionally — busiest_measure is a bar index; outlier shading on an index is meaningless
-  { key: 'busiest_measure', label: 'Busy bar', numeric: false },
-  { key: 'total_notes', label: 'Notes', numeric: true },
-  { key: 'total_holds', label: 'Holds', numeric: true },
-  { key: 'total_chords', label: 'Strum chords', numeric: true },
-  { key: 'total_chord_holds', label: 'Chord holds', numeric: true },
-  { key: 'total_slides', label: 'Slides', numeric: true },
-  { key: 'total_chord_slides', label: 'Slide chords', numeric: true },
-  { key: 'open_notes', label: 'Opens', numeric: true },
-  { key: 'avg_chord_size', label: 'Avg chord', numeric: true },
-  { key: 'hold_pct', label: 'Hold %', numeric: true },
-  { key: 'chord_pct', label: 'Chord %', numeric: true },
-  { key: 'distinct_lanes', label: 'Lanes', numeric: true },
-  { key: 'lane_lo', label: 'Range', numeric: false, fmt: (r) => (r.lane_lo == null ? '—' : `${r.lane_lo}–${r.lane_hi}`) },
-  { key: 'min_gap_s', label: 'Min gap (s)', numeric: true, fmt: (r) => (r.min_gap_s == null ? '—' : r.min_gap_s.toFixed(3)) },
-  { key: 'longest_run', label: 'Run', numeric: true },
-  { key: 'duration_s', label: 'Dur (s)', numeric: true },
+  { key: 'busiest_measure', label: 'Busy bar', numeric: false, desc: 'Bar (measure) number where peak density occurs. Assumes 4/4.' },
+  { key: 'total_notes', label: 'Notes', numeric: true, desc: 'Total note-groups (strums). Simultaneous gems count as one note-group.' },
+  { key: 'total_holds', label: 'Holds', numeric: true, desc: 'Sustained notes, including chord holds and open holds.' },
+  { key: 'total_chords', label: 'Strum chords', numeric: true, desc: 'Strummed 2-fret chords only. Chord holds and slide chords are counted in their own columns.' },
+  { key: 'total_chord_holds', label: 'Chord holds', numeric: true, desc: 'Sustained 2-fret chords.' },
+  { key: 'total_slides', label: 'Slides', numeric: true, desc: 'Single-fret slide notes.' },
+  { key: 'total_chord_slides', label: 'Slide chords', numeric: true, desc: 'Two-fret (adjacent) chord slides.' },
+  { key: 'open_notes', label: 'Opens', numeric: true, desc: 'Open notes — strummed with no fret held.' },
+  { key: 'avg_chord_size', label: 'Avg chord', numeric: true, desc: 'Average number of simultaneous gems across chords (note-groups with 2+ frets).' },
+  { key: 'hold_pct', label: 'Hold %', numeric: true, desc: 'Percentage of note-groups that are holds.' },
+  { key: 'chord_pct', label: 'Chord %', numeric: true, desc: 'Percentage of note-groups that are chords (includes strum chords, chord holds, and slide chords).' },
+  { key: 'distinct_lanes', label: 'Lanes', numeric: true, desc: 'Number of distinct colored frets used.' },
+  { key: 'lane_lo', label: 'Range', numeric: false, desc: 'Lowest–highest colored fret used (0 = green … 4 = orange).', fmt: (r) => (r.lane_lo == null ? '—' : `${r.lane_lo}–${r.lane_hi}`) },
+  { key: 'min_gap_s', label: 'Min gap (s)', numeric: true, desc: 'Shortest time between consecutive note-groups, in seconds. Captures hand-speed demand.', fmt: (r) => (r.min_gap_s == null ? '—' : r.min_gap_s.toFixed(3)) },
+  { key: 'longest_run', label: 'Run', numeric: true, desc: 'Longest streak of consecutive fast notes (gaps ≤ 0.25s).' },
+  { key: 'duration_s', label: 'Dur (s)', numeric: true, desc: 'Chart length in seconds (time of the last note or sustain end).' },
 ]
 
 // Outlier: cell value vs its difficulty tier's IQR fence. Needs >=4 samples.
@@ -232,7 +232,8 @@ export default function CalibrationPage() {
                     <th
                       key={String(c.key)}
                       onClick={() => setSort(c.key)}
-                      className="px-2 py-2 text-left font-semibold cursor-pointer hover:text-jam-300 border-b border-gray-800"
+                      title={c.desc}
+                      className="px-2 py-2 text-left font-semibold cursor-pointer hover:text-jam-300 border-b border-gray-800 decoration-dotted decoration-gray-600 underline-offset-4 hover:underline"
                     >
                       {c.label}{sortKey === c.key ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}
                     </th>
@@ -268,6 +269,8 @@ export default function CalibrationPage() {
 
 // Per-difficulty summary (median / min / max) for the key calibration metrics.
 function SummaryTables({ summary }: { summary: Summary }) {
+  // Descriptions reused from the main table's column definitions.
+  const descOf = (key: string) => COLUMNS.find((c) => c.key === key)?.desc
   const metricKeys: { key: string; label: string }[] = [
     { key: 'gems_per_min', label: 'Gems/min' },
     { key: 'peak_nps', label: 'Peak NPS' },
@@ -286,7 +289,15 @@ function SummaryTables({ summary }: { summary: Summary }) {
           <thead className="bg-gray-900">
             <tr>
               <th className="px-2 py-2 text-left border-b border-gray-800">Tier</th>
-              {metricKeys.map((m) => (<th key={m.key} className="px-2 py-2 text-left border-b border-gray-800">{m.label}</th>))}
+              {metricKeys.map((m) => (
+                <th
+                  key={m.key}
+                  title={descOf(m.key)}
+                  className="px-2 py-2 text-left border-b border-gray-800 decoration-dotted decoration-gray-600 underline-offset-4 hover:underline"
+                >
+                  {m.label}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
