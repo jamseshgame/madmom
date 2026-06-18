@@ -6,8 +6,6 @@ plain data, so the whole module is unit-testable in isolation.
 from __future__ import annotations
 
 import re
-from collections import defaultdict
-from dataclasses import dataclass
 
 _SYNC_RE = re.compile(r'\[SyncTrack\]\s*\{([^}]*)\}')
 _B_RE = re.compile(r'(\d+)\s*=\s*B\s+(\d+)')
