@@ -17,6 +17,7 @@ from .config import settings
 from .routers import (
     auth,
     beatmap,
+    calibration,
     elevenlabs,
     feedback,
     game_songs,
@@ -76,6 +77,7 @@ app.include_router(auth.router)
 
 _auth_dep = [Depends(require_auth)]
 app.include_router(beatmap.router, dependencies=_auth_dep)
+app.include_router(calibration.router, dependencies=_auth_dep)
 app.include_router(stems.router, dependencies=_auth_dep)
 app.include_router(tracks.router, dependencies=_auth_dep)
 app.include_router(versions.router, dependencies=_auth_dep)

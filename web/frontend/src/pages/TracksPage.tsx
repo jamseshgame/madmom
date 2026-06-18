@@ -1066,6 +1066,15 @@ function TracksPageInner() {
     },
     [setSearchParams],
   )
+  const [selectedForCompare, setSelectedForCompare] = useState<Set<string>>(new Set())
+  const toggleCompare = useCallback((id: string) => {
+    setSelectedForCompare((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
   const [confirmDelete, setConfirmDelete] = useState<Track | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [statsBeatmap, setStatsBeatmap] = useState<BeatmapRecord | null>(null)
@@ -2256,13 +2265,41 @@ function TracksPageInner() {
 
   return (
     <div className="space-y-8">
-      <div>
-        <h1 className="text-2xl font-bold">Studio Library</h1>
-        <p className="text-gray-500 mt-1">
-          Tracks in progress and finished maps. Click any track to edit metadata, generate beatmaps, or publish.
-          {' '}
-          <Link to="/create" className="text-jam-300 hover:text-jam-200">+ Create a new track →</Link>
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold">Studio Library</h1>
+          <p className="text-gray-500 mt-1">
+            Tracks in progress and finished maps. Click any track to edit metadata, generate beatmaps, or publish.
+            {' '}
+            <Link to="/create" className="text-jam-300 hover:text-jam-200">+ Create a new track →</Link>
+          </p>
+        </div>
+        {tracks.length > 0 && (
+          <div className="flex items-center gap-3 shrink-0">
+            <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
+              <input
+                type="checkbox"
+                className="w-4 h-4 accent-jam-500 cursor-pointer"
+                checked={tracks.length > 0 && tracks.every((t) => selectedForCompare.has(t.id))}
+                onChange={(e) =>
+                  setSelectedForCompare(e.target.checked ? new Set(tracks.map((t) => t.id)) : new Set())
+                }
+              />
+              Select all
+            </label>
+            <button
+              type="button"
+              disabled={selectedForCompare.size === 0}
+              onClick={() => {
+                const ids = tracks.map((t) => t.id).filter((id) => selectedForCompare.has(id))
+                navigate(`/compare?ids=${ids.join(',')}`, { state: { trackIds: ids } })
+              }}
+              className="px-3 py-1.5 rounded-md text-sm font-medium bg-jam-600/20 text-jam-300 hover:bg-jam-600/30 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              Compare{selectedForCompare.size > 0 ? ` (${selectedForCompare.size})` : ''}
+            </button>
+          </div>
+        )}
       </div>
 
       {loading && (
@@ -2396,6 +2433,14 @@ function TracksPageInner() {
             >
               <div className="flex items-center justify-between gap-4">
                 <div className="flex items-center gap-3 min-w-0">
+                  <input
+                    type="checkbox"
+                    checked={selectedForCompare.has(track.id)}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={() => toggleCompare(track.id)}
+                    aria-label={`Select ${track.name} for compare`}
+                    className="w-4 h-4 shrink-0 accent-jam-500 cursor-pointer"
+                  />
                   <div className="w-12 h-12 shrink-0 rounded-md overflow-hidden bg-gray-800 border border-gray-700 flex items-center justify-center">
                     {hasArt ? (
                       <img
