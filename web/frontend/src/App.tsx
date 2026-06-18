@@ -8,6 +8,7 @@ import DependenciesPage from './pages/DependenciesPage.tsx'
 import LogsPage from './pages/LogsPage.tsx'
 import UsersPage from './pages/UsersPage.tsx'
 import GenerationPresetsPage from './pages/GenerationPresetsPage.tsx'
+import CalibrationPage from './pages/CalibrationPage.tsx'
 import BeatmapEditor from './components/BeatmapEditor.tsx'
 import VocalEditor from './components/VocalEditor.tsx'
 import { VersionBanner } from './components/VersionStatus.tsx'
@@ -60,6 +61,16 @@ export default function App() {
         <UpdateNudge />
         <Routes>
           <Route path="/edit-vocals/:trackId" element={<VocalEditor />} />
+        </Routes>
+      </>
+    )
+  }
+  if (location.pathname.startsWith('/compare')) {
+    return (
+      <>
+        <UpdateNudge />
+        <Routes>
+          <Route path="/compare" element={<CalibrationPage />} />
         </Routes>
       </>
     )
