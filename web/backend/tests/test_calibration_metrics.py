@@ -77,3 +77,23 @@ def test_section_metrics_min_gap_and_runs():
     m = section_metrics(body, 192, [(0, 120.0)])
     assert round(m['min_gap_s'], 3) == 0.125
     assert m['longest_run'] == 4         # all gaps <= FAST_GAP_S (0.25)
+
+
+def test_summarize_rows_groups_by_tier_and_computes_quartiles():
+    from app.services.calibration_metrics import summarize_rows
+
+    rows = [
+        {'difficulty': 'Expert', 'gems_per_min': 100.0, 'min_gap_s': None},
+        {'difficulty': 'Expert', 'gems_per_min': 200.0, 'min_gap_s': 0.2},
+        {'difficulty': 'Expert', 'gems_per_min': 300.0, 'min_gap_s': 0.4},
+        {'difficulty': 'Easy', 'gems_per_min': 50.0, 'min_gap_s': 1.0},
+    ]
+    s = summarize_rows(rows)
+    assert s['Expert']['gems_per_min']['min'] == 100.0
+    assert s['Expert']['gems_per_min']['max'] == 300.0
+    assert s['Expert']['gems_per_min']['median'] == 200.0
+    assert s['Expert']['gems_per_min']['mean'] == 200.0
+    assert s['Expert']['gems_per_min']['count'] == 3
+    # None values are skipped: only 2 of 3 Expert rows have min_gap_s
+    assert s['Expert']['min_gap_s']['count'] == 2
+    assert s['Easy']['gems_per_min']['count'] == 1

@@ -217,3 +217,49 @@ def section_metrics(body: str, resolution: int, tempo_map: list[tuple[int, float
         'longest_run': longest_run,
         'avg_chord_size': round(avg_chord_size, 2),
     }
+
+
+_SUMMARY_TIERS = ('Expert', 'Hard', 'Medium', 'Easy')
+_SUMMARY_METRICS = NUMERIC_METRICS + ['pct_of_expert_gpm']
+
+
+def _quantile(sorted_vals: list[float], q: float) -> float:
+    """Linear-interpolation quantile (matches numpy's default 'linear')."""
+    if not sorted_vals:
+        return 0.0
+    if len(sorted_vals) == 1:
+        return sorted_vals[0]
+    pos = q * (len(sorted_vals) - 1)
+    lo = int(pos)
+    frac = pos - lo
+    if lo + 1 >= len(sorted_vals):
+        return sorted_vals[lo]
+    return sorted_vals[lo] + frac * (sorted_vals[lo + 1] - sorted_vals[lo])
+
+
+def summarize_rows(rows: list[dict]) -> dict:
+    """Per-tier min/q1/median/q3/max/mean/count for each numeric metric."""
+    out: dict = {}
+    for tier in _SUMMARY_TIERS:
+        tier_rows = [r for r in rows if r.get('difficulty') == tier]
+        if not tier_rows:
+            continue
+        metrics: dict = {}
+        for key in _SUMMARY_METRICS:
+            vals = sorted(
+                float(r[key]) for r in tier_rows if r.get(key) is not None
+            )
+            if not vals:
+                continue
+            metrics[key] = {
+                'min': vals[0],
+                'q1': round(_quantile(vals, 0.25), 3),
+                'median': round(_quantile(vals, 0.5), 3),
+                'q3': round(_quantile(vals, 0.75), 3),
+                'max': vals[-1],
+                'mean': round(sum(vals) / len(vals), 3),
+                'count': len(vals),
+            }
+        if metrics:
+            out[tier] = metrics
+    return out
