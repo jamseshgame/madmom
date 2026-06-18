@@ -7146,9 +7146,13 @@ export default function BeatmapEditor() {
           }
           a.addEventListener('timeupdate', onTick)
         }
-      } else if (a.paused && a.currentTime >= startSec && a.currentTime < endSec - 0.05) {
+      } else if (a.paused && !a.ended && a.currentTime >= startSec && a.currentTime < endSec - 0.05) {
         // Already fired but the user paused mid-clip — resume from where the
         // audio element was paused (don't re-seek; that would stutter).
+        // `!a.ended` is essential: a VO with no durationMs has endSec=Infinity,
+        // so once it plays through, the element is paused at its full length
+        // and the currentTime guard stays true forever — without this check we
+        // re-fire play() every frame and the clip loops endlessly.
         a.play().catch(() => undefined)
       }
     }
