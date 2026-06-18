@@ -55,10 +55,11 @@ const COLUMNS: { key: keyof Row; label: string; numeric: boolean; fmt?: (r: Row)
   { key: 'gems_per_min', label: 'Gems/min', numeric: true },
   { key: 'pct_of_expert_gpm', label: '% of Expert', numeric: true, fmt: (r) => (r.pct_of_expert_gpm == null ? '—' : `${r.pct_of_expert_gpm}%`) },
   { key: 'peak_nps', label: 'Peak NPS', numeric: true },
+  // numeric: false intentionally — busiest_measure is a bar index; outlier shading on an index is meaningless
   { key: 'busiest_measure', label: 'Busy bar', numeric: false },
   { key: 'total_notes', label: 'Notes', numeric: true },
   { key: 'total_holds', label: 'Holds', numeric: true },
-  { key: 'total_chords', label: 'Chords', numeric: true },
+  { key: 'total_chords', label: 'Strum chords', numeric: true },
   { key: 'total_chord_holds', label: 'Chord holds', numeric: true },
   { key: 'total_slides', label: 'Slides', numeric: true },
   { key: 'total_chord_slides', label: 'Slide chords', numeric: true },
