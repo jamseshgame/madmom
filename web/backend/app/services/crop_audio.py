@@ -1,7 +1,12 @@
 """Crop a beatmap's song.ogg to end just after its last charted event."""
 from __future__ import annotations
 
+import os
 import re
+import subprocess
+from pathlib import Path
+
+from .audio import read_audio_metadata
 
 # Matches a chart event line: "<tick> = <rest>" with an integer left-hand side.
 _EVENT_RE = re.compile(r'^\s*(\d+)\s*=\s*(.*)$', re.MULTILINE)
@@ -75,3 +80,64 @@ def update_song_length(ini_text: str, length_ms: int) -> str:
         return ini_text[:idx] + f'\nsong_length = {length_ms}' + ini_text[idx:]
     # No [song] section at all — prepend one.
     return f'[song]\nsong_length = {length_ms}\n' + ini_text
+
+
+def crop_song_ogg(bm_dir: Path, padding_ms: int) -> dict:
+    """Crop bm_dir/song.ogg to (last event + padding). Overwrites in place and
+    updates song_length in song.ini. Returns a result summary.
+
+    Raises ValueError('no-events') if the chart has no croppable events.
+    """
+    bm_dir = Path(bm_dir)
+    song = bm_dir / 'song.ogg'
+    chart_path = bm_dir / 'notes.chart'
+    padding_ms = max(0, int(padding_ms))
+
+    content = chart_path.read_text(encoding='utf-8', errors='ignore') if chart_path.exists() else ''
+    last_tick = last_event_tick(content)
+    if last_tick <= 0:
+        raise ValueError('no-events')
+
+    last_event_ms = tick_to_ms(content, last_tick)
+    crop_ms = last_event_ms + padding_ms
+
+    actual_ms = float(read_audio_metadata(song).get('duration', 0.0)) * 1000.0
+    clamped = False
+    if actual_ms and crop_ms >= actual_ms:
+        # Nothing to trim — target is at or past the file end.
+        return {
+            'last_event_ms': last_event_ms,
+            'crop_ms': crop_ms,
+            'duration_ms': actual_ms,
+            'noop': True,
+            'clamped': True,
+        }
+
+    tmp = bm_dir / 'song.crop.ogg'
+    proc = subprocess.run(
+        ['ffmpeg', '-y', '-i', str(song), '-t', f'{crop_ms / 1000.0:.3f}',
+         '-vn', '-c:a', 'libvorbis', '-q:a', '6', str(tmp)],
+        capture_output=True, text=True, timeout=120,
+    )
+    if proc.returncode != 0:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(f'ffmpeg crop failed: {proc.stderr[-400:]}')
+    os.replace(tmp, song)
+
+    # Invalidate the cached waveform peaks so the editor re-extracts them.
+    (bm_dir / 'song.peaks.f32').unlink(missing_ok=True)
+
+    new_ms = float(read_audio_metadata(song).get('duration', crop_ms / 1000.0)) * 1000.0
+
+    ini_path = bm_dir / 'song.ini'
+    if ini_path.exists():
+        ini_path.write_text(update_song_length(ini_path.read_text(encoding='utf-8'), round(new_ms)),
+                            encoding='utf-8')
+
+    return {
+        'last_event_ms': last_event_ms,
+        'crop_ms': crop_ms,
+        'duration_ms': new_ms,
+        'noop': False,
+        'clamped': clamped,
+    }
