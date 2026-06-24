@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from ..config import settings
 from ..services.audio import compute_audio_peaks, resize_to_square_png
+from ..services.crop_audio import crop_song_ogg
 from ..services.chart_generator import chart_difficulties, generate_full_chart
 from ..services.game_songs import _parse_song_ini
 from ..services.github_publisher import publish_song_folder
@@ -769,6 +770,24 @@ async def get_beatmap_song_peaks(track_id: str, beatmap_id: str, bucket_ms: int 
         raise HTTPException(500, f'Peak extraction failed: {e}')
     cache_path.write_bytes(blob)
     return Response(content=blob, media_type='application/octet-stream')
+
+
+@router.post('/{track_id}/beatmaps/{beatmap_id}/crop-audio')
+async def crop_beatmap_audio(track_id: str, beatmap_id: str, body: dict):
+    """Crop song.ogg to end just after the last charted event, plus padding_ms.
+    Overwrites song.ogg and updates song_length in song.ini."""
+    bm_dir = get_beatmap_dir(track_id, beatmap_id)
+    if bm_dir is None:
+        raise HTTPException(404, 'Beatmap not found')
+    if not (bm_dir / 'song.ogg').exists():
+        raise HTTPException(404, 'song.ogg missing for this beatmap')
+    padding_ms = int(body.get('padding_ms', 0) or 0)
+    try:
+        return crop_song_ogg(bm_dir, padding_ms)
+    except ValueError:
+        raise HTTPException(400, 'No events to crop to')
+    except (RuntimeError, OSError) as e:
+        raise HTTPException(500, f'Crop failed: {e}')
 
 
 @router.get('/{track_id}/beatmaps/{beatmap_id}/chart')
