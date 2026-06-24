@@ -3843,9 +3843,68 @@ export default function BeatmapEditor() {
   // re-fire samples on every animation frame.
   const realNotesLastTimeRef = useRef<number>(0)
   const clickGainRef = useRef<GainNode | null>(null)
+  // Bumped after a crop to force <audio> + waveform to refetch the new song.ogg.
+  const [cropVersion, setCropVersion] = useState(0)
+  const [cropOpen, setCropOpen] = useState(false)
+  const [cropPadMs, setCropPadMs] = useState(1000)
+  const [cropBusy, setCropBusy] = useState(false)
+  const [cropMsg, setCropMsg] = useState('')
+
+  // Approximate last-event time from the in-memory chart (active difficulty
+  // only) — display hint; the backend computes the authoritative value.
+  const cropPreviewSec = useMemo(() => {
+    if (!chart) return 0
+    const tickEnds = [
+      0,
+      ...chart.notes.map((n) => n.tick + (n.sustain || 0)),
+      ...chart.sceneEvents.map((e) => e.tick + (e.duration || 0)),
+      ...chart.tutorial.map((e) => e.tick),
+    ]
+    const lastTick = Math.max(...tickEnds)
+    const sec = tickToSec(tempoSegments, chart.resolution, lastTick)
+    const clipEnd = Math.max(0, ...chart.clips.map((c) => c.endSec))
+    return Math.max(sec, clipEnd)
+  }, [chart, tempoSegments])
+
+  const fmtTime = (sec: number) => {
+    const m = Math.floor(sec / 60)
+    const s = sec - m * 60
+    return `${m}:${s.toFixed(1).padStart(4, '0')}`
+  }
+
+  const handleCrop = async () => {
+    if (!chart) return
+    setCropBusy(true)
+    setCropMsg('')
+    try {
+      if (dirty) await handleSave()
+      const res = await fetch(`/api/tracks/${trackId}/beatmaps/${beatmapId}/crop-audio`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ padding_ms: Math.max(0, Math.round(cropPadMs)) }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || `Crop failed (${res.status})`)
+      }
+      const data = await res.json()
+      if (data.noop) {
+        setCropMsg(`Already ≤ crop length (${fmtTime(data.duration_ms / 1000)})`)
+      } else {
+        const tail = data.clamped ? ' (file end reached)' : ''
+        setCropMsg(`Cropped to ${fmtTime(data.duration_ms / 1000)}${tail}`)
+        setCropVersion((v) => v + 1)  // reload audio + waveform
+      }
+    } catch (e) {
+      setCropMsg((e as Error).message || 'Crop failed')
+    } finally {
+      setCropBusy(false)
+    }
+  }
+
   const audioSrc = audioSource === 'track-song'
     ? `/api/tracks/${trackId}/stems/song`
-    : `/api/tracks/${trackId}/beatmaps/${beatmapId}/download/song.ogg`
+    : `/api/tracks/${trackId}/beatmaps/${beatmapId}/download/song.ogg?v=${cropVersion}`
   // Preserve the playhead across an audioSrc swap. Captured pre-swap, applied
   // once the new <audio> reports loaded metadata.
   const pendingSeekRef = useRef<number | null>(null)
@@ -7455,6 +7514,54 @@ export default function BeatmapEditor() {
         {saveMsg && (
           <span className={`text-xs shrink-0 ${saveMsg === 'Saved' ? 'text-emerald-400' : 'text-red-400'}`}>{saveMsg}</span>
         )}
+        <div className="relative shrink-0">
+          <button
+            onClick={() => { setCropMsg(''); setCropOpen((o) => !o) }}
+            disabled={!chart || audioSource !== 'beatmap'}
+            title="Trim song.ogg to end just after the last charted event"
+            className="px-3 py-2 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-gray-200 rounded-md text-sm font-medium transition-colors"
+          >
+            Crop audio
+          </button>
+          {cropOpen && (
+            <div className="absolute right-0 top-full mt-1 z-30 w-64 bg-gray-900 border border-gray-700 rounded-lg shadow-xl p-3 space-y-2">
+              <div className="text-[11px] text-gray-400">
+                Last event ≈ <span className="text-gray-200">{fmtTime(cropPreviewSec)}</span>
+                <br />
+                Crop to ≈ <span className="text-gray-200">{fmtTime(cropPreviewSec + cropPadMs / 1000)}</span>
+              </div>
+              <div className="flex gap-1">
+                {[0, 500, 1000, 2000].map((ms) => (
+                  <button
+                    key={ms}
+                    onClick={() => setCropPadMs(ms)}
+                    className={`flex-1 px-1 py-1 rounded text-[11px] ${cropPadMs === ms ? 'bg-jam-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}
+                  >
+                    {ms === 0 ? '0s' : `${ms / 1000}s`}
+                  </button>
+                ))}
+              </div>
+              <label className="block text-[11px] text-gray-500">
+                custom pad (ms)
+                <input
+                  type="number"
+                  min={0}
+                  value={cropPadMs}
+                  onChange={(e) => setCropPadMs(Number(e.target.value))}
+                  className="mt-0.5 block w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200"
+                />
+              </label>
+              <button
+                onClick={() => void handleCrop()}
+                disabled={cropBusy}
+                className="w-full px-2 py-1.5 bg-red-700 hover:bg-red-600 disabled:opacity-50 text-white rounded text-xs font-medium"
+              >
+                {cropBusy ? 'Cropping…' : 'Crop song.ogg (overwrites)'}
+              </button>
+              {cropMsg && <div className="text-[11px] text-gray-300">{cropMsg}</div>}
+            </div>
+          )}
+        </div>
         <button
           onClick={handleSave}
           disabled={saving || !chart || !dirty}
