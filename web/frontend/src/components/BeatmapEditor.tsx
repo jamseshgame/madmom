@@ -2964,6 +2964,8 @@ export default function BeatmapEditor() {
   const [tutorialPeaks, setTutorialPeaks] = useState<Float32Array | null>(null)
   const [peaksBucketSec] = useState(0.020)
   const [timelineView, setTimelineView] = useState<{ start: number; end: number }>({ start: 0, end: 0 })
+  // Bumped after a crop to force <audio> + waveform to refetch the new song.ogg.
+  const [cropVersion, setCropVersion] = useState(0)
 
   // Sync the shared timeline view to song duration when it lands.
   useEffect(() => {
@@ -2974,12 +2976,12 @@ export default function BeatmapEditor() {
   useEffect(() => {
     if (!trackId || !beatmapId) return
     let cancelled = false
-    fetch(`/api/tracks/${trackId}/beatmaps/${beatmapId}/song-peaks`)
+    fetch(`/api/tracks/${trackId}/beatmaps/${beatmapId}/song-peaks?v=${cropVersion}`)
       .then((r) => (r.ok ? r.arrayBuffer() : null))
       .then((buf) => { if (!cancelled && buf) setTutorialPeaks(new Float32Array(buf)) })
       .catch(() => undefined)
     return () => { cancelled = true }
-  }, [trackId, beatmapId])
+  }, [trackId, beatmapId, cropVersion])
 
   // When the user picks an imported source, prefetch its data into the cache.
   useEffect(() => {
@@ -3843,8 +3845,6 @@ export default function BeatmapEditor() {
   // re-fire samples on every animation frame.
   const realNotesLastTimeRef = useRef<number>(0)
   const clickGainRef = useRef<GainNode | null>(null)
-  // Bumped after a crop to force <audio> + waveform to refetch the new song.ogg.
-  const [cropVersion, setCropVersion] = useState(0)
   const [cropOpen, setCropOpen] = useState(false)
   const [cropPadMs, setCropPadMs] = useState(1000)
   const [cropBusy, setCropBusy] = useState(false)
