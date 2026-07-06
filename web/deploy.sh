@@ -44,11 +44,14 @@ python3 -m venv "$BACKEND_DIR/venv"
 source "$BACKEND_DIR/venv/bin/activate"
 
 pip install --upgrade pip
-pip install -e "$REPO_DIR"  # install madmom in dev mode
-pip install -r "$BACKEND_DIR/requirements.txt"
+# -c constraints.txt caps numpy on every install (madmom's editable install
+# declares only `numpy>2`, which would otherwise pull 2.5 and break numba).
+CONSTRAINTS="$BACKEND_DIR/constraints.txt"
+pip install -c "$CONSTRAINTS" -e "$REPO_DIR"  # install madmom in dev mode
+pip install -c "$CONSTRAINTS" -r "$BACKEND_DIR/requirements.txt"
 # Extras carry packages with conflicting metadata pins; --no-deps installs
 # them as-is. See requirements-extras.txt for the rationale.
-pip install --no-deps -r "$BACKEND_DIR/requirements-extras.txt"
+pip install -c "$CONSTRAINTS" --no-deps -r "$BACKEND_DIR/requirements-extras.txt"
 
 # Build Cython extensions
 cd "$REPO_DIR"

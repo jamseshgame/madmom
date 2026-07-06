@@ -14,6 +14,11 @@ anthropic>=0.40
 # Linux (droplet) and Windows (dev). Cython .so files compiled against an
 # older numpy ABI must be rebuilt after a numpy major bump — deploy reruns
 # `setup.py build_ext --inplace`.
+#
+# ALSO capped by numba (transitive dep of basic-pitch): NumPy 2.5+ makes numba
+# fail to import with "Numba needs NumPy 2.4 or less", killing the basic-pitch
+# engines. This exact pin is mirrored in constraints.txt (applied via `-c` to
+# every install) so a stray `pip install` can't drag numpy up past it.
 numpy==2.4.4
 demucs>=4.0
 torch==2.12.0

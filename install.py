@@ -158,13 +158,17 @@ def install_backend() -> None:
     # build_ext runs (PEP-517 isolation doesn't apply to a direct setup.py
     # invocation). The editable madmom install pulls numpy via its deps but
     # not Cython.
+    # -c constraints.txt caps numpy on every install (madmom's editable
+    # install declares only `numpy>2`, which would otherwise pull 2.5 and
+    # break numba / the basic-pitch engines).
+    constraints = str(BACKEND / 'constraints.txt')
     _run([str(VENV_PY), '-m', 'pip', 'install', 'cython>=0.25'])
-    _run([str(VENV_PY), '-m', 'pip', 'install', '-e', str(REPO)])
-    _run([str(VENV_PY), '-m', 'pip', 'install', '-r', str(BACKEND / 'requirements.txt')])
+    _run([str(VENV_PY), '-m', 'pip', 'install', '-c', constraints, '-e', str(REPO)])
+    _run([str(VENV_PY), '-m', 'pip', 'install', '-c', constraints, '-r', str(BACKEND / 'requirements.txt')])
     # requirements-extras.txt is for packages whose metadata pins block the
     # main resolver. --no-deps installs them as-is; their actual deps are
     # already satisfied by the main requirements above.
-    _run([str(VENV_PY), '-m', 'pip', 'install', '--no-deps', '-r', str(BACKEND / 'requirements-extras.txt')])
+    _run([str(VENV_PY), '-m', 'pip', 'install', '-c', constraints, '--no-deps', '-r', str(BACKEND / 'requirements-extras.txt')])
 
 
 def build_cython() -> None:

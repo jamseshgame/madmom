@@ -1,0 +1,15 @@
+# Pip constraints applied to EVERY install in the backend venv via `-c`.
+#
+# Unlike requirements.txt (which only constrains packages it lists, when you
+# run `pip install -r requirements.txt`), a constraints file caps a package's
+# version on *any* install that passes `-c constraints.txt` — including the
+# editable `pip install -e madmom` (whose metadata says only `numpy>2`) and
+# any ad-hoc `pip install some-pkg`. This is what stops a stray install from
+# silently dragging numpy back up.
+#
+# numba (a transitive dep of basic-pitch) refuses to import against NumPy 2.5+
+# with "Numba needs NumPy 2.4 or less. Got NumPy 2.5", which kills the
+# basic-pitch (polyphonic) pitch/onset engines. numpy is also pinned in
+# lockstep with the torch/torchaudio ABI (see requirements.txt). Keep this in
+# sync with the numpy pin in requirements.txt.
+numpy==2.4.4
