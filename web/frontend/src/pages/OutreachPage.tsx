@@ -215,14 +215,14 @@ export default function OutreachPage() {
                       <td className="px-3 py-2 whitespace-nowrap">
                         <span className={`inline-block px-2 py-0.5 rounded border text-[11px] ${v.cls}`}>{v.label}</span>
                       </td>
-                      <td className="px-3 py-2 max-w-[280px]">
-                        <button
+                      <td className="px-3 py-2 w-[340px]">
+                        <div
                           onClick={() => setExpanded(isOpen ? null : r.name)}
-                          className="text-left text-gray-400 hover:text-gray-200"
-                          title={isOpen ? 'Collapse' : 'Expand'}
+                          className={`cursor-pointer text-gray-400 hover:text-gray-200 ${isOpen ? '' : 'line-clamp-2'}`}
+                          title={isOpen ? 'Click to collapse' : 'Click to expand'}
                         >
-                          <span className={isOpen ? '' : 'line-clamp-2'}>{r.self_promo_detail || '—'}</span>
-                        </button>
+                          {r.self_promo_detail || '—'}
+                        </div>
                       </td>
                       <td className="px-3 py-2 whitespace-nowrap">
                         {r.discord ? (

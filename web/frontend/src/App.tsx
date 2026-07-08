@@ -147,7 +147,13 @@ export default function App() {
           </nav>
         </div>
       </header>
-      <main className="flex-1 max-w-5xl mx-auto px-4 py-8 w-full space-y-6">
+      <main
+        className={`flex-1 mx-auto px-4 py-8 w-full space-y-6 ${
+          // Outreach's table is wide — let it use the full viewport on
+          // widescreen instead of the default reading-width column.
+          location.pathname.startsWith('/outreach') ? 'max-w-none 2xl:px-8' : 'max-w-5xl'
+        }`}
+      >
         <VersionBanner />
         <Routes>
           <Route path="/" element={<TracksPage />} />
