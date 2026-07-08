@@ -26,6 +26,7 @@ from .routers import (
     highways,
     jobs,
     lyrics,
+    outreach,
     pipeline,
     sample_packs,
     scene_events,
@@ -96,6 +97,7 @@ app.include_router(gem_meshes.router, dependencies=_auth_dep)
 app.include_router(highways.router, dependencies=_auth_dep)
 app.include_router(generation_presets.router, dependencies=_auth_dep)
 app.include_router(sequences.router, dependencies=_auth_dep)
+app.include_router(outreach.router, dependencies=_auth_dep)
 # users router has its own require_admin / require_auth Depends per route
 app.include_router(users.router)
 
