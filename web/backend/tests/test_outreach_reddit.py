@@ -50,6 +50,31 @@ def test_patch_persists_tracking(client):
     assert row['notes'] == 'shared trailer'
 
 
+def test_patch_sets_and_normalizes_discord(client):
+    # Pick a seed row that ships without a Discord link.
+    rows = client.get('/api/outreach/reddit').json()['rows']
+    target = next(r for r in rows if not r['discord'])['name']
+
+    r = client.patch(f'/api/outreach/reddit/{target}', json={'discord': 'discord.gg/jamsesh'})
+    assert r.status_code == 200, r.text
+
+    row = next(x for x in client.get('/api/outreach/reddit').json()['rows'] if x['name'] == target)
+    assert row['discord'] == 'https://discord.gg/jamsesh'  # scheme added
+
+
+def test_patch_clears_discord_without_touching_other_fields(client):
+    rows = client.get('/api/outreach/reddit').json()['rows']
+    seeded = next(r for r in rows if r['discord'])  # e.g. Synth Riders / Paradiddle
+    name = seeded['name']
+
+    # An explicit empty string clears the seed link to none.
+    assert client.patch(f'/api/outreach/reddit/{name}', json={'discord': ''}).status_code == 200
+    row = next(x for x in client.get('/api/outreach/reddit').json()['rows'] if x['name'] == name)
+    assert row['discord'] is None
+    # Untouched tracking fields keep their defaults.
+    assert row['status'] == 'Not posted'
+
+
 def test_patch_rejects_bad_status(client):
     seed_name = client.get('/api/outreach/reddit').json()['rows'][0]['name']
     r = client.patch(f'/api/outreach/reddit/{seed_name}', json={'status': 'Nope'})

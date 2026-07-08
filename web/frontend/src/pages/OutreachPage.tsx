@@ -74,7 +74,7 @@ export default function OutreachPage() {
     [rows, query, category, sortCol, sortDir],
   )
 
-  const patch = async (name: string, fields: Partial<Pick<RedditRow, 'status' | 'last_posted' | 'notes'>>) => {
+  const patch = async (name: string, fields: Partial<Pick<RedditRow, 'status' | 'last_posted' | 'notes' | 'discord'>>) => {
     // Optimistic: update local state, then persist. On failure, surface the error.
     setRows((prev) => prev.map((r) => (r.name === name ? { ...r, ...fields } : r)))
     try {
@@ -224,19 +224,28 @@ export default function OutreachPage() {
                           {r.self_promo_detail || '—'}
                         </div>
                       </td>
-                      <td className="px-3 py-2 whitespace-nowrap">
-                        {r.discord ? (
+                      <td className="px-3 py-2 min-w-[150px]">
+                        {r.discord && (
                           <a
                             href={r.discord}
                             target="_blank"
                             rel="noreferrer"
-                            className="text-indigo-300 hover:underline text-xs"
+                            className="text-indigo-300 hover:underline text-[11px] block mb-0.5 truncate max-w-[150px]"
+                            title={r.discord}
                           >
-                            Join
+                            Join ↗
                           </a>
-                        ) : (
-                          <span className="text-gray-700 text-xs">—</span>
                         )}
+                        <input
+                          key={r.discord || ''}
+                          defaultValue={r.discord || ''}
+                          onBlur={(e) => {
+                            const v = e.target.value.trim()
+                            if (v !== (r.discord || '')) patch(r.name, { discord: v || null })
+                          }}
+                          placeholder="discord.gg/…"
+                          className="w-full bg-gray-900 border border-gray-800 rounded px-1.5 py-0.5 text-[11px] text-indigo-200 placeholder-gray-700"
+                        />
                       </td>
                       <td className="px-3 py-2 whitespace-nowrap">
                         <select

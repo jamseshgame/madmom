@@ -34,6 +34,9 @@ class TrackingPatch(BaseModel):
     status: str | None = None
     last_posted: str | None = None
     notes: str | None = None
+    # Team-editable override for the Discord invite. Falls back to the seed
+    # link when never set; an explicit empty string clears it to none.
+    discord: str | None = None
 
 
 class CustomSubreddit(BaseModel):
@@ -94,6 +97,16 @@ def _default_tracking() -> dict[str, Any]:
     return {'status': 'Not posted', 'last_posted': None, 'notes': ''}
 
 
+def _normalize_discord(value: str | None) -> str | None:
+    """Empty → None; bare `discord.gg/…` / codes get an https:// scheme."""
+    if not value or not value.strip():
+        return None
+    v = value.strip()
+    if not v.startswith(('http://', 'https://')):
+        v = 'https://' + v.lstrip('/')
+    return v
+
+
 def _merge_rows(store: dict[str, Any]) -> list[dict[str, Any]]:
     """Seed rows + custom rows, each with its tracking overlay applied."""
     tracking: dict[str, Any] = store['tracking']
@@ -106,6 +119,10 @@ def _merge_rows(store: dict[str, Any]) -> list[dict[str, Any]]:
         merged = _default_tracking()
         merged.update({k: v for k, v in t.items() if k in merged})
         row.update(merged)
+        # Discord isn't a default-tracking field (it seeds from the row), so
+        # apply the override only when the team has explicitly set one.
+        if 'discord' in t:
+            row['discord'] = t['discord'] or None
         rows.append(row)
     return rows
 
@@ -135,6 +152,10 @@ async def update_tracking(name: str, patch: TrackingPatch) -> dict[str, Any]:
         entry['last_posted'] = patch.last_posted or None
     if patch.notes is not None:
         entry['notes'] = patch.notes
+    # Use fields_set so an explicit `discord: ""` (clear) is distinguishable
+    # from the field being omitted entirely.
+    if 'discord' in patch.model_fields_set:
+        entry['discord'] = _normalize_discord(patch.discord)
     store['tracking'][name] = entry
     _save_store(store)
     return {'name': name, **entry}
