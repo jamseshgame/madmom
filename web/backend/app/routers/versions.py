@@ -110,11 +110,19 @@ PACKAGES: list[dict[str, str | bool]] = [
         'name': 'torch',
         'used_for': 'Deep-learning runtime (demucs + chatterbox)',
         'license': 'BSD-3-Clause',
+        # Pinned in lockstep with numpy + torchaudio (torch==2.12.0 in
+        # requirements.txt). torch wheels bind a specific numpy ABI; bumping
+        # any of the trio in isolation breaks demucs at runtime. Upgrade all
+        # three together after verifying they resolve on PyPI — never via this
+        # button.
+        'pinned': True,
     },
     {
         'name': 'torchaudio',
         'used_for': 'Audio tensor I/O for demucs',
         'license': 'BSD-2-Clause',
+        # Pinned in lockstep with torch + numpy (torchaudio==2.11.0). See torch.
+        'pinned': True,
     },
     {
         'name': 'torchcodec',
@@ -146,6 +154,14 @@ PACKAGES: list[dict[str, str | bool]] = [
         'name': 'numpy',
         'used_for': 'Numerical arrays for madmom + demucs',
         'license': 'BSD-3-Clause',
+        # Pinned to numpy==2.4.4 (requirements.txt + constraints.txt). numba (a
+        # transitive dep of basic-pitch) refuses to import against NumPy 2.5+
+        # ("Numba needs NumPy 2.4 or less"), which kills the basic-pitch
+        # pitch/onset engines; numpy is also locked to the torch/torchaudio
+        # ABI. Upgrading via this button broke the generator — keep it pinned
+        # so the UI hides the button. Bump the pin in requirements.txt +
+        # constraints.txt (and rebuild the Cython .so's) instead.
+        'pinned': True,
     },
     {
         'name': 'scipy',
