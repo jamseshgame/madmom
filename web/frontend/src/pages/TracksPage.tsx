@@ -982,33 +982,70 @@ function InlineBeatmapProgress({
   const [done, setDone] = useState(false)
   const [error, setError] = useState('')
 
+  // Keep the latest callbacks in a ref so the SSE effect below depends ONLY on
+  // jobId. If these inline props sat in the dep array, every parent re-render
+  // (and a running batch triggers many — setBeatmapQueue/loadTracks/etc.) would
+  // tear down and reopen the EventSource. That churn is what used to drop the
+  // terminal `done` frame mid-batch and silently abandon the remaining presets.
+  const cbRef = useRef({ onDone, onCancelled, onError })
+  cbRef.current = { onDone, onCancelled, onError }
+
   useEffect(() => {
     const es = new EventSource(`/api/jobs/${jobId}/events`)
+    let settled = false
+    let poll: ReturnType<typeof setInterval> | null = null
+    const stopPoll = () => { if (poll) { clearInterval(poll); poll = null } }
+
+    // Fire a terminal callback exactly once, from whichever source (the live
+    // SSE stream or the poll backstop) observes the terminal state first.
+    const settle = (kind: 'done' | 'error' | 'cancelled', msg?: string) => {
+      if (settled) return
+      settled = true
+      stopPoll()
+      es.close()
+      if (kind === 'done') { setDone(true); cbRef.current.onDone?.() }
+      else if (kind === 'cancelled') { cbRef.current.onCancelled?.() }
+      else { setError(msg || 'Generation failed'); cbRef.current.onError?.() }
+    }
+
+    // Authoritative terminal-state backstop. If the SSE connection is dropping
+    // (proxy blip, tab throttling, half-open socket), poll the job snapshot so
+    // the batch still advances instead of stalling — or, worse, being wiped.
+    const startPoll = () => {
+      if (poll || settled) return
+      poll = setInterval(async () => {
+        try {
+          const r = await fetch(`/api/jobs/${jobId}`)
+          if (!r.ok) return
+          const j = await r.json()
+          if (j.status === 'done') settle('done')
+          else if (j.status === 'failed') settle('error', j.error || 'Generation failed')
+          else if (j.status === 'cancelled') settle('cancelled')
+        } catch {
+          /* transient — keep polling */
+        }
+      }, 3000)
+    }
+
     es.onmessage = (e) => {
       const d = JSON.parse(e.data)
-      if (d.progress >= 0) setProgress(d.progress)
+      if (typeof d.progress === 'number' && d.progress >= 0) setProgress(d.progress)
       if (d.message) setMessage(d.message)
-      if (d.step === 'done' && d.metadata) {
-        es.close()
-        setDone(true)
-        if (onDone) onDone()
-      } else if (d.step === 'error') {
-        es.close()
-        setError(d.message)
-        if (onError) onError()
-      } else if (d.step === 'cancelled') {
-        es.close()
-        if (onCancelled) onCancelled()
-      }
+      if (d.step === 'done' && d.metadata) settle('done')
+      else if (d.step === 'error') settle('error', d.message)
+      else if (d.step === 'cancelled') settle('cancelled')
     }
     es.onerror = () => {
-      es.close()
-      // Browser stopped reconnecting — caller needs to release any lock it
-      // was holding for this job.
-      if (onError) onError()
+      // NOT necessarily terminal: EventSource fires onerror on recoverable
+      // drops too and reconnects on its own (the /events endpoint replays the
+      // full log on reconnect, so no progress is lost). Rather than declaring
+      // the job dead and abandoning the batch, lean on the poll backstop to
+      // confirm the real terminal state.
+      startPoll()
     }
-    return () => es.close()
-  }, [jobId, onDone, onCancelled, onError])
+
+    return () => { settled = true; stopPoll(); es.close() }
+  }, [jobId])
 
   if (done) return <div className="text-[11px] text-emerald-400 mt-1">Generated ✓</div>
   if (error) return <div className="text-[11px] text-red-400 mt-1 truncate" title={error}>{error}</div>
@@ -1733,12 +1770,21 @@ function TracksPageInner() {
                         lock.release()
                       }}
                       onError={() => {
-                        setBeatmapQueue((prev) => { const n = { ...prev }; delete n[stem]; return n })
+                        // A single preset failing must NOT discard the rest of
+                        // this stem's queued presets. Surface the failure, then
+                        // advance to the next queued preset exactly like onDone.
+                        setBatchError(`A ${stem} generation failed — continuing with the remaining queued presets.`)
+                        const firedPreset = dequeueV2(selectedTrack.id, stem)
+                        if (firedPreset) return
+                        // Nothing left for this stem — clean up and fall through
+                        // to the multi-stem batch queue.
+                        setInlineBmJobs((prev) => {
+                          const next = { ...prev }
+                          delete next[stem]
+                          return next
+                        })
                         setQueueSongIni((prev) => { const n = { ...prev }; delete n[stem]; return n })
                         lock.release()
-                        // Move on to the next stem in the multi-stem queue —
-                        // a single transient failure shouldn't kill the
-                        // whole batch.
                         triggerNextBatchStem()
                       }}
                     />
