@@ -2662,6 +2662,10 @@ export default function BeatmapEditor() {
   // autosave that fires mid-save reschedules instead of racing a second PUT).
   const savingRef = useRef(false)
   const [saveMsg, setSaveMsg] = useState('')
+  // Set when a save propagated a ~2x/~0.5x tempo change onto sibling charts —
+  // the classic octave (tap-on-off-beat) mistake. Non-blocking; the .autobak
+  // on the server makes it reversible, but the user should know it happened.
+  const [tempoWarning, setTempoWarning] = useState<{ factor: number; count: number } | null>(null)
   const [dirty, setDirty] = useState(false)
   const [snapDivisor, setSnapDivisor] = useState(4)
   // Clone-difficulty picker: copy one difficulty's notes into another.
@@ -6505,6 +6509,14 @@ export default function BeatmapEditor() {
         const err = await res.json().catch(() => ({}))
         throw new Error(err.detail || `Save failed (${res.status})`)
       }
+      // A tempo edit mirrors onto every sibling chart. If that mirror was a
+      // near-octave (~2x/~0.5x) jump, flag it — it's almost always a tap-on-the-
+      // off-beat mistake, and it silently rewrote the other charts on this track.
+      const saveData = await res.json().catch(() => ({} as any))
+      const warn = saveData?.tempo_octave_warning
+      if (warn && Array.isArray(warn.synced) && warn.synced.length > 0) {
+        setTempoWarning({ factor: warn.factor, count: warn.synced.length })
+      }
       // Did the user edit while the PUT was in flight? If so, the chart we just
       // persisted is already behind — fold the freshly serialized fullText into
       // whatever the latest chart is (functional update, never clobber), and
@@ -7513,6 +7525,21 @@ export default function BeatmapEditor() {
         </div>
         {saveMsg && (
           <span className={`text-xs shrink-0 ${saveMsg === 'Saved' ? 'text-emerald-400' : 'text-red-400'}`}>{saveMsg}</span>
+        )}
+        {tempoWarning && (
+          <div className="shrink-0 flex items-center gap-2 px-2 py-1 rounded bg-amber-950/60 border border-amber-700/60 text-amber-300 text-[11px]">
+            <span>
+              ⚠ Tempo changed ~{tempoWarning.factor >= 1 ? '2×' : '½×'} and synced to {tempoWarning.count} other chart
+              {tempoWarning.count === 1 ? '' : 's'}. If unintended, undo the BPM edit — prior charts are backed up server-side.
+            </span>
+            <button
+              onClick={() => setTempoWarning(null)}
+              className="px-1 rounded hover:bg-amber-800/40 text-amber-200"
+              title="Dismiss"
+            >
+              ✕
+            </button>
+          </div>
         )}
         <div className="relative shrink-0">
           <button

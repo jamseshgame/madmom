@@ -834,7 +834,47 @@ def _apply_offset(text: str, offset_val: str) -> str:
     return text
 
 
-def _propagate_tempo_to_siblings(track_id: str, source_id: str, source_text: str) -> list[str]:
+_TICK0_B_RE = re.compile(r'(?m)^\s*0\s*=\s*B\s+(\d+)')
+
+
+def _first_micro_bpm(text: str) -> int | None:
+    """The tick-0 tempo (``0 = B <micro_bpm>``) from a chart's [SyncTrack], or
+    None if the chart carries no tick-0 tempo marker."""
+    m = _TICK0_B_RE.search(text)
+    return int(m.group(1)) if m else None
+
+
+def _octave_ratio(prev_micro: int, new_micro: int) -> float | None:
+    """If ``new_micro`` is ~2x or ~0.5x ``prev_micro`` (the classic tap-on-the-
+    off-beat / octave-detection mistake), return the raw ratio; else None. A big
+    tempo change is *also* how a legitimate octave fix looks, so this only warns
+    — it never blocks."""
+    if not prev_micro or not new_micro:
+        return None
+    ratio = new_micro / prev_micro
+    if 1.8 <= ratio <= 2.2 or 0.45 <= ratio <= 0.55:
+        return ratio
+    return None
+
+
+def _backup_chart(chart_path: Path) -> None:
+    """Snapshot the current notes.chart to a sibling ``.autobak`` before it's
+    overwritten, so a bad tempo save is always reversible. Rolling single copy
+    (each backup overwrites the previous). No-op if the file doesn't exist yet."""
+    if chart_path.exists():
+        try:
+            shutil.copy2(str(chart_path), str(chart_path) + '.autobak')
+        except OSError as e:
+            print(f'[tracks] autobak failed for {chart_path}: {e}')
+
+
+def _save_chart_with_backup(chart_path: Path, text: str) -> None:
+    """Write notes.chart, backing up the prior content to ``.autobak`` first."""
+    _backup_chart(chart_path)
+    chart_path.write_text(text, encoding='utf-8')
+
+
+def _propagate_tempo_to_siblings(track_id: str, source_id: str, source_text: str) -> dict:
     """Copy the just-saved beatmap's [SyncTrack] block and [Song] Offset onto
     every sibling beatmap of the track.
 
@@ -843,23 +883,31 @@ def _propagate_tempo_to_siblings(track_id: str, source_id: str, source_text: str
     from whichever beatmap it processes first. So a tempo/offset edit on one
     beatmap that *isn't* mirrored to its siblings can ship a stale tempo in the
     merged chart — which plays correctly in the editor (you're viewing the
-    edited beatmap) but drifts in-game. Returns the ids that actually changed.
+    edited beatmap) but drifts in-game.
 
     Siblings that are *missing* a [SyncTrack] block or Offset line get one
     inserted (not just replaced) so a freshly generated instrument chart can't
     silently keep a stale/zero offset or tempo grid.
+
+    Every overwritten sibling is snapshotted to ``.autobak`` first — a single
+    bad save (e.g. an octave-doubled BPM) rewrites every chart on the track at
+    once, and this makes that reversible. Returns ``{'synced': [ids],
+    'octave_warning': {...} | None}``; the warning fires when the propagated
+    tempo is ~2x/~0.5x a sibling's previous tempo so the UI can surface it.
     """
     sync_m = _SYNCTRACK_BLOCK_RE.search(source_text)
     if not sync_m:
-        return []
+        return {'synced': [], 'octave_warning': None}
     sync_block = sync_m.group(0)  # full "[SyncTrack]\n{ ... }"
     off_m = re.search(r'Offset\s*=\s*(-?[0-9]*\.?[0-9]+)', source_text)
     offset_val = off_m.group(1) if off_m else None
+    new_micro = _first_micro_bpm(source_text)
 
     track = get_track(track_id)
     if track is None:
-        return []
+        return {'synced': [], 'octave_warning': None}
     synced: list[str] = []
+    octave_ratio: float | None = None
     for bm in track.beatmaps:
         bid = bm.get('id')
         if not bid or bid == source_id:
@@ -872,9 +920,19 @@ def _propagate_tempo_to_siblings(track_id: str, source_id: str, source_text: str
         if offset_val is not None:
             updated = _apply_offset(updated, offset_val)
         if updated != original:
+            if new_micro is not None:
+                ratio = _octave_ratio(_first_micro_bpm(original) or 0, new_micro)
+                if ratio is not None:
+                    octave_ratio = ratio
+            _backup_chart(cp)
             cp.write_text(updated, encoding='utf-8')
             synced.append(bid)
-    return synced
+    warning = (
+        {'factor': octave_ratio, 'new_micro_bpm': new_micro, 'synced': synced}
+        if octave_ratio is not None
+        else None
+    )
+    return {'synced': synced, 'octave_warning': warning}
 
 
 @router.put('/{track_id}/beatmaps/{beatmap_id}/chart')
@@ -891,9 +949,14 @@ async def put_beatmap_chart(track_id: str, beatmap_id: str, body: dict):
     if len(text) > 5_000_000:
         raise HTTPException(413, 'Chart too large')
     chart_path = bm_dir / 'notes.chart'
-    chart_path.write_text(text, encoding='utf-8')
-    tempo_synced = _propagate_tempo_to_siblings(track_id, beatmap_id, text)
-    return {'ok': True, 'bytes': len(text), 'tempo_synced_to': tempo_synced}
+    _save_chart_with_backup(chart_path, text)
+    prop = _propagate_tempo_to_siblings(track_id, beatmap_id, text)
+    return {
+        'ok': True,
+        'bytes': len(text),
+        'tempo_synced_to': prop['synced'],
+        'tempo_octave_warning': prop['octave_warning'],
+    }
 
 
 @router.delete('/{track_id}/beatmaps/{beatmap_id}')
