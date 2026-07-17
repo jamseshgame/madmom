@@ -1,26 +1,44 @@
-"""The serializer must never emit more than 2 gem notes on a single tick.
+"""The serializer must never emit more than 2 gem notes on a single tick, and
+never a gap-spanning ("wide") chord.
 
 Lane engines emit one event per quantized onset, and polyphonic presets
 (basic-pitch) quantize several onsets onto the same tick — each contributing
-1-2 frets. Stacked, that produced 3-/4-fret chords in published guitar maps.
-The serializer clamps every tick to the outer two frets (lowest + highest) as
-the final invariant, regardless of which engine produced the events.
+1-2 frets. Stacked, that produced 3-/4-fret chords in published guitar maps;
+clamping to the outer two frets then produced gap-spanning chords like
+yellow+orange (2,4) that content reviewers flagged as awkward/unplayable.
+
+The final invariant is now: every tick keeps at most the *lowest adjacent pair*
+of gems (the genuine chords the lane engine emits are already adjacent). A
+same-tick set with no adjacent pair is a quantization collision, not a real
+chord, so it collapses to its root (lowest) gem.
 """
 from __future__ import annotations
 
 from app.services.pipeline.serialize import _clamp_frets, serialize_chart
 
 
-def test_clamp_keeps_outer_two_of_three():
-    assert _clamp_frets([0, 1, 3]) == [0, 3]
+def test_clamp_keeps_lowest_adjacent_pair_of_three():
+    assert _clamp_frets([0, 1, 3]) == [0, 1]
 
 
-def test_clamp_keeps_outer_two_of_four():
-    assert _clamp_frets([1, 2, 3, 4]) == [1, 4]
+def test_clamp_keeps_lowest_adjacent_pair_of_four():
+    assert _clamp_frets([1, 2, 3, 4]) == [1, 2]
 
 
-def test_clamp_leaves_pair_untouched():
-    assert _clamp_frets([2, 4]) == [2, 4]
+def test_clamp_collapses_gapped_pair_to_root():
+    assert _clamp_frets([2, 4]) == [2]
+
+
+def test_clamp_collapses_wide_pair_to_root():
+    assert _clamp_frets([0, 4]) == [0]
+
+
+def test_clamp_collapses_all_gapped_set_to_root():
+    assert _clamp_frets([0, 2, 4]) == [0]
+
+
+def test_clamp_leaves_adjacent_pair_untouched():
+    assert _clamp_frets([1, 2]) == [1, 2]
 
 
 def test_clamp_leaves_single_untouched():
@@ -52,7 +70,7 @@ def _grid():
 
 def test_serialize_clamps_stacked_events_on_same_tick():
     # Two separate events land on tick 100: a [0,1] chord pair + a stray [3].
-    # Union {0,1,3} must collapse to the outer two -> N 0 and N 3 only, no N 1.
+    # Union {0,1,3} keeps the lowest adjacent pair -> N 0 and N 1 only, no N 3.
     lanes = {'lanes': [
         {'tick': 100, 'frets': [0, 1], 'sustain': 0},
         {'tick': 100, 'frets': [3], 'sustain': 0},
@@ -60,10 +78,12 @@ def test_serialize_clamps_stacked_events_on_same_tick():
     text = serialize_chart(grid=_grid(), lanes_per_difficulty={'ExpertSingle': lanes},
                            song_name='X', resolution=192)
     n_lines = [ln.strip() for ln in text.splitlines() if '= N ' in ln and ln.strip().startswith('100')]
-    assert n_lines == ['100 = N 0 0', '100 = N 3 0']
+    assert n_lines == ['100 = N 0 0', '100 = N 1 0']
 
 
-def test_serialize_never_exceeds_two_gems_per_tick():
+def test_serialize_collapses_wide_collision_to_single_gem():
+    # Three lone gems collide on tick 50 spanning {0,2,4} with no adjacent pair.
+    # This is a quantization collision, not a chord -> collapse to the root.
     lanes = {'lanes': [
         {'tick': 50, 'frets': [0], 'sustain': 0},
         {'tick': 50, 'frets': [2], 'sustain': 0},
@@ -71,8 +91,8 @@ def test_serialize_never_exceeds_two_gems_per_tick():
     ]}
     text = serialize_chart(grid=_grid(), lanes_per_difficulty={'ExpertSingle': lanes},
                            song_name='X', resolution=192)
-    n50 = [ln for ln in text.splitlines() if ln.strip().startswith('50 = N ')]
-    assert len(n50) == 2
+    n50 = [ln.strip() for ln in text.splitlines() if ln.strip().startswith('50 = N ')]
+    assert n50 == ['50 = N 0 0']
 
 
 def test_serialize_preserves_sustain_on_kept_frets():

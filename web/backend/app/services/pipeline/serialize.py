@@ -36,14 +36,23 @@ def _serialize_events(grid: dict[str, Any]) -> str:
 
 
 def _clamp_frets(frets: list[int]) -> list[int]:
-    """Reduce a tick's frets to at most two gems (lanes 0-4), keeping the outer
-    two (lowest + highest) so the chord still spans its range. An open note
-    (lane 7) yields to any gem (individual gems carry more detail); a lone open
-    survives. Mirrors the editor's R1 rule so no chart ever ships a 3-fret chord.
+    """Reduce a tick's frets to at most two *adjacent* gems (lanes 0-4).
+
+    The lane engines only ever emit adjacent chord pairs, so a gap-spanning set
+    on a tick is a quantization collision of separate onsets, not a real chord.
+    Keeping the outer two frets (lowest + highest) turned those collisions into
+    awkward wide chords like yellow+orange (2,4) that reviewers flagged. Instead
+    we keep the lowest adjacent pair; a set with no adjacent pair collapses to
+    its root (lowest) gem. An open note (lane 7) yields to any gem (individual
+    gems carry more detail); a lone open survives. Mirrors the editor's R1 rule
+    so no chart ever ships a 3-fret or gap-spanning chord.
     """
     gems = sorted({f for f in frets if 0 <= f <= 4})
     if gems:
-        return [gems[0], gems[-1]] if len(gems) > 2 else gems
+        for lo, hi in zip(gems, gems[1:]):
+            if hi - lo == 1:
+                return [lo, hi]
+        return [gems[0]]
     if any(f == 7 for f in frets):
         return [7]
     return sorted(set(frets))
