@@ -619,6 +619,7 @@ async def generate_beatmap_v2(
             chart_text = serialize_chart(
                 grid=grid, lanes_per_difficulty=lanes_per_difficulty,
                 song_name=song_name, resolution=int(grid['resolution']),
+                collapse_wide=(stem != 'drums'),
             )
             output_dir.mkdir(parents=True, exist_ok=True)
             chart_path = str(output_dir / 'notes.chart')

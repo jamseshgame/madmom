@@ -266,6 +266,7 @@ async def build_chart(track_id: str = Query(...), stem: str = Query(...)):
     text = serialize_chart(
         grid=grid, lanes_per_difficulty=lanes_per_difficulty,
         song_name=track_id, resolution=int(grid['resolution']),
+        collapse_wide=(stem != 'drums'),
     )
     out_dir = td / 'stems' / stem / 'v2'
     out_dir.mkdir(parents=True, exist_ok=True)

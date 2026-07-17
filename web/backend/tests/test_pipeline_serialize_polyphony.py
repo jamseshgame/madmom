@@ -7,10 +7,14 @@ Lane engines emit one event per quantized onset, and polyphonic presets
 clamping to the outer two frets then produced gap-spanning chords like
 yellow+orange (2,4) that content reviewers flagged as awkward/unplayable.
 
-The final invariant is now: every tick keeps at most the *lowest adjacent pair*
-of gems (the genuine chords the lane engine emits are already adjacent). A
-same-tick set with no adjacent pair is a quantization collision, not a real
-chord, so it collapses to its root (lowest) gem.
+The final invariant for guitar is now: every tick keeps at most the *lowest
+adjacent pair* of gems (the genuine chords the lane engine emits are already
+adjacent). A same-tick set with no adjacent pair is a quantization collision,
+not a real chord, so it collapses to its root (lowest) gem.
+
+Drums are the exception: a same-tick set there is a real simultaneous multi-pad
+hit (kick+cymbal etc.), not an artifact, so with collapse_wide=False the clamp
+only caps the tick at two gems (outer two) and allows non-adjacent pairs.
 """
 from __future__ import annotations
 
@@ -57,6 +61,28 @@ def test_clamp_dedupes_repeated_lane():
     assert _clamp_frets([3, 3]) == [3]
 
 
+# Drum branch (collapse_wide=False): cap at two gems, allow non-adjacent pairs.
+def test_clamp_drums_keeps_gapped_pair():
+    assert _clamp_frets([2, 4], collapse_wide=False) == [2, 4]
+
+
+def test_clamp_drums_keeps_wide_pair():
+    assert _clamp_frets([0, 4], collapse_wide=False) == [0, 4]
+
+
+def test_clamp_drums_caps_three_to_outer_two():
+    assert _clamp_frets([0, 2, 4], collapse_wide=False) == [0, 4]
+
+
+def test_clamp_drums_leaves_adjacent_pair_untouched():
+    assert _clamp_frets([1, 2], collapse_wide=False) == [1, 2]
+
+
+def test_clamp_drums_still_dedupes_and_handles_open():
+    assert _clamp_frets([3, 3], collapse_wide=False) == [3]
+    assert _clamp_frets([7], collapse_wide=False) == [7]
+
+
 def _grid():
     return {
         'resolution': 192,
@@ -101,3 +127,16 @@ def test_serialize_preserves_sustain_on_kept_frets():
                            song_name='X', resolution=192)
     assert '384 = N 0 96' in text
     assert '384 = N 1 96' in text
+
+
+def test_serialize_drums_keep_simultaneous_hits():
+    # collapse_wide=False (drums): a kick+cymbal {0,3} collision on one tick is a
+    # real simultaneous hit and must survive as a two-gem non-adjacent chord.
+    lanes = {'lanes': [
+        {'tick': 200, 'frets': [0], 'sustain': 0},
+        {'tick': 200, 'frets': [3], 'sustain': 0},
+    ]}
+    text = serialize_chart(grid=_grid(), lanes_per_difficulty={'ExpertSingle': lanes},
+                           song_name='X', resolution=192, collapse_wide=False)
+    n200 = [ln.strip() for ln in text.splitlines() if ln.strip().startswith('200 = N ')]
+    assert n200 == ['200 = N 0 0', '200 = N 3 0']

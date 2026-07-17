@@ -35,20 +35,29 @@ def _serialize_events(grid: dict[str, Any]) -> str:
     return f'[Events]\n{{\n{body}\n}}\n'
 
 
-def _clamp_frets(frets: list[int]) -> list[int]:
-    """Reduce a tick's frets to at most two *adjacent* gems (lanes 0-4).
+def _clamp_frets(frets: list[int], collapse_wide: bool = True) -> list[int]:
+    """Reduce a tick's frets to at most two gems (lanes 0-4).
 
-    The lane engines only ever emit adjacent chord pairs, so a gap-spanning set
-    on a tick is a quantization collision of separate onsets, not a real chord.
-    Keeping the outer two frets (lowest + highest) turned those collisions into
-    awkward wide chords like yellow+orange (2,4) that reviewers flagged. Instead
-    we keep the lowest adjacent pair; a set with no adjacent pair collapses to
-    its root (lowest) gem. An open note (lane 7) yields to any gem (individual
-    gems carry more detail); a lone open survives. Mirrors the editor's R1 rule
-    so no chart ever ships a 3-fret or gap-spanning chord.
+    With ``collapse_wide`` (guitar, the default): keep at most two *adjacent*
+    gems. The lane engines only ever emit adjacent chord pairs, so a gap-spanning
+    set on a tick is a quantization collision of separate onsets, not a real
+    chord. Keeping the outer two frets turned those collisions into awkward wide
+    chords like yellow+orange (2,4) that reviewers flagged, so instead we keep
+    the lowest adjacent pair; a set with no adjacent pair collapses to its root
+    (lowest) gem.
+
+    Without ``collapse_wide`` (drums): a same-tick set is a real simultaneous
+    multi-pad hit (kick+cymbal etc.), not an artifact, so keep the outer two
+    frets and allow non-adjacent pairs — only the 3-fret cap is enforced.
+
+    Either way an open note (lane 7) yields to any gem (individual gems carry
+    more detail); a lone open survives. Mirrors the editor's R1 rule so no chart
+    ever ships a 3-fret chord.
     """
     gems = sorted({f for f in frets if 0 <= f <= 4})
     if gems:
+        if not collapse_wide:
+            return [gems[0], gems[-1]] if len(gems) > 2 else gems
         for lo, hi in zip(gems, gems[1:]):
             if hi - lo == 1:
                 return [lo, hi]
@@ -58,7 +67,8 @@ def _clamp_frets(frets: list[int]) -> list[int]:
     return sorted(set(frets))
 
 
-def _serialize_difficulty(section_name: str, lanes_payload: dict[str, Any]) -> str:
+def _serialize_difficulty(section_name: str, lanes_payload: dict[str, Any],
+                          collapse_wide: bool = True) -> str:
     lanes = lanes_payload.get('lanes', [])
     # Merge every event on a tick before emitting: polyphonic presets stack
     # several events on one tick, and only the union tells us the true chord.
@@ -72,7 +82,7 @@ def _serialize_difficulty(section_name: str, lanes_payload: dict[str, Any]) -> s
     rows = []
     for tick, frets in frets_by_tick.items():
         sustain = sustain_by_tick[tick]
-        for fret in _clamp_frets(list(frets)):
+        for fret in _clamp_frets(list(frets), collapse_wide):
             rows.append((tick, fret, f'N {fret} {sustain}'))
     rows.sort()
     body = '\n'.join(f'  {tick} = {expr}' for tick, _f, expr in rows) or '  '
@@ -84,7 +94,11 @@ def serialize_chart(
     lanes_per_difficulty: dict[str, dict[str, Any]],
     song_name: str,
     resolution: int,
+    collapse_wide: bool = True,
 ) -> str:
+    """Serialize lanes to a .chart. ``collapse_wide`` enforces adjacent-only
+    chords (guitar); pass False for drums, whose simultaneous kick+cymbal hits
+    are real non-adjacent chords, not artifacts to collapse."""
     parts = [
         _serialize_song(song_name, resolution),
         _serialize_synctrack(grid),
@@ -92,5 +106,5 @@ def serialize_chart(
     ]
     for section in ('ExpertSingle', 'HardSingle', 'MediumSingle', 'EasySingle'):
         if section in lanes_per_difficulty:
-            parts.append(_serialize_difficulty(section, lanes_per_difficulty[section]))
+            parts.append(_serialize_difficulty(section, lanes_per_difficulty[section], collapse_wide))
     return ''.join(parts)
