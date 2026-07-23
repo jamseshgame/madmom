@@ -1,0 +1,4 @@
+# Shell scripts run on the Linux droplet — a CRLF from a Windows checkout
+# breaks the shebang ("bad interpreter: /usr/bin/env bash^M"). Force LF so
+# editing web/deploy.sh or web/redeploy.sh from Windows never corrupts them.
+*.sh text eol=lf
