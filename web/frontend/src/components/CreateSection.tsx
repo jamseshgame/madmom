@@ -1,27 +1,22 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import FileUpload from './FileUpload.tsx'
 import ProgressTracker from './ProgressTracker.tsx'
+import SeparationSettings, {
+  QUALITY_PRESETS,
+  type EnginesPayload,
+  type ParamValues,
+} from './SeparationSettings.tsx'
 import StemResult from './StemResult.tsx'
 
 type Phase = 'upload' | 'settings' | 'separating' | 'done' | 'error'
 
-const MODELS: Record<string, { label: string; description: string; stems: string[] }> = {
-  htdemucs_6s: {
-    label: 'Extended (6 stems)',
-    description: 'Vocals, drums, bass, guitar, piano, other',
-    stems: ['vocals', 'drums', 'bass', 'guitar', 'piano', 'other'],
-  },
-  htdemucs_ft: {
-    label: 'Fine-tuned (4 stems)',
-    description: 'Higher quality — vocals, drums, bass, other',
-    stems: ['vocals', 'drums', 'bass', 'other'],
-  },
-  htdemucs: {
-    label: 'Standard (4 stems)',
-    description: 'Vocals, drums, bass, other',
-    stems: ['vocals', 'drums', 'bass', 'other'],
-  },
+// Fallback stem lists for the Demucs models, used only until
+// GET /api/stems/engines responds (it returns the authoritative map).
+const DEMUCS_MODEL_STEMS: Record<string, string[]> = {
+  htdemucs_6s: ['vocals', 'drums', 'bass', 'guitar', 'piano', 'other'],
+  htdemucs_ft: ['vocals', 'drums', 'bass', 'other'],
+  htdemucs: ['vocals', 'drums', 'bass', 'other'],
 }
 
 const STEM_META: Record<string, { label: string; color: string }> = {
@@ -543,16 +538,15 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
   const [metadata, setMetadata] = useState<Record<string, unknown>>({})
   const [error, setError] = useState('')
 
-  // Settings
-  const [model, setModel] = useState('htdemucs_6s')
-  const [selectedStems, setSelectedStems] = useState<Set<string>>(new Set(MODELS.htdemucs_6s.stems))
-  // shifts trades quality for time linearly — every additional shift is another full
-  // inference pass over the audio. The Demucs paper's ablation plateaus around 2;
-  // for game stems the quality bump beyond that is inaudible. Crank it up via the
-  // slider if you really need it.
-  const [shifts, setShifts] = useState(2)
-  const [overlap, setOverlap] = useState(0.25)
-  const [clipMode, setClipMode] = useState('rescale')
+  // Separation settings. The engine catalog (and every knob it exposes) comes
+  // from the backend so the UI never drifts from what the engines accept.
+  const [enginesPayload, setEnginesPayload] = useState<EnginesPayload | null>(null)
+  const [engine, setEngine] = useState('hybrid')
+  const [params, setParams] = useState<ParamValues>({})
+  const [selectedStems, setSelectedStems] = useState<Set<string>>(
+    new Set(DEMUCS_MODEL_STEMS.htdemucs_6s),
+  )
+  const [stemsTouched, setStemsTouched] = useState(false)
   const [loadingMeta, setLoadingMeta] = useState(false)
   const [albumArt, setAlbumArt] = useState<File | null>(null)
   const [albumPreview, setAlbumPreview] = useState<string | null>(null)
@@ -589,6 +583,29 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
   const updateIni = (key: string, value: string) => {
     setSongIni((prev) => ({ ...prev, [key]: value }))
   }
+
+  // Pull the engine catalog + max-quality defaults once. Until it lands the
+  // settings panel stays hidden; a failure leaves `params` empty, which the
+  // backend fills in with the same defaults server-side, so separation still
+  // works with nothing selected.
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/stems/engines')
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`${r.status}`))))
+      .then((data: EnginesPayload) => {
+        if (cancelled) return
+        setEnginesPayload(data)
+        const preferred = data.audio_separator?.available ? data.default_engine : 'demucs'
+        setEngine(preferred)
+        setParams({ ...(data.defaults?.[preferred] || {}) })
+      })
+      .catch(() => {
+        if (!cancelled) setEnginesPayload(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   // If the URL carries ?job=<id>, hydrate from the persisted backend record so
   // the user lands directly on the running progress / completed result view.
@@ -728,12 +745,35 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
     }
   }
 
-  const handleModelChange = (m: string) => {
-    setModel(m)
-    setSelectedStems(new Set(MODELS[m].stems))
+  const handleEngineChange = (key: string) => {
+    setEngine(key)
+    setParams({ ...(enginesPayload?.defaults?.[key] || {}) })
+    setStemsTouched(false)
+  }
+
+  const handleParamChange = (key: string, value: unknown) => {
+    setParams((prev) => ({ ...prev, [key]: value }))
+    // Changing the model changes which stems exist, so let the stem toggles
+    // re-derive unless the user has already curated them by hand.
+    if (key === 'model' || key === 'model_filename') setStemsTouched(false)
+  }
+
+  const handleApplyPreset = (preset: keyof typeof QUALITY_PRESETS) => {
+    const defaults = enginesPayload?.defaults?.[engine] || {}
+    const overrides = QUALITY_PRESETS[preset].overrides
+    setParams((prev) => {
+      const next = { ...prev }
+      // Reset to the (max-quality) defaults first so switching Fast → Balanced
+      // doesn't leave Fast-only overrides behind, then layer the preset on top
+      // of the keys this engine actually declares.
+      for (const [k, v] of Object.entries(defaults)) next[k] = v
+      for (const [k, v] of Object.entries(overrides)) if (k in defaults) next[k] = v
+      return next
+    })
   }
 
   const toggleStem = (stem: string) => {
+    setStemsTouched(true)
     setSelectedStems((prev) => {
       const next = new Set(prev)
       if (next.has(stem)) {
@@ -771,11 +811,9 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
       for (const [stem, f] of provided) if (f) formData.append(stem, f)
       endpoint = '/api/stems/manual'
     } else {
-      formData.append('model', model)
+      formData.append('engine', engine)
+      formData.append('params', JSON.stringify(params))
       formData.append('stems', Array.from(selectedStems).join(','))
-      formData.append('shifts', String(shifts))
-      formData.append('overlap', String(overlap))
-      formData.append('clip_mode', clipMode)
       formData.append('game_ready', 'true')
       endpoint = '/api/stems/separate'
     }
@@ -824,11 +862,13 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
     setJobId('')
     setMetadata({})
     setError('')
-    setModel('htdemucs_6s')
-    setSelectedStems(new Set(MODELS.htdemucs_6s.stems))
-    setShifts(2)
-    setOverlap(0.25)
-    setClipMode('rescale')
+    const preferred = enginesPayload?.audio_separator?.available
+      ? enginesPayload.default_engine
+      : 'demucs'
+    setEngine(preferred)
+    setParams({ ...(enginesPayload?.defaults?.[preferred] || {}) })
+    setSelectedStems(new Set(DEMUCS_MODEL_STEMS.htdemucs_6s))
+    setStemsTouched(false)
     if (albumPreview) URL.revokeObjectURL(albumPreview)
     setAlbumArt(null)
     setAlbumPreview(null)
@@ -839,7 +879,33 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
     }
   }
 
-  const currentModelStems = MODELS[model]?.stems || []
+  // Which stems the current engine + model can actually produce. Demucs-backed
+  // engines get it from the model's stem list; audio-separator reads it off the
+  // catalog entry (and normalizes "Instrumental" → "other" the way the backend
+  // does) so the toggles never offer a stem the model cannot emit.
+  const currentModelStems = useMemo(() => {
+    const demucsModels = enginesPayload?.demucs_models || DEMUCS_MODEL_STEMS
+    if (engine === 'demucs' || engine === 'hybrid') {
+      return demucsModels[String(params.model ?? 'htdemucs_6s')] || DEMUCS_MODEL_STEMS.htdemucs_6s
+    }
+    const chosen = (enginesPayload?.audio_separator?.models || []).find(
+      (m) => m.filename === params.model_filename,
+    )
+    if (!chosen || chosen.stems.length === 0) return []
+    const normalized = chosen.stems.map((s) => {
+      const key = s.trim().toLowerCase()
+      if (key === 'instrumental' || key === 'no vocals') return 'other'
+      return key
+    })
+    return Array.from(new Set(normalized))
+  }, [engine, params.model, params.model_filename, enginesPayload])
+
+  // Keep the stem selection in step with the available stems until the user
+  // curates it themselves.
+  useEffect(() => {
+    if (stemsTouched || currentModelStems.length === 0) return
+    setSelectedStems(new Set(currentModelStems))
+  }, [currentModelStems, stemsTouched])
 
   return (
     <div className="space-y-8">
@@ -931,7 +997,7 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
             <div className="bg-gray-900 border border-gray-800 rounded-xl p-2 flex gap-1">
               {(
                 [
-                  { key: 'generate', label: 'Generate stems', sub: 'Run Demucs to split the master' },
+                  { key: 'generate', label: 'Generate stems', sub: 'Split the master with Roformer / Demucs' },
                   { key: 'manual', label: 'Stems mode', sub: 'Upload your own stems; master mix optional' },
                 ] as const
               ).map((opt) => {
@@ -954,30 +1020,26 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
 
           {mode === 'generate' && (
           <>
-          {/* Model selection */}
-          <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">
-            <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Model</h3>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              {Object.entries(MODELS).map(([key, { label, description }]) => (
-                <button
-                  key={key}
-                  onClick={() => handleModelChange(key)}
-                  className={`text-left p-3 rounded-lg border transition-colors ${
-                    model === key
-                      ? 'border-jam-500 bg-jam-600/10'
-                      : 'border-gray-700 hover:border-gray-500'
-                  }`}
-                >
-                  <div className="text-sm font-medium text-gray-200">{label}</div>
-                  <div className="text-xs text-gray-500 mt-0.5">{description}</div>
-                </button>
-              ))}
-            </div>
-          </div>
+          {/* Engine, quality preset and the full parameter set */}
+          {enginesPayload && (
+            <SeparationSettings
+              payload={enginesPayload}
+              engine={engine}
+              params={params}
+              onEngineChange={handleEngineChange}
+              onParamChange={handleParamChange}
+              onApplyPreset={handleApplyPreset}
+            />
+          )}
 
           {/* Stem toggles */}
           <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-4">
             <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Stems to extract</h3>
+            {currentModelStems.length === 0 && (
+              <p className="text-xs text-gray-500">
+                This model's stem list isn't published in the catalog — whatever it emits will be kept.
+              </p>
+            )}
             <div className="flex flex-wrap gap-2">
               {currentModelStems.map((stem) => {
                 const meta = STEM_META[stem] || { label: stem, color: 'text-gray-300' }
@@ -999,67 +1061,6 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
             </div>
           </div>
 
-          {/* Output settings */}
-          <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-5">
-            <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wider">Output settings</h3>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {/* Quality (shifts) */}
-              <label className="block">
-                <span className="text-xs text-gray-500">Quality (shifts)</span>
-                <div className="flex items-center gap-2 mt-1">
-                  <input
-                    type="range"
-                    min="1"
-                    max="10"
-                    value={shifts}
-                    onChange={(e) => setShifts(Number(e.target.value))}
-                    className="flex-1"
-                  />
-                  <span className="text-sm text-gray-400 w-6 text-right">{shifts}</span>
-                </div>
-                <span className="text-xs text-gray-600">
-                  {shifts === 1
-                    ? 'Fastest — single inference pass'
-                    : shifts === 2
-                      ? 'Recommended — quality plateau for most music'
-                      : shifts <= 4
-                        ? 'High — diminishing returns'
-                        : 'Best — long wait for marginal gains'}
-                </span>
-              </label>
-
-              {/* Clip mode */}
-              <label className="block">
-                <span className="text-xs text-gray-500">Clip mode</span>
-                <select
-                  value={clipMode}
-                  onChange={(e) => setClipMode(e.target.value)}
-                  className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-jam-500"
-                >
-                  <option value="rescale">Rescale</option>
-                  <option value="clamp">Clamp</option>
-                </select>
-              </label>
-            </div>
-
-            {/* Overlap */}
-            <label className="block max-w-xs">
-              <span className="text-xs text-gray-500">Overlap</span>
-              <div className="flex items-center gap-2 mt-1">
-                <input
-                  type="range"
-                  min="0"
-                  max="0.99"
-                  step="0.05"
-                  value={overlap}
-                  onChange={(e) => setOverlap(Number(e.target.value))}
-                  className="flex-1"
-                />
-                <span className="text-sm text-gray-400 w-10 text-right">{overlap.toFixed(2)}</span>
-              </div>
-            </label>
-          </div>
           </>
           )}
 

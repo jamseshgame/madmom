@@ -21,6 +21,40 @@ anthropic>=0.40
 # every install) so a stray `pip install` can't drag numpy up past it.
 numpy==2.4.4
 demucs>=4.0
+# ── audio-separator runtime deps ────────────────────────────────────────────
+# python-audio-separator powers the Roformer / MDX-Net / VR Arch engines (see
+# app/services/separators.py) — one package, four model families, including
+# BS-Roformer and Mel-Band Roformer, which beat Demucs on vocals by a wide
+# margin. The package ITSELF lives in requirements-extras.txt because it hard-
+# requires diffq (diffq-fixed on Windows), whose sdist no longer builds; we
+# install it --no-deps and satisfy its real dependencies here instead. diffq is
+# only imported by audio-separator's *bundled Demucs bridge*, which we never
+# use — the standalone `demucs` package above is its own engine.
+#
+# Checkpoints are NOT bundled: they download on first use into
+# `audio_separator_model_dir` (a few hundred MB each). If any of this is
+# missing the separator engines degrade gracefully — the catalog endpoint
+# reports them unavailable and Demucs keeps working.
+onnxruntime>=1.17      # swap for onnxruntime-gpu / onnxruntime-directml
+ml_collections
+rotary-embedding-torch>=0.6.1,<0.7.0
+einops>=0.7
+julius>=0.2
+pydub>=0.25
+resampy>=0.4
+samplerate==0.1.0
+audioop-lts>=0.2.1; python_version >= "3.13"
+# audio-separator's metadata pins beartype<0.19, but 0.18.x cannot parse the
+# `Callable | None` hint on BSRoformer.__init__ under Python 3.13+ and every
+# Roformer load dies with a BeartypeDecorHintNonpepException. 0.19+ handles it.
+beartype>=0.19
+# MDX-Net models only (audio_separator/separator/architectures/mdx_separator.py
+# imports onnx2torch at module scope). Roformer/MDXC and VR Arch do not need
+# these. torchvision is pinned to the release that pairs with torch 2.12 —
+# leaving it unpinned makes pip drag torch up and break the lockstep trio.
+onnx2torch-py313>=1.6
+onnx-weekly
+torchvision==0.27.0
 torch==2.12.0
 torchaudio==2.11.0
 # torchaudio >= 2.5 dispatches save()/load() through torchcodec instead of the

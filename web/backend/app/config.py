@@ -35,6 +35,12 @@ class Settings(BaseSettings):
 
     madmom_root: str = str(Path(__file__).resolve().parents[4])
 
+    # Checkpoint cache for the audio-separator engines (Roformer / MDX-Net /
+    # VR). Blank = <upload_dir>/audio-separator-models. Never point this at
+    # /tmp — the models are hundreds of MB each and several distros wipe /tmp
+    # on reboot, forcing a full re-download after every restart.
+    audio_separator_model_dir: str = ''
+
     # Default chart-generation model the editor offers when creating a new
     # beatmap. 'madmom' = legacy JamseshChartGenerator path; 'v2' = the new
     # modular pipeline (see web/backend/app/services/pipeline/). Flip to 'v2'

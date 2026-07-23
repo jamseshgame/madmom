@@ -10,6 +10,23 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.15.0',
+    date: '2026-07-23',
+    summary:
+      'Stem separation is no longer Demucs-only. Two more engines join it — audio-separator (Roformer / MDX-Net / VR Arch, ~160 checkpoints fetched live from its catalog) and a hybrid that runs a Roformer vocal pass and then splits the Roformer instrumental with Demucs, so no instrument stem carries vocal bleed. Hybrid is the new default, every engine parameter is exposed in the UI, and the defaults are set to maximum quality with one-click Balanced / Fast presets to climb back down.',
+    entries: [
+      { kind: 'added', text: 'Hybrid engine (new default) — a Roformer model lifts the vocal, then Demucs splits the Roformer *instrumental* rather than the original mix into drums, bass, guitar, piano and other. Demucs\'s own vocals stem is discarded. Costs two full inference passes, and is the strongest option available for game-ready six-stem output. A "Split instruments from" toggle switches the Demucs input back to the untouched master if the Roformer pass over-subtracts.' },
+      { kind: 'added', text: 'audio-separator engine — single-model separation across MDXC (BS-Roformer / Mel-Band Roformer, the SDX\'23-winning architecture), MDX-Net and VR Arch (the UVR5 models). The model list is read from the installed package at runtime rather than hardcoded, so newly published checkpoints appear without a code change; the picker is searchable and sorts by published SDR. Most top-scoring models here are two-stem (vocals + instrumental).' },
+      { kind: 'added', text: 'Every engine parameter is now surfaced. The backend ships a declarative schema (label, type, range, default, help text, which models it applies to) at GET /api/stems/engines and the frontend renders it generically, grouped by architecture with an advanced disclosure for the long tail — 23 knobs for hybrid, 34 for audio-separator, 9 for Demucs. Adding a parameter in services/separators.py surfaces it in the UI with no frontend change.' },
+      { kind: 'added', text: 'Quality presets — Max quality (the default: 10 Demucs shifts, 0.75 overlap, TTA and MDX denoise on, autocast off), Balanced (the quality plateau for most music at a fraction of the time) and Fast (single pass everywhere). The preset row reflects manual edits rather than staying stuck on whatever was last clicked.' },
+      { kind: 'added', text: 'Checkpoints download on first use into a persistent cache (AUDIO_SEPARATOR_MODEL_DIR, defaulting to <upload_dir>/audio-separator-models) instead of audio-separator\'s /tmp default — several distros wipe /tmp on reboot, which would re-download hundreds of MB after every restart.' },
+      { kind: 'changed', text: 'POST /api/stems/separate takes `engine` plus a JSON `params` blob. The old flat model/shifts/overlap/clip_mode/segment form fields still work and seed the Demucs parameters, so older clients keep functioning; an explicit params entry always wins.' },
+      { kind: 'changed', text: 'audio-separator is an optional dependency and the app degrades gracefully without it — the catalog endpoint reports it unavailable, the two new engines grey out with the pip command to install them, and Demucs keeps working. It installs --no-deps (requirements-extras.txt) because its metadata hard-requires diffq, whose sdist no longer builds, and caps beartype below the version Roformer needs on Python 3.13+; both only affect its bundled Demucs bridge, which is unused.' },
+      { kind: 'fixed', text: 'torch, torchaudio and torchvision are now pinned in constraints.txt, not just requirements.txt. Installing anything that depends on torchvision (onnx2torch does, via audio-separator\'s MDX-Net support) would otherwise drag torch up a minor version and break torchcodec — which torchaudio.save() routes through — making every Demucs stem write fail.' },
+      { kind: 'fixed', text: 'Demucs failed on every run with "Could not load libtorchcodec". torchcodec — which torchaudio.save() routes through for every stem write — dlopen\'s FFmpeg\'s shared libraries, and two separate things broke that: a static ffmpeg build ships no libraries at all, and even a correct shared build fails when it sits at the end of a long PATH, because the Windows DLL search only reliably reaches the front. Separator subprocesses now locate the FFmpeg library directory themselves (scanning PATH for avcodec*.dll / libavcodec.so*) and hoist it to the front of the child environment, so the app no longer depends on PATH ordering. install.py additionally reports shared vs. static ffmpeg and prints the per-OS fix.' },
+    ],
+  },
+  {
     version: '1.11.0',
     date: '2026-06-10',
     summary:

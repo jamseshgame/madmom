@@ -84,6 +84,29 @@ def _version_of(cmd: list[str]) -> str:
         return f'(failed: {e})'
 
 
+def _has_shared_ffmpeg(ffmpeg_path: str) -> bool:
+    """True when the ffmpeg install ships loadable shared libraries.
+
+    `ffmpeg -version` prints "configuration: --enable-shared ..." for shared
+    builds. That string is the reliable signal; the presence of DLLs/.so files
+    next to the binary is a fallback for builds that report nothing useful
+    (and for Windows, where the resolved path may be a winget shim).
+    """
+    try:
+        out = subprocess.check_output(
+            [ffmpeg_path, '-version'], stderr=subprocess.STDOUT, text=True, timeout=10,
+        )
+    except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired):
+        return False
+    if '--enable-shared' in out:
+        return True
+    lib_dir = Path(ffmpeg_path).resolve().parent
+    patterns = ('avcodec*.dll', 'libavcodec*.so*', 'libavcodec*.dylib')
+    if any(any(lib_dir.glob(p)) for p in patterns):
+        return True
+    return any(any((lib_dir.parent / 'lib').glob(p)) for p in patterns)
+
+
 # ── Steps ─────────────────────────────────────────────────────────────────
 
 
@@ -110,6 +133,22 @@ def check_prereqs() -> None:
     print(f'  ffmpeg    : {"on PATH" if ffmpeg else "MISSING"}')
     if not ffmpeg:
         problems.append('Install ffmpeg (https://ffmpeg.org / brew install ffmpeg / winget install Gyan.FFmpeg)')
+
+    # ffmpeg shared libraries — torchaudio.save() (which demucs calls on every
+    # stem write) dispatches through torchcodec, and torchcodec dlopen's
+    # FFmpeg's *shared* libs. A static ffmpeg build satisfies the check above
+    # but still makes every separation die with "Could not load libtorchcodec".
+    # Warn-only: everything that shells out to the ffmpeg binary still works.
+    if ffmpeg:
+        shared = _has_shared_ffmpeg(ffmpeg)
+        print(f'  ffmpeg libs: {"shared (ok)" if shared else "STATIC — demucs stem writes will fail"}')
+        if not shared:
+            print('     -> install a "full-shared" ffmpeg build so torchcodec can load '
+                  'libavcodec/libavformat:')
+            print('        Windows : winget uninstall Gyan.FFmpeg && download the '
+                  '"shared" build from https://www.gyan.dev/ffmpeg/builds/')
+            print('        macOS   : brew install ffmpeg   (already shared)')
+            print('        Linux   : apt install ffmpeg libavcodec-dev libavformat-dev')
 
     # git
     git = _which('git')

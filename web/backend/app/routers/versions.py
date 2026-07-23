@@ -37,8 +37,27 @@ PACKAGES: list[dict[str, str | bool]] = [
     },
     {
         'name': 'demucs',
-        'used_for': 'Stem separation (htdemucs / htdemucs_6s)',
+        'used_for': (
+            'Stem separation — the Demucs engine (htdemucs / htdemucs_ft / htdemucs_6s) and the '
+            'instrument half of the hybrid engine. Still the only backend that yields six '
+            'instrument stems in one pass'
+        ),
         'license': 'MIT',
+    },
+    {
+        'name': 'audio-separator',
+        'used_for': (
+            'Stem separation — Roformer / MDX-Net / VR Arch engines, and the Roformer half of the '
+            'hybrid engine. Wraps BS-Roformer and Mel-Band Roformer, which beat Demucs on vocals. '
+            'Checkpoints download on first use'
+        ),
+        'license': 'MIT',
+        'optional': True,
+        # Hard-requires diffq (diffq-fixed on Windows), whose sdist no longer
+        # builds, and caps beartype<0.19 which breaks Roformer loading on
+        # Python 3.13+. Both only affect its bundled Demucs bridge, which we
+        # don't use. See requirements-extras.txt.
+        'no_deps': True,
     },
     {
         'name': 'chatterbox-tts',
@@ -125,8 +144,21 @@ PACKAGES: list[dict[str, str | bool]] = [
         'pinned': True,
     },
     {
+        'name': 'torchvision',
+        'used_for': 'Transitive requirement of onnx2torch, which audio-separator imports for MDX-Net models',
+        'license': 'BSD-3-Clause',
+        # Pinned to the release that pairs with torch 2.12. Unpinned, pip
+        # resolves a torchvision that needs a newer torch and drags the whole
+        # trio up, breaking torchcodec. See torch.
+        'pinned': True,
+    },
+    {
         'name': 'torchcodec',
-        'used_for': 'FFmpeg-backed audio decoding for torchaudio.save',
+        'used_for': (
+            'FFmpeg-backed audio decoding for torchaudio.save. Needs FFmpeg\'s *shared* libraries '
+            '(libavcodec etc.), not just the ffmpeg binary — a static ffmpeg build makes every '
+            'Demucs run fail with "Could not load libtorchcodec"'
+        ),
         'license': 'BSD-3-Clause',
         'optional': True,
     },

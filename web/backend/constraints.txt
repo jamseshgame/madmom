@@ -13,3 +13,12 @@
 # lockstep with the torch/torchaudio ABI (see requirements.txt). Keep this in
 # sync with the numpy pin in requirements.txt.
 numpy==2.4.4
+# torch/torchaudio/torchvision move as a unit: torchcodec and the compiled
+# Cython extensions bind to a specific torch ABI, and torchaudio.save() (which
+# demucs calls) goes through torchcodec. A stray install that pulls a package
+# depending on `torchvision` (onnx2torch does) will happily drag torch up a
+# minor version and break every separation with a libtorchcodec load error.
+# Keep in sync with requirements.txt.
+torch==2.12.0
+torchaudio==2.11.0
+torchvision==0.27.0

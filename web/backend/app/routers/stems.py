@@ -12,13 +12,20 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from ..config import settings
 from ..services.audio import resize_to_square_png
+from ..services.separators import (
+    DEFAULT_ENGINE,
+    ENGINES,
+    audio_separator_catalog,
+    default_params,
+    engine_catalog,
+    separate_with_engine,
+)
 from ..services.stems import (
     DEMUCS_TO_GAME,
     MODEL_STEMS,
     _convert_to_ogg,
     _mix_to_ogg,
     _write_peaks_file,
-    separate_stems,
     write_song_ini,
 )
 from ..services.github_publisher import publish_song_folder
@@ -32,13 +39,39 @@ ALLOWED_EXTENSIONS = {'.flac', '.mp3', '.ogg', '.wav', '.m4a', '.aac', '.wma'}
 
 @router.get('/models')
 async def list_models():
-    """Return available models and their stem lists."""
+    """Return the Demucs models and their stem lists."""
     return MODEL_STEMS
+
+
+@router.get('/engines')
+async def list_engines():
+    """Separation engines, their full parameter schemas, and max-quality defaults.
+
+    The frontend renders every knob straight off this payload, so a new
+    parameter added to ``services.separators.ENGINES`` shows up in the UI with
+    no frontend change.
+    """
+    catalog = audio_separator_catalog()
+    return {
+        'engines': engine_catalog(),
+        'default_engine': DEFAULT_ENGINE,
+        'defaults': {key: default_params(key) for key in ENGINES},
+        'demucs_models': MODEL_STEMS,
+        'audio_separator': catalog,
+    }
+
+
+@router.get('/engines/models')
+async def list_separator_models(refresh: bool = False):
+    """Live audio-separator checkpoint catalog (Roformer / MDX-Net / VR / Demucs)."""
+    return audio_separator_catalog(refresh=refresh)
 
 
 @router.post('/separate')
 async def start_separation(
     file: UploadFile,
+    engine: str = Form(DEFAULT_ENGINE),
+    params: str = Form(''),
     model: str = Form('htdemucs'),
     stems: str = Form(''),
     output_format: str = Form('mp3'),
@@ -51,19 +84,52 @@ async def start_separation(
     song_ini: Optional[str] = Form(None),
     album_art: Optional[UploadFile] = File(None),
 ):
-    """Upload audio and start stem separation. Returns job_id for SSE tracking."""
+    """Upload audio and start stem separation. Returns job_id for SSE tracking.
+
+    ``params`` is a JSON object of engine-specific settings (see
+    ``GET /api/stems/engines``). The individual ``model``/``shifts``/``overlap``
+    /``clip_mode``/``segment`` form fields predate the multi-engine split and
+    are kept as a fallback for older clients: they seed the Demucs parameters
+    when ``params`` does not already carry them.
+    """
     ext = Path(file.filename or '').suffix.lower()
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(400, f'Unsupported format: {ext}. Use: {", ".join(sorted(ALLOWED_EXTENSIONS))}')
 
-    if model not in MODEL_STEMS:
-        raise HTTPException(400, f'Unknown model: {model}. Use: {", ".join(MODEL_STEMS.keys())}')
+    if engine not in ENGINES:
+        raise HTTPException(400, f'Unknown engine: {engine}. Use: {", ".join(ENGINES)}')
+
+    if params.strip():
+        try:
+            engine_params = json.loads(params)
+        except json.JSONDecodeError:
+            raise HTTPException(400, 'params must be a JSON object')
+        if not isinstance(engine_params, dict):
+            raise HTTPException(400, 'params must be a JSON object')
+    else:
+        engine_params = {}
+
+    # Legacy form fields only fill gaps — an explicit params entry always wins.
+    legacy = {
+        'model': model,
+        'output_format': output_format,
+        'mp3_bitrate': mp3_bitrate,
+        'shifts': shifts,
+        'overlap': overlap,
+        'clip_mode': clip_mode,
+    }
+    if segment.strip():
+        legacy['segment'] = int(segment)
+    for key, value in legacy.items():
+        engine_params.setdefault(key, value)
+
+    if engine == 'demucs' and engine_params.get('model') not in MODEL_STEMS:
+        raise HTTPException(
+            400, f'Unknown Demucs model: {engine_params.get("model")}. Use: {", ".join(MODEL_STEMS)}',
+        )
 
     # Parse stems list
     stem_list = [s.strip() for s in stems.split(',') if s.strip()] or None
-
-    # Parse optional segment
-    segment_val = int(segment) if segment.strip() else None
 
     upload_dir = Path(settings.upload_dir)
     upload_dir.mkdir(parents=True, exist_ok=True)
@@ -95,17 +161,12 @@ async def start_separation(
     async def _run():
         job.status = JobStatus.RUNNING
         try:
-            result = await separate_stems(
+            result = await separate_with_engine(
                 audio_path=str(audio_path),
                 output_dir=str(job_dir / 'stems'),
-                model=model,
+                engine=engine,
+                params=engine_params,
                 stems=stem_list,
-                output_format=output_format,
-                mp3_bitrate=mp3_bitrate,
-                shifts=shifts,
-                segment=segment_val,
-                overlap=overlap,
-                clip_mode=clip_mode,
                 game_ready=game_ready,
                 progress_callback=job.send,
                 set_process=lambda p: setattr(job, 'process', p),

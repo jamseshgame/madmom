@@ -1,7 +1,17 @@
-"""Stem separation using Demucs (htdemucs model family)."""
+"""Stem separation primitives.
+
+This module owns the Demucs backend plus the shared post-processing helpers
+(OGG conversion, waveform peaks, song.ini writing) that every separation
+engine reuses. The multi-engine dispatcher — Demucs, audio-separator
+(Roformer / MDX-Net / VR) and the Roformer+Demucs hybrid — lives in
+``app.services.separators``, which imports from here. Keep the dependency
+one-directional: nothing in this module may import ``separators``.
+"""
 
 import asyncio
+import functools
 import json
+import os
 import re
 import shutil
 import sys
@@ -225,6 +235,48 @@ async def _mix_to_ogg(src_paths: list[Path], dst: Path) -> Path:
     return dst
 
 
+@functools.lru_cache(maxsize=1)
+def ffmpeg_lib_dir() -> str | None:
+    """Directory holding FFmpeg's shared libraries, if one is on PATH.
+
+    torchaudio.save() — which demucs calls for every stem — dispatches through
+    torchcodec, and torchcodec dlopen's libavcodec/libavformat. On Windows the
+    DLL search only reliably reaches entries near the front of PATH, so a
+    perfectly valid FFmpeg install sitting late in a long PATH still fails with
+    "Could not load libtorchcodec". Finding the directory ourselves and putting
+    it first in the child's PATH removes the ordering dependency entirely.
+
+    Returns None when nothing matches — including on Linux/macOS, where the
+    loader finds system libraries without help and no fix-up is needed.
+    """
+    patterns = ('avcodec*.dll', 'libavcodec.so*', 'libavcodec*.dylib')
+    for entry in os.environ.get('PATH', '').split(os.pathsep):
+        entry = entry.strip('"')
+        if not entry:
+            continue
+        try:
+            directory = Path(entry)
+            if any(next(directory.glob(p), None) is not None for p in patterns):
+                return str(directory)
+        except OSError:
+            continue
+    return None
+
+
+def separator_child_env() -> dict:
+    """Environment for separator subprocesses (demucs, audio-separator).
+
+    Unbuffered UTF-8 output so progress streams line-by-line, plus the FFmpeg
+    shared-library directory hoisted to the front of PATH (see
+    :func:`ffmpeg_lib_dir`).
+    """
+    env = {**os.environ, 'PYTHONUNBUFFERED': '1', 'PYTHONIOENCODING': 'utf-8'}
+    lib_dir = ffmpeg_lib_dir()
+    if lib_dir:
+        env['PATH'] = lib_dir + os.pathsep + env.get('PATH', '')
+    return env
+
+
 def _debug_env() -> str:
     import asyncio as _a
 
@@ -250,8 +302,15 @@ async def _stream_demucs(
     jobs: int,
     progress_callback,
     set_process=None,
+    progress_lo: int = 10,
+    progress_hi: int = 85,
 ) -> int:
-    """Run demucs as an async subprocess, streaming stderr in real time."""
+    """Run demucs as an async subprocess, streaming stderr in real time.
+
+    ``progress_lo``/``progress_hi`` bound the slice of the UI progress bar this
+    run occupies. The defaults cover the whole Demucs-only job; the hybrid
+    engine narrows them so the Roformer pass gets its own band.
+    """
     cmd = [
         sys.executable, '-u', '-m', 'demucs',
         '--name', model,
@@ -276,11 +335,10 @@ async def _stream_demucs(
     cmd.append(audio_path)
 
     if progress_callback:
-        await progress_callback('demucs', 8, f'$ {" ".join(Path(c).name if "/" in c or "\\\\" in c else c for c in cmd)}')
+        rendered = ' '.join(Path(c).name if '/' in c or '\\' in c else c for c in cmd)
+        await progress_callback('demucs', max(1, progress_lo - 2), f'$ {rendered}')
 
-    import os as _os
-
-    child_env = {**_os.environ, 'PYTHONUNBUFFERED': '1', 'PYTHONIOENCODING': 'utf-8'}
+    child_env = separator_child_env()
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -334,7 +392,7 @@ async def _stream_demucs(
                         state['last_pct'] = pct
                         overall_fraction = ((state['current_pass'] - 1) + pct / 100) / state['total_passes']
                         overall_pct = int(overall_fraction * 100)
-                        mapped = 10 + int(overall_fraction * 75)  # 10–85 band on the UI bar
+                        mapped = progress_lo + int(overall_fraction * (progress_hi - progress_lo))
                         msg = (
                             f'Pass {state["current_pass"]}/{state["total_passes"]} '
                             f'({pct}% of pass) — {overall_pct}% overall'
@@ -370,6 +428,94 @@ async def _stream_demucs(
         raise RuntimeError(f'Demucs failed (exit {returncode}):\n{tail}')
 
     return returncode
+
+
+def collect_demucs_outputs(
+    out: Path,
+    model: str,
+    track_name: str,
+    demucs_format: str,
+    stems: list[str],
+    two_stems: str | None = None,
+) -> dict[str, str]:
+    """Move Demucs' nested output files up to `out` and return {stem: filename}.
+
+    Demucs writes to ``<out>/<model>/<track>/<stem>.<ext>``; older/derived
+    layouts drop the model directory, so both are probed.
+    """
+    demucs_dir = out / model / track_name
+    if not demucs_dir.exists():
+        demucs_dir = out / track_name
+        if not demucs_dir.exists():
+            raise RuntimeError(f'Demucs output not found at {out / model / track_name}')
+
+    ext_map = {'mp3': '.mp3', 'flac': '.flac', 'wav': '.wav'}
+    demucs_ext = ext_map.get(demucs_format, '.wav')
+
+    stem_files: dict[str, str] = {}
+    for stem in stems:
+        src = demucs_dir / f'{stem}{demucs_ext}'
+        if not src.exists():
+            src = demucs_dir / f'no_{stem}{demucs_ext}'
+        if src.exists():
+            dst = out / src.name
+            shutil.move(str(src), str(dst))
+            stem_files[stem] = dst.name
+
+    if two_stems:
+        no_stem = f'no_{two_stems}'
+        src = demucs_dir / f'{no_stem}{demucs_ext}'
+        if src.exists():
+            dst = out / src.name
+            shutil.move(str(src), str(dst))
+            stem_files[no_stem] = dst.name
+
+    model_dir = out / model
+    if model_dir.exists():
+        shutil.rmtree(model_dir, ignore_errors=True)
+
+    return stem_files
+
+
+async def finalize_game_ready(
+    out: Path,
+    stem_files: dict[str, str],
+    master_audio: Path,
+    progress_callback=None,
+    *,
+    name_map: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Rename separator stems to Jamsesh Quest names and transcode to OGG.
+
+    Also emits ``song.ogg`` from the untouched master mix. Returns the new
+    {game_stem: filename} mapping. Shared by every separation engine so the
+    on-disk layout of a finished track is engine-independent.
+    """
+    mapping = DEMUCS_TO_GAME if name_map is None else name_map
+    stems_to_convert = list(stem_files.items())
+    total_stems = max(len(stems_to_convert), 1)
+    if progress_callback:
+        await progress_callback('convert', 88, f'Converting {len(stems_to_convert)} stems to OGG...')
+
+    game_stems: dict[str, str] = {}
+    for idx, (raw_name, filename) in enumerate(stems_to_convert, 1):
+        game_name = mapping.get(raw_name, raw_name)
+        if progress_callback:
+            pct = 88 + int(5 * idx / total_stems)
+            await progress_callback('convert', pct, f'Converting stem {idx}/{total_stems} → {game_name}.ogg')
+        src_path = out / filename
+        ogg_path = out / f'{game_name}.ogg'
+        await _convert_to_ogg(src_path, ogg_path, progress_callback)
+        if src_path != ogg_path:
+            src_path.unlink(missing_ok=True)
+        game_stems[game_name] = ogg_path.name
+
+    if progress_callback:
+        await progress_callback('convert', 93, 'Converting original audio → song.ogg (full mix)')
+    song_ogg = out / 'song.ogg'
+    await _convert_to_ogg(master_audio, song_ogg, progress_callback)
+    game_stems['song'] = 'song.ogg'
+    return game_stems
 
 
 async def separate_stems(
@@ -419,68 +565,11 @@ async def separate_stems(
 
     # Demucs outputs to: <out>/<model_name>/<track_name>/<stem>.<ext>
     track_name = audio.stem
-    demucs_dir = out / model / track_name
-
-    if not demucs_dir.exists():
-        demucs_dir = out / track_name
-        if not demucs_dir.exists():
-            raise RuntimeError(f'Demucs output not found at {out / model / track_name}')
-
-    ext_map = {'mp3': '.mp3', 'flac': '.flac', 'wav': '.wav'}
-    demucs_ext = ext_map.get(demucs_format, '.wav')
-
-    # Collect requested stems, move to output root
-    stem_files = {}
-    for stem in stems:
-        src = demucs_dir / f'{stem}{demucs_ext}'
-        if not src.exists():
-            src = demucs_dir / f'no_{stem}{demucs_ext}'
-        if src.exists():
-            dst = out / src.name
-            shutil.move(str(src), str(dst))
-            stem_files[stem] = dst.name
-
-    # If two_stems mode, also grab the "no_" counterpart
-    if two_stems:
-        no_stem = f'no_{two_stems}'
-        src = demucs_dir / f'{no_stem}{demucs_ext}'
-        if src.exists():
-            dst = out / src.name
-            shutil.move(str(src), str(dst))
-            stem_files[no_stem] = dst.name
-
-    # Clean up demucs intermediate directories
-    model_dir = out / model
-    if model_dir.exists():
-        shutil.rmtree(model_dir, ignore_errors=True)
+    stem_files = collect_demucs_outputs(out, model, track_name, demucs_format, stems, two_stems)
 
     # Game-ready post-processing: rename stems + convert to ogg
     if game_ready:
-        stems_to_convert = list(stem_files.items())
-        total_stems = len(stems_to_convert)
-        if progress_callback:
-            await progress_callback('convert', 88, f'Converting {total_stems} stems to OGG...')
-
-        game_stems = {}
-        for idx, (demucs_name, filename) in enumerate(stems_to_convert, 1):
-            game_name = DEMUCS_TO_GAME.get(demucs_name, demucs_name)
-            if progress_callback:
-                pct = 88 + int(5 * idx / total_stems)
-                await progress_callback('convert', pct, f'Converting stem {idx}/{total_stems} → {game_name}.ogg')
-            src_path = out / filename
-            ogg_path = out / f'{game_name}.ogg'
-            await _convert_to_ogg(src_path, ogg_path, progress_callback)
-            src_path.unlink(missing_ok=True)
-            game_stems[game_name] = ogg_path.name
-
-        # Convert the original audio to song.ogg (full mix)
-        if progress_callback:
-            await progress_callback('convert', 93, 'Converting original audio → song.ogg (full mix)')
-        song_ogg = out / 'song.ogg'
-        await _convert_to_ogg(audio, song_ogg, progress_callback)
-        game_stems['song'] = 'song.ogg'
-
-        stem_files = game_stems
+        stem_files = await finalize_game_ready(out, stem_files, audio, progress_callback)
         output_format = 'ogg'
 
     if progress_callback:
@@ -496,6 +585,7 @@ async def separate_stems(
     return {
         'stems': stem_files,
         'track_name': track_name,
+        'engine': 'demucs',
         'model': model,
         'output_format': output_format,
         'game_ready': game_ready,

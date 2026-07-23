@@ -17,6 +17,14 @@ interface ProgressTrackerProps {
 const STEP_COLORS: Record<string, string> = {
   init: 'text-blue-400',
   demucs: 'text-jam-400',
+  // The Roformer / audio-separator engines report under their own step names;
+  // the hybrid engine emits both across its two passes.
+  roformer: 'text-fuchsia-400',
+  separator: 'text-fuchsia-400',
+  collect: 'text-blue-400',
+  convert: 'text-cyan-400',
+  peaks: 'text-cyan-400',
+  finalize: 'text-green-400',
   log: 'text-gray-500',
   done: 'text-green-400',
   error: 'text-red-400',
