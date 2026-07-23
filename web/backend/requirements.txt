@@ -56,8 +56,14 @@ beartype>=0.19
 # breakage the constraints file exists to prevent. Roformer/MDXC and VR Arch —
 # the default hybrid engine and every top vocal model — need none of them, so
 # MDX-Net is treated as an optional bonus that never risks the torch install.
-torch==2.12.0
-torchaudio==2.11.0
+#
+# Pinned to the minor line, not an exact patch: the dev box runs 2.12.0 and the
+# droplet 2.12.1 — both work, and an exact `==2.12.0` forces a torchcodec-
+# breaking downgrade on the droplet. `.*` blocks the minor bump (the thing that
+# actually breaks torchcodec) while tolerating the patch. Mirrored in
+# constraints.txt.
+torch==2.12.*
+torchaudio==2.11.*
 # torchaudio >= 2.5 dispatches save()/load() through torchcodec instead of the
 # built-in soundfile/sox backends. demucs 4.x still calls torchaudio.save(),
 # so torchcodec must be present or every separation crashes at the final
