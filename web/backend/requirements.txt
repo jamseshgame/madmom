@@ -48,13 +48,14 @@ audioop-lts>=0.2.1; python_version >= "3.13"
 # `Callable | None` hint on BSRoformer.__init__ under Python 3.13+ and every
 # Roformer load dies with a BeartypeDecorHintNonpepException. 0.19+ handles it.
 beartype>=0.19
-# MDX-Net models only (audio_separator/separator/architectures/mdx_separator.py
-# imports onnx2torch at module scope). Roformer/MDXC and VR Arch do not need
-# these. torchvision is pinned to the release that pairs with torch 2.12 —
-# leaving it unpinned makes pip drag torch up and break the lockstep trio.
-onnx2torch-py313>=1.6
-onnx-weekly
-torchvision==0.27.0
+# NOTE: MDX-Net support (torchvision + onnx2torch + onnx-weekly) is deliberately
+# NOT here — it lives in requirements-extras.txt, installed --no-deps. Those
+# packages pull in a *specific* torch build (torchvision hard-pins a torch
+# patch), so listing them here alongside the pinned torch would force a
+# torch/torchcodec reinstall on any box whose torch patch differs — exactly the
+# breakage the constraints file exists to prevent. Roformer/MDXC and VR Arch —
+# the default hybrid engine and every top vocal model — need none of them, so
+# MDX-Net is treated as an optional bonus that never risks the torch install.
 torch==2.12.0
 torchaudio==2.11.0
 # torchaudio >= 2.5 dispatches save()/load() through torchcodec instead of the

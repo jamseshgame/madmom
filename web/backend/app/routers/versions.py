@@ -145,12 +145,16 @@ PACKAGES: list[dict[str, str | bool]] = [
     },
     {
         'name': 'torchvision',
-        'used_for': 'Transitive requirement of onnx2torch, which audio-separator imports for MDX-Net models',
+        'used_for': (
+            'Optional — only audio-separator\'s MDX-Net models need it (via onnx2torch). '
+            'Roformer/MDXC and VR Arch do not. Installed --no-deps so it never reinstalls torch'
+        ),
         'license': 'BSD-3-Clause',
-        # Pinned to the release that pairs with torch 2.12. Unpinned, pip
-        # resolves a torchvision that needs a newer torch and drags the whole
-        # trio up, breaking torchcodec. See torch.
-        'pinned': True,
+        'optional': True,
+        # torchvision hard-pins a torch patch version, so a normal install
+        # would drag torch (and break torchcodec). --no-deps drops the wheel in
+        # against whatever torch is present. See requirements-extras.txt.
+        'no_deps': True,
     },
     {
         'name': 'torchcodec',

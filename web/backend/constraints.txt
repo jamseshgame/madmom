@@ -13,12 +13,17 @@
 # lockstep with the torch/torchaudio ABI (see requirements.txt). Keep this in
 # sync with the numpy pin in requirements.txt.
 numpy==2.4.4
-# torch/torchaudio/torchvision move as a unit: torchcodec and the compiled
-# Cython extensions bind to a specific torch ABI, and torchaudio.save() (which
-# demucs calls) goes through torchcodec. A stray install that pulls a package
+# torch + torchaudio move as a unit: torchcodec and the compiled Cython
+# extensions bind to a specific torch ABI, and torchaudio.save() (which demucs
+# calls) goes through torchcodec. A stray install that pulls a package
 # depending on `torchvision` (onnx2torch does) will happily drag torch up a
-# minor version and break every separation with a libtorchcodec load error.
-# Keep in sync with requirements.txt.
-torch==2.12.0
-torchaudio==2.11.0
-torchvision==0.27.0
+# *minor* version and break every separation with a libtorchcodec load error.
+#
+# Pinned to the 2.12 / 2.11 line but NOT to an exact patch: the dev box runs
+# torch 2.12.0 and the droplet 2.12.1, both fine — an exact `==2.12.0` would
+# force a needless (and torchcodec-breaking) downgrade on the droplet. The
+# `.*` blocks the minor bump, which is the only thing that actually breaks.
+# torchvision is intentionally absent: it hard-pins a torch patch, so it's
+# installed --no-deps from requirements-extras.txt instead of constrained here.
+torch==2.12.*
+torchaudio==2.11.*

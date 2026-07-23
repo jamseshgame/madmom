@@ -35,6 +35,18 @@ mir_eval>=0.7
 #   own engine), so --no-deps and let requirements.txt supply the real deps.
 audio-separator[cpu]>=0.44
 
+# - MDX-Net support for audio-separator. Only the MDX-Net architecture imports
+#   onnx2torch (which needs torchvision); Roformer/MDXC and VR Arch don't touch
+#   any of these. Installed --no-deps precisely BECAUSE torchvision hard-pins a
+#   torch patch version — with deps it would reinstall torch and break the
+#   torchcodec binding on any box whose torch differs by a patch. --no-deps
+#   drops the wheels in against whatever torch is already present (torchvision
+#   0.27.x is compatible across the torch 2.12 patch line). Optional: skip these
+#   and every engine except MDX-Net models still works.
+torchvision==0.27.0
+onnx2torch-py313>=1.6
+onnx-weekly
+
 # - aubio: C-backed audio processing library for fast onset detection.
 #   May not install cleanly on Windows due to C/Cython native deps.
 #   Engine is guarded with try/except import; function lazy-loads aubio.
