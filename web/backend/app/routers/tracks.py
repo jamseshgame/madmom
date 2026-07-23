@@ -22,12 +22,14 @@ from ..services.github_publisher import publish_song_folder
 from ..services.jobs import JobKind, JobStatus, create_job, get_job
 from ..services import lyrics as lyrics_service
 from ..services import sample_packs
+from ..services.separators import DEFAULT_ENGINE, ENGINES, separate_with_engine
 from ..services.stems import DEMUCS_TO_GAME, _convert_to_ogg, write_song_ini
 from ..services.tracks import (
     add_beatmap_record,
     CloneDifficultyError,
     clone_beatmap_record,
     clone_difficulty_across_beatmaps,
+    create_draft_track,
     create_track,
     delete_beatmap_record,
     delete_track,
@@ -35,6 +37,7 @@ from ..services.tracks import (
     get_track,
     get_track_enriched,
     list_tracks,
+    promote_draft,
     read_elevenlabs_voice,
     rename_beatmap_record,
     set_active_beatmap,
@@ -56,6 +59,173 @@ async def get_all_tracks():
 async def get_song_ini_schema():
     """Return the full song.ini field schema for the frontend."""
     return SONG_INI_FIELDS
+
+
+DRAFT_AUDIO_EXTENSIONS = {'.flac', '.mp3', '.ogg', '.wav', '.m4a', '.aac', '.wma'}
+
+
+@router.post('/draft')
+async def create_track_draft(
+    file: UploadFile,
+    name: str = Form(''),
+    artist: str = Form(''),
+    album: str = Form(''),
+    genre: str = Form(''),
+    year: str = Form(''),
+    youtube_source_url: str = Form(''),
+):
+    """Stage master audio as a resumable draft track, before separation.
+
+    The Create page calls this as soon as audio is staged — a YouTube pull or
+    a picked file — so the work survives closing the tab. Previously the
+    downloaded MP3 lived only as a File object in the browser, and abandoning
+    the settings screen discarded it with nothing left to resume from.
+    """
+    ext = Path(file.filename or '').suffix.lower()
+    if ext not in DRAFT_AUDIO_EXTENSIONS:
+        raise HTTPException(
+            400, f'Unsupported format: {ext}. Use: {", ".join(sorted(DRAFT_AUDIO_EXTENSIONS))}',
+        )
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, 'Empty audio file')
+    if len(content) > settings.max_upload_mb * 1024 * 1024:
+        raise HTTPException(413, f'File too large. Max {settings.max_upload_mb} MB.')
+
+    track = create_draft_track(
+        name=(name.strip() or Path(file.filename or 'audio').stem),
+        audio_bytes=content,
+        audio_filename=file.filename or 'audio.mp3',
+        artist=artist.strip(),
+        album=album.strip(),
+        genre=genre.strip(),
+        year=year.strip(),
+        youtube_source_url=youtube_source_url.strip(),
+    )
+    return track.to_dict()
+
+
+@router.get('/{track_id}/source')
+async def download_track_source(track_id: str):
+    """Stream the untouched master a track was created from."""
+    track = get_track(track_id)
+    if not track:
+        raise HTTPException(404, 'Track not found')
+    path = track.source_path
+    if path is None:
+        raise HTTPException(404, 'No source audio stored for this track')
+    return FileResponse(path, filename=path.name)
+
+
+@router.post('/{track_id}/separate')
+async def separate_track(
+    track_id: str,
+    engine: str = Form(DEFAULT_ENGINE),
+    params: str = Form(''),
+    stems: str = Form(''),
+    song_ini: Optional[str] = Form(None),
+    album_art: Optional[UploadFile] = File(None),
+):
+    """Run stem separation on a track's stored master. Returns a job_id.
+
+    This is what "Resume" on a draft ultimately calls. It also works on an
+    already-separated track (the master is kept), so a track can be re-split
+    with a different engine without re-uploading — the old stems are replaced.
+    """
+    track = get_track(track_id)
+    if not track:
+        raise HTTPException(404, 'Track not found')
+    source = track.source_path
+    if source is None:
+        raise HTTPException(
+            400,
+            'This track has no stored master audio to separate. It predates draft '
+            'support — re-import the song from the Create page.',
+        )
+    if engine not in ENGINES:
+        raise HTTPException(400, f'Unknown engine: {engine}. Use: {", ".join(ENGINES)}')
+
+    if params.strip():
+        try:
+            engine_params = json.loads(params)
+        except json.JSONDecodeError:
+            raise HTTPException(400, 'params must be a JSON object')
+        if not isinstance(engine_params, dict):
+            raise HTTPException(400, 'params must be a JSON object')
+    else:
+        engine_params = {}
+
+    stem_list = [s.strip() for s in stems.split(',') if s.strip()] or None
+
+    ini_fields: Optional[dict] = None
+    if song_ini:
+        try:
+            parsed = json.loads(song_ini)
+            if isinstance(parsed, dict):
+                ini_fields = parsed
+        except json.JSONDecodeError:
+            raise HTTPException(400, 'song_ini must be JSON')
+
+    album_png_bytes: Optional[bytes] = None
+    if album_art is not None:
+        raw = await album_art.read()
+        if raw:
+            try:
+                album_png_bytes = resize_to_square_png(raw, size=512)
+            except Exception as ae:
+                print(f'[tracks] album_art resize failed: {ae}')
+
+    job = create_job(kind=JobKind.SEPARATE, title=track.name)
+    job.output_dir = track.dir
+    job.metadata['track_id'] = track.id
+    job.metadata['original_name'] = track.name
+
+    async def _run():
+        job.status = JobStatus.RUNNING
+        try:
+            result = await separate_with_engine(
+                audio_path=str(source),
+                output_dir=str(track.stems_dir),
+                engine=engine,
+                params=engine_params,
+                stems=stem_list,
+                game_ready=True,
+                progress_callback=job.send,
+                set_process=lambda p: setattr(job, 'process', p),
+            )
+
+            if ini_fields is not None:
+                write_song_ini(track.stems_dir, ini_fields)
+                result['stems']['song_ini'] = 'song.ini'
+                job.metadata['song_ini'] = ini_fields
+            if album_png_bytes:
+                (track.stems_dir / 'album.png').write_bytes(album_png_bytes)
+                result['stems']['album_png'] = 'album.png'
+
+            # Re-load rather than reusing the closed-over Track: the user may
+            # have edited metadata from the library while separation ran.
+            fresh = get_track(track_id) or track
+            promote_draft(
+                fresh,
+                stems=result['stems'],
+                model=result.get('model', engine),
+                output_format=result.get('output_format', 'ogg'),
+            )
+            job.metadata.update(result)
+            job.metadata['track_id'] = fresh.id
+            await job.send_done(job.metadata)
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            if job.cancelled:
+                return
+            import traceback
+            print(f'[tracks] Separation job {job.id} failed: {traceback.format_exc()}')
+            await job.send_error(str(e) or 'Separation failed')
+
+    job.task = asyncio.create_task(_run())
+    return {'job_id': job.id, 'track_id': track.id}
 
 
 @router.get('/{track_id}')

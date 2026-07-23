@@ -34,6 +34,11 @@ interface Track {
   genre: string
   year: string
   beatmaps?: BeatmapRecord[]
+  // 'draft' = master audio staged but separation hasn't run yet. Older
+  // track.json files have no status field, so treat missing as 'ready'.
+  status?: string
+  source_audio?: string
+  youtube_source_url?: string
 }
 
 interface SongIniField {
@@ -2463,30 +2468,48 @@ function TracksPageInner() {
             ([k]) => !NON_AUDIO_KEYS.has(k),
           ).length
           const hasArt = !!track.stems.album_png
+          // A draft has no stems yet, so opening the normal detail panel would
+          // show an empty shell. Send it back to the Create page instead,
+          // where its separation settings live.
+          const isDraft = track.status === 'draft'
+          const open = () => {
+            if (isDraft) navigate(`/?draft=${track.id}`)
+            else setSelectedId(track.id)
+          }
           return (
             <div
               key={track.id}
-              onClick={() => setSelectedId(track.id)}
+              onClick={open}
               role="button"
               tabIndex={0}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' || e.key === ' ') {
                   e.preventDefault()
-                  setSelectedId(track.id)
+                  open()
                 }
               }}
-              className="cursor-pointer bg-gray-900 border border-gray-800 hover:border-gray-700 hover:bg-gray-900/70 rounded-xl px-4 py-3 transition-colors"
+              className={`cursor-pointer bg-gray-900 border rounded-xl px-4 py-3 transition-colors ${
+                isDraft
+                  ? 'border-amber-800/60 hover:border-amber-600 hover:bg-amber-950/20'
+                  : 'border-gray-800 hover:border-gray-700 hover:bg-gray-900/70'
+              }`}
             >
               <div className="flex items-center justify-between gap-4">
                 <div className="flex items-center gap-3 min-w-0">
-                  <input
-                    type="checkbox"
-                    checked={selectedForCompare.has(track.id)}
-                    onClick={(e) => e.stopPropagation()}
-                    onChange={() => toggleCompare(track.id)}
-                    aria-label={`Select ${track.name} for compare`}
-                    className="w-4 h-4 shrink-0 accent-jam-500 cursor-pointer"
-                  />
+                  {/* Drafts have no stems or beatmaps, so there is nothing to
+                      compare — keep the column aligned with a spacer. */}
+                  {isDraft ? (
+                    <span className="w-4 h-4 shrink-0" aria-hidden="true" />
+                  ) : (
+                    <input
+                      type="checkbox"
+                      checked={selectedForCompare.has(track.id)}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={() => toggleCompare(track.id)}
+                      aria-label={`Select ${track.name} for compare`}
+                      className="w-4 h-4 shrink-0 accent-jam-500 cursor-pointer"
+                    />
+                  )}
                   <div className="w-12 h-12 shrink-0 rounded-md overflow-hidden bg-gray-800 border border-gray-700 flex items-center justify-center">
                     {hasArt ? (
                       <img
@@ -2499,17 +2522,44 @@ function TracksPageInner() {
                     )}
                   </div>
                   <div className="min-w-0">
-                    <h3 className="font-medium text-gray-100 truncate">
-                      {track.artist ? `${track.artist} — ${track.name}` : track.name}
+                    <h3 className="font-medium text-gray-100 truncate flex items-center gap-2">
+                      <span className="truncate">
+                        {track.artist ? `${track.artist} — ${track.name}` : track.name}
+                      </span>
+                      {isDraft && (
+                        <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider bg-amber-900/40 border border-amber-700/60 text-amber-300">
+                          In progress
+                        </span>
+                      )}
                     </h3>
                     <p className="text-xs text-gray-600 mt-0.5">
-                      {formatDate(track.created_at)} &middot; {track.model} &middot;{' '}
-                      {track.output_format.toUpperCase()}
+                      {formatDate(track.created_at)}
+                      {isDraft ? (
+                        <> &middot; imported, not split yet</>
+                      ) : (
+                        <>
+                          {' '}
+                          &middot; {track.model} &middot; {track.output_format.toUpperCase()}
+                        </>
+                      )}
                     </p>
                   </div>
                 </div>
                 <div className="flex items-center gap-3 shrink-0">
-                  <span className="text-xs text-gray-500">{stemCount} stems</span>
+                  {isDraft ? (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        navigate(`/?draft=${track.id}`)
+                      }}
+                      className="px-2.5 py-1 bg-amber-900/30 hover:bg-amber-800/60 border border-amber-700/60 hover:border-amber-600 text-amber-200 rounded-md text-xs font-medium transition-colors"
+                    >
+                      Resume
+                    </button>
+                  ) : (
+                    <span className="text-xs text-gray-500">{stemCount} stems</span>
+                  )}
                   <button
                     type="button"
                     onClick={(e) => {

@@ -34,6 +34,18 @@ class Track:
     # edits in the Studio editor flow back to the same place "Push to game
     # repo" pushes from. Empty string for normal Studio-created tracks.
     source_game_song: str = ''
+    # 'draft'  — the master audio is staged but separation hasn't run (or
+    #            failed). The track shows in the library as resumable work.
+    # 'ready'  — stems exist; the normal, fully-usable state.
+    # Defaults to 'ready' so every track.json written before drafts existed
+    # keeps working without a migration.
+    status: str = 'ready'
+    # Filename (inside `source_dir`) of the untouched master a draft was
+    # created from. Kept after separation too, so a track can be re-split with
+    # a different engine without re-uploading.
+    source_audio: str = ''
+    # YouTube URL this track was imported from, when applicable.
+    youtube_source_url: str = ''
 
     @property
     def dir(self) -> Path:
@@ -46,6 +58,23 @@ class Track:
     @property
     def beatmaps_dir(self) -> Path:
         return self.dir / 'beatmaps'
+
+    @property
+    def source_dir(self) -> Path:
+        """Holds the original master audio (separate from `stems/` so it never
+        gets mistaken for a stem or swept up by the publish/zip helpers)."""
+        return self.dir / 'source'
+
+    @property
+    def source_path(self) -> Path | None:
+        if not self.source_audio:
+            return None
+        path = self.source_dir / self.source_audio
+        return path if path.exists() else None
+
+    @property
+    def is_draft(self) -> bool:
+        return self.status == 'draft'
 
     @property
     def meta_path(self) -> Path:
@@ -105,6 +134,67 @@ def create_track(
         if src.exists():
             shutil.copy2(str(src), str(track.stems_dir / filename))
 
+    track.save()
+    return track
+
+
+def create_draft_track(
+    name: str,
+    audio_bytes: bytes,
+    audio_filename: str,
+    artist: str = '',
+    album: str = '',
+    genre: str = '',
+    year: str = '',
+    youtube_source_url: str = '',
+) -> Track:
+    """Persist freshly-staged master audio as a resumable draft track.
+
+    Called the moment audio is staged — a YouTube pull or a file upload —
+    *before* the user has picked separation settings. Without this the audio
+    only ever existed as a File object in the browser tab, so closing the tab
+    at the settings screen threw away a download that can take minutes, with
+    nothing left in the library to resume from.
+
+    The track appears in the Studio Library straight away with
+    ``status='draft'`` and no stems. Running separation on it later promotes it
+    to 'ready' in place, keeping the same id — so any link to the draft stays
+    valid.
+    """
+    ext = Path(audio_filename).suffix.lower() or '.mp3'
+    track = Track(
+        id=uuid.uuid4().hex[:12],
+        name=name,
+        created_at=time.time(),
+        stems={},
+        model='',
+        output_format='',
+        artist=artist,
+        album=album,
+        genre=genre,
+        year=year,
+        status='draft',
+        source_audio=f'source{ext}',
+        youtube_source_url=youtube_source_url,
+    )
+    track.source_dir.mkdir(parents=True, exist_ok=True)
+    (track.source_dir / track.source_audio).write_bytes(audio_bytes)
+    track.stems_dir.mkdir(parents=True, exist_ok=True)
+    track.save()
+    return track
+
+
+def promote_draft(
+    track: Track,
+    stems: dict[str, str],
+    model: str,
+    output_format: str,
+) -> Track:
+    """Flip a draft to 'ready' once its stems exist."""
+    track.stems = stems
+    track.model = model
+    track.output_format = output_format
+    track.status = 'ready'
     track.save()
     return track
 

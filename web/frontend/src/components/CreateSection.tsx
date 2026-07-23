@@ -315,7 +315,7 @@ function CookiesRow() {
   )
 }
 
-function YouTubeSearch({ onPicked }: { onPicked: (file: File) => void }) {
+function YouTubeSearch({ onPicked }: { onPicked: (file: File, sourceUrl?: string) => void }) {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<YouTubeResult[] | null>(null)
   const [searching, setSearching] = useState(false)
@@ -403,7 +403,7 @@ function YouTubeSearch({ onPicked }: { onPicked: (file: File) => void }) {
             setPulling(null)
             setResults(null)
             setQuery('')
-            onPicked(file)
+            onPicked(file, `https://www.youtube.com/watch?v=${r.video_id}`)
           } catch (fe) {
             setPullError((fe as Error).message)
             setPulling(null)
@@ -531,8 +531,11 @@ function YouTubeSearch({ onPicked }: { onPicked: (file: File) => void }) {
 export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}) {
   const [searchParams, setSearchParams] = useSearchParams()
   const resumeJobId = searchParams.get('job') || ''
+  const resumeDraftId = searchParams.get('draft') || ''
 
-  const [phase, setPhase] = useState<Phase>(resumeJobId ? 'separating' : 'upload')
+  const [phase, setPhase] = useState<Phase>(
+    resumeJobId ? 'separating' : resumeDraftId ? 'settings' : 'upload',
+  )
   const [file, setFile] = useState<File | null>(null)
   const [jobId, setJobId] = useState(resumeJobId)
   const [metadata, setMetadata] = useState<Record<string, unknown>>({})
@@ -541,6 +544,7 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
   // Separation settings. The engine catalog (and every knob it exposes) comes
   // from the backend so the UI never drifts from what the engines accept.
   const [enginesPayload, setEnginesPayload] = useState<EnginesPayload | null>(null)
+  const [enginesError, setEnginesError] = useState('')
   const [engine, setEngine] = useState('hybrid')
   const [params, setParams] = useState<ParamValues>({})
   const [selectedStems, setSelectedStems] = useState<Set<string>>(
@@ -548,6 +552,12 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
   )
   const [stemsTouched, setStemsTouched] = useState(false)
   const [loadingMeta, setLoadingMeta] = useState(false)
+  // Draft = master audio parked server-side before separation runs, so the
+  // work shows in the Studio Library and survives closing the tab.
+  const [draftId, setDraftId] = useState('')
+  const [draftState, setDraftState] = useState<'idle' | 'saving' | 'saved' | 'failed'>('idle')
+  const [draftName, setDraftName] = useState('')
+  const [youtubeSourceUrl, setYoutubeSourceUrl] = useState('')
   const [albumArt, setAlbumArt] = useState<File | null>(null)
   const [albumPreview, setAlbumPreview] = useState<string | null>(null)
   const albumInputRef = useRef<HTMLInputElement | null>(null)
@@ -600,7 +610,14 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
         setParams({ ...(data.defaults?.[preferred] || {}) })
       })
       .catch(() => {
-        if (!cancelled) setEnginesPayload(null)
+        if (!cancelled) {
+          setEnginesPayload(null)
+          setEnginesError(
+            'Could not load the separation engine list. The backend may be running an older ' +
+            'build — restart it to pick up /api/stems/engines. Separation will run with ' +
+            'server-side defaults.',
+          )
+        }
       })
     return () => {
       cancelled = true
@@ -646,7 +663,67 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
     }
   }, [resumeJobId, setSearchParams])
 
-  const handleFile = async (f: File) => {
+  /**
+   * Persist staged audio as a draft track so the Studio Library can offer it
+   * as resumable work. Deliberately fire-and-forget: separation still works
+   * from the in-memory File if this fails, and blocking the settings screen
+   * on an upload would be a worse trade.
+   */
+  const stageDraft = async (f: File, name: string, artist: string, sourceUrl = '') => {
+    setDraftState('saving')
+    try {
+      const fd = new FormData()
+      fd.append('file', f)
+      fd.append('name', name)
+      fd.append('artist', artist)
+      // Passed in rather than read from state: setYoutubeSourceUrl was called
+      // in the same tick and wouldn't be visible here yet.
+      if (sourceUrl) fd.append('youtube_source_url', sourceUrl)
+      const res = await fetch('/api/tracks/draft', { method: 'POST', body: fd })
+      if (!res.ok) throw new Error(String(res.status))
+      const track = await res.json()
+      setDraftId(track.id)
+      setDraftState('saved')
+      if (onSaved) onSaved()
+    } catch {
+      setDraftState('failed')
+    }
+  }
+
+  /** Resume a draft: pull its metadata and jump straight to the settings step. */
+  const loadDraft = useCallback(async (id: string) => {
+    try {
+      const res = await fetch(`/api/tracks/${id}`)
+      if (!res.ok) throw new Error(`${res.status}`)
+      const track = await res.json()
+      setDraftId(track.id)
+      setDraftState('saved')
+      setDraftName(track.name || '')
+      setYoutubeSourceUrl(track.youtube_source_url || '')
+      setSongIni((prev) => ({
+        ...prev,
+        name: track.name || prev.name,
+        artist: track.artist || prev.artist,
+        album: track.album || prev.album,
+        genre: track.genre || prev.genre,
+        year: track.year || prev.year,
+      }))
+      setMode('generate')
+      setPhase('settings')
+    } catch {
+      setError('That draft could not be loaded — it may have been deleted.')
+      setPhase('error')
+    }
+  }, [])
+
+  // ?draft=<id> resumes a track whose audio was staged but never separated.
+  useEffect(() => {
+    if (!resumeDraftId) return
+    loadDraft(resumeDraftId)
+  }, [resumeDraftId, loadDraft])
+
+  const handleFile = async (f: File, sourceUrl?: string) => {
+    if (sourceUrl) setYoutubeSourceUrl(sourceUrl)
     // Filename fallback for name/artist
     const stem = f.name.replace(/\.[^.]+$/, '')
     const parts = stem.split(/\s*-\s*/)
@@ -657,6 +734,13 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
     setSongIni((prev) => ({ ...prev, ...fallback }))
     setFile(f)
     setPhase('settings')
+
+    // Park the audio server-side straight away so it survives closing the
+    // tab. A YouTube pull can take minutes; before this, abandoning the
+    // settings screen threw the download away with nothing left in the
+    // library. Best-effort: a failure here only costs resumability, so the
+    // user can still separate from the in-memory File.
+    stageDraft(f, fallback.name || stem, fallback.artist || '', sourceUrl)
 
     // Fetch real tags from the file via ffprobe, plus embedded cover art
     setLoadingMeta(true)
@@ -786,13 +870,19 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
   }
 
   const handleSeparate = async () => {
-    if (mode === 'generate' && !file) return
+    // A resumed draft has no in-memory File — the master lives server-side.
+    if (mode === 'generate' && !file && !draftId) return
     setPhase('separating')
     setError('')
 
     const formData = new FormData()
-    if (file) formData.append('file', file)
-    formData.append('song_ini', JSON.stringify(songIni))
+    // Carry the YouTube origin into song.ini's [background] block so the
+    // editor's Background panel can offer "use source video" without the user
+    // pasting the URL again.
+    const iniFields = youtubeSourceUrl
+      ? { ...songIni, youtube_source_url: youtubeSourceUrl }
+      : songIni
+    formData.append('song_ini', JSON.stringify(iniFields))
     if (albumArt) formData.append('album_art', albumArt)
 
     let endpoint: string
@@ -808,14 +898,23 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
         setPhase('error')
         return
       }
+      if (file) formData.append('file', file)
       for (const [stem, f] of provided) if (f) formData.append(stem, f)
       endpoint = '/api/stems/manual'
     } else {
       formData.append('engine', engine)
       formData.append('params', JSON.stringify(params))
       formData.append('stems', Array.from(selectedStems).join(','))
-      formData.append('game_ready', 'true')
-      endpoint = '/api/stems/separate'
+      if (draftId) {
+        // Separate the master already parked on the server. Promotes the
+        // existing draft in place rather than creating a second track, so the
+        // library entry the user has been looking at is the one that fills in.
+        endpoint = `/api/tracks/${draftId}/separate`
+      } else {
+        if (file) formData.append('file', file)
+        formData.append('game_ready', 'true')
+        endpoint = '/api/stems/separate'
+      }
     }
 
     try {
@@ -869,12 +968,16 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
     setParams({ ...(enginesPayload?.defaults?.[preferred] || {}) })
     setSelectedStems(new Set(DEMUCS_MODEL_STEMS.htdemucs_6s))
     setStemsTouched(false)
+    setDraftId('')
+    setDraftState('idle')
+    setDraftName('')
+    setYoutubeSourceUrl('')
     if (albumPreview) URL.revokeObjectURL(albumPreview)
     setAlbumArt(null)
     setAlbumPreview(null)
     setMode('generate')
     setManualStems({ vocals: null, drums: null, bass: null, guitar: null, piano: null, other: null })
-    if (searchParams.get('job')) {
+    if (searchParams.get('job') || searchParams.get('draft')) {
       setSearchParams({}, { replace: true })
     }
   }
@@ -964,20 +1067,53 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
         </>
       )}
 
-      {phase === 'settings' && (file || mode === 'manual') && (
+      {phase === 'settings' && (file || draftId || mode === 'manual') && (
         <div className="space-y-6">
-          {/* File info — only when a master file is present */}
-          {file && (
-            <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 flex items-center justify-between gap-4">
-              <p className="text-sm text-gray-400">
-                File: <span className="text-gray-200">{file.name}</span>{' '}
-                <span className="text-gray-600">({(file.size / 1024 / 1024).toFixed(1)} MB)</span>
-              </p>
-              {loadingMeta && (
-                <span className="flex items-center gap-2 text-xs text-gray-500">
-                  <span className="animate-spin h-3.5 w-3.5 border-2 border-jam-400 border-t-transparent rounded-full" />
-                  Reading metadata...
-                </span>
+          {/* File info — the in-memory upload, or the master already parked
+              server-side when resuming a draft. */}
+          {(file || draftId) && (
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 space-y-2">
+              <div className="flex items-center justify-between gap-4">
+                <p className="text-sm text-gray-400">
+                  {file ? (
+                    <>
+                      File: <span className="text-gray-200">{file.name}</span>{' '}
+                      <span className="text-gray-600">
+                        ({(file.size / 1024 / 1024).toFixed(1)} MB)
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      Resuming: <span className="text-gray-200">{draftName || 'saved draft'}</span>{' '}
+                      <span className="text-gray-600">(audio stored on the server)</span>
+                    </>
+                  )}
+                </p>
+                {loadingMeta && (
+                  <span className="flex items-center gap-2 text-xs text-gray-500">
+                    <span className="animate-spin h-3.5 w-3.5 border-2 border-jam-400 border-t-transparent rounded-full" />
+                    Reading metadata...
+                  </span>
+                )}
+              </div>
+              {/* Reassure the user the download isn't riding on this tab. */}
+              {draftState === 'saving' && (
+                <p className="text-xs text-gray-500 flex items-center gap-2">
+                  <span className="animate-spin h-3 w-3 border-2 border-jam-400 border-t-transparent rounded-full" />
+                  Saving to Studio Library…
+                </p>
+              )}
+              {draftState === 'saved' && (
+                <p className="text-xs text-emerald-400">
+                  Saved to Studio Library as an in-progress project — you can close this tab and
+                  resume from there.
+                </p>
+              )}
+              {draftState === 'failed' && (
+                <p className="text-xs text-amber-400">
+                  Couldn't save this to the Studio Library, so it won't be resumable. Separation
+                  will still work as long as you keep this tab open.
+                </p>
               )}
             </div>
           )}
@@ -1021,6 +1157,11 @@ export default function CreateSection({ onSaved }: { onSaved?: () => void } = {}
           {mode === 'generate' && (
           <>
           {/* Engine, quality preset and the full parameter set */}
+          {enginesError && (
+            <div className="bg-amber-950/30 border border-amber-800/60 rounded-xl p-4">
+              <p className="text-sm text-amber-300">{enginesError}</p>
+            </div>
+          )}
           {enginesPayload && (
             <SeparationSettings
               payload={enginesPayload}

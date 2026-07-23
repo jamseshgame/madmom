@@ -10,6 +10,19 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.16.0',
+    date: '2026-07-23',
+    summary:
+      'Imports are now resumable. The moment you stage audio on the Create page — a YouTube pull or a dropped file — it\'s saved to the Studio Library as an in-progress project, before you\'ve touched the separation settings. Close the tab, come back tomorrow, hit Resume, and the master is already on the server waiting to be split. Previously a several-minute YouTube download lived only in the browser tab and vanished if you navigated away at the settings screen.',
+    entries: [
+      { kind: 'added', text: 'Draft tracks — staging audio on the Create page immediately POSTs it to /api/tracks/draft, which persists the untouched master server-side and lists the track with an amber "In progress" badge. The Create page shows "Saved to Studio Library — you can close this tab and resume from there" so it\'s clear the download no longer rides on the tab staying open.' },
+      { kind: 'added', text: 'Resume from the Studio Library — in-progress tracks show a Resume button (and the whole row opens the same way) that jumps back to the Create page settings step via /?draft=<id>, pre-filled with the track\'s metadata. Picking an engine + settings and clicking Generate separates the stored master in place, promoting the same track from draft → ready without creating a duplicate. The link is shareable and survives a refresh.' },
+      { kind: 'added', text: 'POST /api/tracks/{id}/separate runs any engine on a track\'s stored master and works on already-separated tracks too, so a track can be re-split with a different engine (e.g. Demucs → hybrid Roformer) without re-uploading. GET /api/tracks/{id}/source streams the stored master back.' },
+      { kind: 'added', text: 'YouTube-sourced imports carry their origin URL through to song.ini\'s [background] block, so the editor\'s Background panel can offer "use source video" without you pasting the link again.' },
+      { kind: 'fixed', text: 'The Create page now shows a clear banner when it can\'t load the separation engine list (e.g. the backend is running an older build than the frontend) instead of silently hiding all the settings. Separation still runs with server-side defaults in that state.' },
+    ],
+  },
+  {
     version: '1.15.0',
     date: '2026-07-23',
     summary:
