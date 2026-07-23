@@ -171,7 +171,11 @@ HEALTH=$(curl -s -m 10 http://127.0.0.1:8000/api/health || true)
 echo "health:  ${HEALTH:-<no response>}"
 echo "$HEALTH" | grep -q '"ok"' || { echo "!! health check failed" >&2; exit 1; }
 
-BUNDLE=$(grep -hoE '1\.[0-9]+\.[0-9]+' "$FRONTEND_DIR"/dist/assets/index-*.js 2>/dev/null | head -1 || true)
-echo "frontend: ${BUNDLE:-unknown} (now at commit $(git rev-parse --short HEAD))"
+# Read the studio version from source, not the minified bundle: the bundle is
+# full of other `1.x.y` dependency strings, so grepping it reports nonsense.
+# The build came from this exact file at the current commit.
+VERSION=$(grep -oE "STUDIO_VERSION = '[0-9]+\.[0-9]+\.[0-9]+'" \
+    "$FRONTEND_DIR/src/version.ts" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)
+echo "frontend: v${VERSION:-unknown} (now at commit $(git rev-parse --short HEAD))"
 
 echo -e "\nDone → https://$DOMAIN"
