@@ -61,8 +61,11 @@ async def dashboard(
             FROM events WHERE {where} GROUP BY day ORDER BY day""",
         f"""SELECT event, count() AS count, uniq(distinct_id) AS users
             FROM events WHERE {where} GROUP BY event ORDER BY count DESC LIMIT 30""",
+        # PostHog forbids OFFSET for personal API keys. Fetch a bounded prefix
+        # and page it locally; the public endpoint can keep a familiar offset
+        # contract without sending unsupported HogQL.
         f"""SELECT uuid, timestamp, event, distinct_id, properties
-            FROM events WHERE {where} ORDER BY timestamp DESC LIMIT {limit + 1} OFFSET {offset}""",
+            FROM events WHERE {where} ORDER BY timestamp DESC LIMIT {offset + limit + 1}""",
     ]
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -75,12 +78,13 @@ async def dashboard(
     except (httpx.HTTPError, ValueError) as exc:
         raise HTTPException(502, 'PostHog is currently unavailable.') from exc
 
-    has_more = len(activity) > limit
+    page = activity[offset : offset + limit]
+    has_more = len(activity) > offset + limit
     return {
         'summary': summary_rows[0] if summary_rows else {'events': 0, 'users': 0, 'event_types': 0, 'latest': None},
         'trend': trend,
         'breakdown': breakdown,
-        'activity': activity[:limit],
+        'activity': page,
         'pagination': {'limit': limit, 'offset': offset, 'has_more': has_more},
         'range_days': days,
     }
