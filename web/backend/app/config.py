@@ -63,6 +63,12 @@ class Settings(BaseSettings):
     anthropic_model: str = 'claude-sonnet-4-6'
     anthropic_max_tokens: int = 8192
 
+    # PostHog analytics dashboard. The personal API key is deliberately kept
+    # server-side; it needs read access to the configured project.
+    posthog_host: str = 'https://eu.posthog.com'
+    posthog_project_id: int = 100518
+    posthog_personal_api_key: str = ''
+
     model_config = {
         'env_file': os.getenv('BEATMAP_ENV', str(Path(__file__).resolve().parents[2] / '.env')),
         'extra': 'ignore',

@@ -10,6 +10,7 @@ import UsersPage from './pages/UsersPage.tsx'
 import GenerationPresetsPage from './pages/GenerationPresetsPage.tsx'
 import CalibrationPage from './pages/CalibrationPage.tsx'
 import OutreachPage from './pages/OutreachPage.tsx'
+import AnalyticsPage from './pages/AnalyticsPage.tsx'
 import BeatmapEditor from './components/BeatmapEditor.tsx'
 import VocalEditor from './components/VocalEditor.tsx'
 import { VersionBanner } from './components/VersionStatus.tsx'
@@ -24,6 +25,7 @@ const baseNavItems: { to: string; label: string; adminOnly?: boolean }[] = [
   { to: '/', label: 'Studio Library' },
   { to: '/game-songs', label: 'Game Library' },
   { to: '/outreach', label: 'Outreach' },
+  { to: '/analytics', label: 'Analytics', adminOnly: true },
   { to: '/logs', label: 'Logs' },
   { to: '/users', label: 'Users', adminOnly: true },
   { to: '/presets', label: 'Presets', adminOnly: true },
@@ -161,6 +163,7 @@ export default function App() {
           <Route path="/create" element={<CreatePage />} />
           <Route path="/game-songs" element={<GameSongsPage />} />
           <Route path="/outreach" element={<OutreachPage />} />
+          <Route path="/analytics" element={<AnalyticsPage />} />
           <Route path="/logs" element={<LogsPage />} />
           <Route path="/users" element={<UsersPage />} />
           <Route path="/presets" element={<GenerationPresetsPage />} />

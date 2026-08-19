@@ -15,6 +15,7 @@ from fastapi import Depends
 
 from .config import settings
 from .routers import (
+    analytics,
     auth,
     beatmap,
     calibration,
@@ -77,6 +78,7 @@ app.add_middleware(
 app.include_router(auth.router)
 
 _auth_dep = [Depends(require_auth)]
+app.include_router(analytics.router)
 app.include_router(beatmap.router, dependencies=_auth_dep)
 app.include_router(calibration.router, dependencies=_auth_dep)
 app.include_router(stems.router, dependencies=_auth_dep)
