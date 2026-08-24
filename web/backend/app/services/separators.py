@@ -49,6 +49,7 @@ from .stems import (
     _write_peaks_file,
     collect_demucs_outputs,
     finalize_game_ready,
+    is_noise_line,
     separate_stems,
     separator_child_env,
 )
@@ -639,7 +640,7 @@ async def _stream_audio_separator(
                     pct = int(m.group(1))
                     mapped = progress_lo + int((progress_hi - progress_lo) * pct / 100)
                     await progress_callback(label, mapped, f'{pct}% — {label}')
-                else:
+                elif not is_noise_line(line):
                     await progress_callback('log', -1, line)
         if buf.strip():
             tail.append(buf.strip())

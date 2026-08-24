@@ -191,6 +191,19 @@ def write_song_ini(
 _PROGRESS_RE = re.compile(r'(\d+)%\|')
 _BAG_RE = re.compile(r'bag of (\d+) model')
 
+# stderr chatter from decoder libraries that is harmless but reads as a
+# failure when the UI hoists the latest log line into the progress headline.
+# libmpg123 (via libsndfile) grumbles about malformed ID3 frames in YouTube
+# rips ("[src/libmpg123/id3.c:process_comment():587] error: No comment text /
+# valid description?") and carries on decoding regardless.
+_NOISE_RE = re.compile(r'^\[src/libmpg123/')
+
+
+def is_noise_line(line: str) -> bool:
+    """True for known-harmless subprocess stderr lines that should not be
+    surfaced as progress log events (they still land in the failure tail)."""
+    return bool(_NOISE_RE.search(line.strip()))
+
 
 async def _convert_to_ogg(src: Path, dst: Path, progress_callback=None) -> Path:
     """Convert an audio file to OGG Vorbis using ffmpeg."""
@@ -398,7 +411,7 @@ async def _stream_demucs(
                             f'({pct}% of pass) — {overall_pct}% overall'
                         )
                         await progress_callback('demucs', mapped, msg)
-                    else:
+                    elif not is_noise_line(line):
                         await progress_callback('log', -1, line)
         # Flush remaining buffer
         if buf.strip():
