@@ -2383,13 +2383,13 @@ function TracksPageInner() {
             return (
               <div
                 key={j.id}
-                onClick={() => navigate(`/?job=${j.id}`)}
+                onClick={() => navigate(`/create?job=${j.id}`)}
                 role="button"
                 tabIndex={0}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault()
-                    navigate(`/?job=${j.id}`)
+                    navigate(`/create?job=${j.id}`)
                   }
                 }}
                 className="cursor-pointer bg-gray-900 border border-gray-800 hover:border-gray-700 hover:bg-gray-900/70 rounded-xl px-4 py-3 transition-colors"
@@ -2473,7 +2473,7 @@ function TracksPageInner() {
           // where its separation settings live.
           const isDraft = track.status === 'draft'
           const open = () => {
-            if (isDraft) navigate(`/?draft=${track.id}`)
+            if (isDraft) navigate(`/create?draft=${track.id}`)
             else setSelectedId(track.id)
           }
           return (
@@ -2551,7 +2551,7 @@ function TracksPageInner() {
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation()
-                        navigate(`/?draft=${track.id}`)
+                        navigate(`/create?draft=${track.id}`)
                       }}
                       className="px-2.5 py-1 bg-amber-900/30 hover:bg-amber-800/60 border border-amber-700/60 hover:border-amber-600 text-amber-200 rounded-md text-xs font-medium transition-colors"
                     >
