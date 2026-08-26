@@ -104,6 +104,23 @@ class TestFlagArgs:
         assert S._flag_args({'shifts': 10, 'clip_mode': 'rescale'}, self.KEYS) == []
 
 
+class TestSeparatorFailure:
+    def test_sigterm_explains_host_termination_and_hides_mpg123_noise(self):
+        message = S._separator_failure(-15, [
+            '[src/libmpg123/id3.c:process_comment():587] error: No comment text',
+            '4%| 1/26 [02:57<1:13:57, 177.52s/it]',
+        ])
+        assert 'stopped by SIGTERM' in message
+        assert 'model did not reject the song' in message
+        assert 'libmpg123' not in message
+        assert '4%|' in message
+
+    def test_other_exit_codes_keep_conventional_diagnostic(self):
+        assert S._separator_failure(2, ['bad option']) == (
+            'audio-separator failed (exit 2):\nbad option'
+        )
+
+
 class TestCatalogNormalization:
     def test_rich_shape(self):
         raw = {'MDXC': {'BS-Roformer': {

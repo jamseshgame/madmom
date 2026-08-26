@@ -88,6 +88,9 @@ touched '\.(pyx|pxd)$|^setup\.py$' && cython_changed=1
 backend_changed=0
 touched '^web/backend/app/' && backend_changed=1
 
+service_changed=0
+touched '^web/systemd/beatmap-backend\.service$' && service_changed=1
+
 # ── backend dependencies ─────────────────────────────────────────────────────
 if [ "$deps_changed" = 1 ]; then
     say "Backend dependencies"
@@ -150,7 +153,14 @@ fi
 # ── restart ──────────────────────────────────────────────────────────────────
 # Restart when backend code or deps changed (frontend is static, served by
 # nginx — a pure frontend change needs no restart).
-if [ "$backend_changed" = 1 ] || [ "$deps_changed" = 1 ] || [ "$cython_changed" = 1 ]; then
+if [ "$service_changed" = 1 ]; then
+    say "Install systemd unit"
+    cp "$WEB_DIR/systemd/beatmap-backend.service" /etc/systemd/system/
+    systemctl daemon-reload
+fi
+
+if [ "$backend_changed" = 1 ] || [ "$deps_changed" = 1 ] || [ "$cython_changed" = 1 ] \
+    || [ "$service_changed" = 1 ]; then
     say "Restart backend"
     systemctl restart "$SERVICE"
     sleep 4

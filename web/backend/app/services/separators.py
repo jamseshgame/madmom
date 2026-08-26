@@ -536,6 +536,23 @@ _AUDIO_EXTS = {'.wav', '.flac', '.mp3', '.m4a', '.ogg'}
 _CLI_BOOTSTRAP = 'import sys; from audio_separator.utils.cli import main; sys.argv[0] = "audio-separator"; main()'
 
 
+def _separator_failure(returncode: int, tail: list[str]) -> str:
+    """Describe process failures without presenting decoder chatter as cause."""
+    if returncode == -15:
+        reason = (
+            'audio-separator was stopped by SIGTERM. The model did not reject the song; '
+            'the worker or host shut the process down (commonly a service restart or host resource limit).'
+        )
+    elif returncode < 0:
+        reason = f'audio-separator was stopped by signal {-returncode}'
+    else:
+        reason = f'audio-separator failed (exit {returncode})'
+
+    useful_tail = [line for line in tail if not is_noise_line(line)]
+    details = '\n'.join((useful_tail or tail)[-12:])
+    return f'{reason}:\n{details}' if details else reason
+
+
 def _flag_args(params: dict, spec_keys: set[str]) -> list[str]:
     """Translate the parameter dict into audio-separator CLI flags.
 
@@ -650,7 +667,7 @@ async def _stream_audio_separator(
     await asyncio.gather(_pump(proc.stderr), _pump(proc.stdout))
     returncode = await proc.wait()
     if returncode != 0:
-        raise RuntimeError('audio-separator failed (exit {}):\n{}'.format(returncode, '\n'.join(tail[-12:])))
+        raise RuntimeError(_separator_failure(returncode, tail))
 
 
 def _collect_separator_outputs(output_dir: Path, expected: dict[str, str] | None) -> dict[str, str]:
