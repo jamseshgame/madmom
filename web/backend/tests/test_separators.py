@@ -121,6 +121,15 @@ class TestSeparatorFailure:
         )
 
 
+class TestCliCompatibility:
+    def test_bootstrap_translates_legacy_librosa_filename_argument(self):
+        assert 'filename=None' in S._CLI_BOOTSTRAP
+        assert '"path": filename' in S._CLI_BOOTSTRAP
+        assert S._CLI_BOOTSTRAP.index('librosa.get_duration =') < S._CLI_BOOTSTRAP.index(
+            'from audio_separator.utils.cli import main'
+        )
+
+
 class TestCatalogNormalization:
     def test_rich_shape(self):
         raw = {'MDXC': {'BS-Roformer': {

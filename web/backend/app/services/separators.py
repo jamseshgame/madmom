@@ -533,7 +533,18 @@ _AUDIO_EXTS = {'.wav', '.flac', '.mp3', '.m4a', '.ogg'}
 # console script is not guaranteed to be on PATH when the backend runs under
 # systemd. Args after -c land in sys.argv[1:], which is exactly what argparse
 # reads, so main() sees them unchanged.
-_CLI_BOOTSTRAP = 'import sys; from audio_separator.utils.cli import main; sys.argv[0] = "audio-separator"; main()'
+#
+# audio-separator 0.44.x still calls librosa.get_duration(filename=...), which
+# librosa 1.0 renamed to path=. Keep the compatibility patch inside the child
+# so the rest of the backend continues to use librosa's native API.
+_CLI_BOOTSTRAP = (
+    'import sys, librosa; '
+    '_jamsesh_get_duration = librosa.get_duration; '
+    'librosa.get_duration = lambda *a, filename=None, **kw: '
+    '_jamsesh_get_duration(*a, **({"path": filename, **kw} if filename is not None else kw)); '
+    'from audio_separator.utils.cli import main; '
+    'sys.argv[0] = "audio-separator"; main()'
+)
 
 
 def _separator_failure(returncode: int, tail: list[str]) -> str:
