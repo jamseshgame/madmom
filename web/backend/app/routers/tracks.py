@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from ..config import settings
 from ..services.audio import compute_audio_peaks, resize_to_square_png
-from ..services.crop_audio import crop_song_ogg
+from ..services.crop_audio import NON_AUDIO_STEMS, crop_song_ogg, crop_track_audio
 from ..services.chart_generator import chart_difficulties, generate_full_chart
 from ..services.game_songs import _parse_song_ini
 from ..services.github_publisher import publish_song_folder
@@ -417,6 +417,64 @@ async def download_track_stem(track_id: str, stem: str):
         raise HTTPException(404, 'Stem file not found on disk')
 
     return FileResponse(filepath, filename=filename)
+
+
+@router.get('/{track_id}/stems/{stem}/peaks')
+async def get_track_stem_peaks(track_id: str, stem: str, bucket_ms: int = 20):
+    """Per-bucket peak amplitudes for one of a track's stems, as a Float32
+    binary blob — the same shape the beatmap song-peaks endpoint returns. The
+    crop modal draws this and derives the stem's duration from its length.
+    Cached beside the stem; re-extracted whenever the audio is newer.
+    """
+    track = get_track(track_id)
+    if not track:
+        raise HTTPException(404, 'Track not found')
+    filename = track.stems.get(stem)
+    if not filename or stem in NON_AUDIO_STEMS:
+        raise HTTPException(404, f'Stem not found: {stem}')
+    audio_path = track.stems_dir / filename
+    if not audio_path.exists():
+        raise HTTPException(404, 'Stem file not found on disk')
+
+    cache_path = track.stems_dir / f'{stem}.peaks.f32'
+    if cache_path.exists() and cache_path.stat().st_mtime >= audio_path.stat().st_mtime:
+        return Response(content=cache_path.read_bytes(), media_type='application/octet-stream')
+    try:
+        blob = compute_audio_peaks(audio_path, bucket_ms=bucket_ms)
+    except RuntimeError as e:
+        raise HTTPException(500, f'Peak extraction failed: {e}')
+    cache_path.write_bytes(blob)
+    return Response(content=blob, media_type='application/octet-stream')
+
+
+@router.post('/{track_id}/crop-stems')
+async def crop_track_stems(track_id: str, body: dict = Body(...)):
+    """Trim [start_sec, end_sec) out of every stem — and the stored master —
+    so they all keep the same timeline. Beatmaps keep their own song.ogg and
+    are left alone; their ids come back so the UI can warn about them."""
+    track = get_track(track_id)
+    if not track:
+        raise HTTPException(404, 'Track not found')
+    try:
+        start_sec = float(body.get('start_sec', 0) or 0)
+        end_sec = float(body.get('end_sec', 0) or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, 'start_sec and end_sec must be numbers')
+
+    try:
+        return await asyncio.to_thread(crop_track_audio, track, start_sec, end_sec)
+    except ValueError as e:
+        raise HTTPException(400, _CROP_ERRORS.get(str(e), f'Cannot crop: {e}'))
+    except (RuntimeError, OSError) as e:
+        raise HTTPException(500, f'Crop failed: {e}')
+
+
+_CROP_ERRORS = {
+    'start-before-zero': 'Crop start cannot be negative',
+    'empty-range': 'Crop end must be after the start',
+    'end-past-duration': 'Crop end is past the end of the audio',
+    'no-audio-stems': 'This track has no audio stems to crop',
+}
 
 
 # ── Song.ini field definitions ──────────────────────────────────────────────

@@ -18,6 +18,7 @@ import { materializeQueue } from '../components/pipeline/queueBuilder'
 import GenerationSettings from '../components/pipeline/GenerationSettings'
 import { STEM_COLORS, STEM_LABELS } from '../components/stemDisplay'
 import CloneDifficultyModal, { ChartRow } from '../components/tracks/CloneDifficultyModal'
+import CropStemsModal from '../components/tracks/CropStemsModal'
 
 type BeatmapRecord = BeatmapStatsRecord
 
@@ -1118,6 +1119,10 @@ function TracksPageInner() {
     })
   }, [])
   const [confirmDelete, setConfirmDelete] = useState<Track | null>(null)
+  const [cropTrack, setCropTrack] = useState<Track | null>(null)
+  // Bumped after a crop so the <audio>/peaks requests bypass the browser cache
+  // — the URLs are unchanged but the bytes behind them are not.
+  const [audioNonce, setAudioNonce] = useState(0)
   const [deleting, setDeleting] = useState(false)
   const [statsBeatmap, setStatsBeatmap] = useState<BeatmapRecord | null>(null)
   const [cloneDiffFor, setCloneDiffFor] = useState<ChartRow | null>(null)
@@ -1598,12 +1603,21 @@ function TracksPageInner() {
                 {selectedTrack.output_format.toUpperCase()}
               </p>
             </div>
-            <button
-              onClick={() => setConfirmDelete(selectedTrack)}
-              className="px-3 py-1.5 bg-red-900/40 hover:bg-red-800/60 border border-red-800/60 hover:border-red-700 text-red-300 hover:text-red-200 rounded-md text-xs font-medium transition-colors"
-            >
-              Delete track
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setCropTrack(selectedTrack)}
+                className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-600 text-gray-300 hover:text-gray-100 rounded-md text-xs font-medium transition-colors"
+                title="Trim the same head/tail off every stem"
+              >
+                Crop stems
+              </button>
+              <button
+                onClick={() => setConfirmDelete(selectedTrack)}
+                className="px-3 py-1.5 bg-red-900/40 hover:bg-red-800/60 border border-red-800/60 hover:border-red-700 text-red-300 hover:text-red-200 rounded-md text-xs font-medium transition-colors"
+              >
+                Delete track
+              </button>
+            </div>
           </div>
 
           <div className="flex flex-col gap-2">
@@ -1637,7 +1651,10 @@ function TracksPageInner() {
 
                     {/* Waveform (gets the rest of the width) */}
                     <div className="flex-1 min-w-0 flex items-center">
-                      <StemPlayer src={`/api/tracks/${selectedTrack.id}/stems/${stem}`} />
+                      <StemPlayer
+                        key={`${stem}-${audioNonce}`}
+                        src={`/api/tracks/${selectedTrack.id}/stems/${stem}${audioNonce ? `?v=${audioNonce}` : ''}`}
+                      />
                     </div>
                   </div>
 
@@ -2280,6 +2297,22 @@ function TracksPageInner() {
               })}
             onClose={() => setCloneDiffFor(null)}
             onDone={(msg) => { setCloneDiffMsg(msg); loadTracks() }}
+          />
+        )}
+
+        {cropTrack && (
+          <CropStemsModal
+            trackId={cropTrack.id}
+            trackName={cropTrack.name}
+            stems={cropTrack.stems}
+            beatmapCount={(cropTrack.beatmaps || []).length}
+            nonce={audioNonce}
+            onClose={() => setCropTrack(null)}
+            onCropped={() => {
+              setCropTrack(null)
+              setAudioNonce(Date.now())
+              loadTracks()
+            }}
           />
         )}
 

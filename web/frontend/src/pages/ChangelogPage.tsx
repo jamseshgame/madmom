@@ -10,6 +10,19 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.17.0',
+    date: '2026-09-10',
+    summary:
+      'Tracks that are already split can now be trimmed. Crop stems on a Studio Library track opens a waveform with draggable start/end handles, and one confirm takes the same head and tail off every stem plus the stored master — so the stems stay sample-aligned with each other. Trimming stems one at a time in an external editor was the old way to do this, and it is exactly how they drift apart.',
+    entries: [
+      { kind: 'added', text: 'Crop stems button in the Studio Library track header. The modal draws the waveform of a reference stem (the full mix by default, switchable), with draggable start/end handles, arrow-key nudging (shift for 1 s steps), editable m:ss.mmm fields synced both ways, a preview that plays only the region you are keeping, and a live "trims Xs head / Ys tail" readout. The crop always applies to every stem regardless of which one you were looking at.' },
+      { kind: 'added', text: 'POST /api/tracks/{id}/crop-stems trims every audio stem and the stored master to the same range. Each file is re-encoded to a temp sibling first and nothing is swapped in until the whole set succeeded, so a failure part-way leaves the track untouched rather than half-cropped — a half-applied crop would silently desync the stems, which is the failure this feature exists to prevent. Stream copy is deliberately not used: it can only cut on frame boundaries, letting stems drift from each other by up to a frame.' },
+      { kind: 'added', text: 'GET /api/tracks/{id}/stems/{stem}/peaks serves per-bucket waveform peaks for any stem as a Float32 blob, cached on disk beside the stem and re-extracted when the audio changes — the same shape the editor already used for beatmap audio.' },
+      { kind: 'changed', text: 'Cropping keeps the stored master in step with the stems, so re-splitting a cropped track with a different engine produces stems that still line up. The original head and tail are not recoverable afterwards, and the modal says so before you confirm.' },
+      { kind: 'changed', text: 'Beatmaps keep their own copy of the audio, so cropping a track leaves their charts on the old timing. The modal names how many beatmaps are affected and tells you to regenerate them; the crop itself no longer silently invalidates them behind your back.' },
+    ],
+  },
+  {
     version: '1.16.0',
     date: '2026-07-23',
     summary:
