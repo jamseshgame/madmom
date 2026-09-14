@@ -474,6 +474,32 @@ def clone_difficulty_across_beatmaps(
     }
 
 
+def move_beatmap_record(track_id: str, beatmap_id: str, stem: str) -> dict | None:
+    """Reassign a chart without changing its notes, audio, or generation metadata."""
+    track = Track.load(track_id)
+    if not track:
+        return None
+    target = next((b for b in track.beatmaps if b.get('id') == beatmap_id), None)
+    if target is None:
+        return None
+    if stem not in track.stems or stem in {'song_ini', 'album_png'}:
+        raise ValueError('Destination must be an audio stem on this track')
+    if not (track.stems_dir / track.stems[stem]).is_file():
+        raise ValueError('Destination stem audio is missing')
+    source = target.get('stem')
+    if source == stem:
+        return target
+    was_active = target.get('active', False)
+    destination = [b for b in track.beatmaps if b.get('stem') == stem]
+    target['stem'] = stem
+    target['active'] = not any(b.get('active') for b in destination)
+    remaining = [b for b in track.beatmaps if b.get('stem') == source]
+    if was_active and remaining and not any(b.get('active') for b in remaining):
+        max(remaining, key=lambda b: b.get('generated_at', 0))['active'] = True
+    track.save()
+    return target
+
+
 def set_active_beatmap(track_id: str, beatmap_id: str) -> dict | None:
     """Mark `beatmap_id` as the active beatmap for its stem. Returns the
     updated record, or None if not found."""

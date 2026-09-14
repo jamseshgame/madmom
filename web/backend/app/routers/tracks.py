@@ -37,6 +37,7 @@ from ..services.tracks import (
     get_track,
     get_track_enriched,
     list_tracks,
+    move_beatmap_record,
     promote_draft,
     read_elevenlabs_voice,
     rename_beatmap_record,
@@ -1218,6 +1219,18 @@ async def clone_beatmap(track_id: str, beatmap_id: str):
     record = clone_beatmap_record(track_id, beatmap_id)
     if record is None:
         raise HTTPException(404, 'Source beatmap not found')
+    return record
+
+
+@router.post('/{track_id}/beatmaps/{beatmap_id}/move')
+async def move_beatmap(track_id: str, beatmap_id: str, stem: str = Body(..., embed=True)):
+    """Move a beatmap to another audio stem within this track."""
+    try:
+        record = move_beatmap_record(track_id, beatmap_id, stem)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if record is None:
+        raise HTTPException(404, 'Beatmap not found')
     return record
 
 

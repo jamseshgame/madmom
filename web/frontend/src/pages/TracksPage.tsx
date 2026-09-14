@@ -1,3 +1,4 @@
+import MoveBeatmapSelect from '../components/MoveBeatmapSelect'
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import LyricsButtons from '../components/LyricsButtons'
@@ -1632,7 +1633,7 @@ function TracksPageInner() {
                   <div className="flex items-center gap-3">
                     {/* Identity: checkbox + stem label */}
                     <div className="w-24 shrink-0 flex items-center justify-center gap-2">
-                      {stem !== 'song' ? (
+                      {(
                         <input
                           type="checkbox"
                           checked={selectedStems.has(stem)}
@@ -1641,8 +1642,6 @@ function TracksPageInner() {
                           aria-label={`Select ${STEM_LABELS[stem] || stem} for batch beatmap`}
                           title="Select for batch beatmap generation"
                         />
-                      ) : (
-                        <div className="h-4 w-4 shrink-0" />
                       )}
                       <span className={`text-sm font-semibold ${STEM_COLORS[stem] || 'text-gray-300'}`}>
                         {STEM_LABELS[stem] || stem}
@@ -1696,14 +1695,7 @@ function TracksPageInner() {
                   )}
                   {stem !== 'vocals' && (
                     <div className="flex items-stretch gap-1">
-                      {stem === 'song' ? (
-                        <a
-                          href={`/api/tracks/${selectedTrack.id}/stems/${stem}`}
-                          className="flex-1 px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-200 rounded text-xs font-medium transition-colors text-center"
-                        >
-                          Download
-                        </a>
-                      ) : (
+                      {(
                         <>
                           <button
                             onClick={() => startQuickBeatmap(stem)}
@@ -1819,9 +1811,8 @@ function TracksPageInner() {
                       queued: {(beatmapQueue[stem] || []).map((q) => q.preset || 'Custom').join(' · ')}
                     </div>
                   )}
-                  {/* Vocals uses VocalmapButtons → vocal_notes.json, not the
-                      tracks.beatmaps array, so skip the legacy chart list here. */}
-                  {stem !== 'vocals' && (selectedTrack.beatmaps || [])
+                  {/* Include charts moved to vocals alongside its vocalmap controls. */}
+                  {(selectedTrack.beatmaps || [])
                     .filter((bm) => bm.stem === stem)
                     .sort((a, b) => b.generated_at - a.generated_at)
                     .map((bm) => {
@@ -1919,6 +1910,8 @@ function TracksPageInner() {
                             </span>
                           )}
                         </button>
+                        <MoveBeatmapSelect trackId={selectedTrack.id} beatmapId={bm.id}
+                          stem={bm.stem} stems={selectedTrack.stems} onMoved={loadTracks} />
                         <button
                           onClick={() => navigate(`/edit/${selectedTrack.id}/${bm.id}`)}
                           className="shrink-0 px-2 py-0.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-600 rounded text-[10px] text-gray-300 hover:text-gray-100 transition-colors"

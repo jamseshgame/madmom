@@ -72,11 +72,12 @@ def fake_track(client, tmp_path):
         i = int(s * sr)
         y[i:i + burst.shape[0]] += burst
     sf.write(td / 'song.ogg', y, sr)
+    sf.write(td / 'stems' / 'song.ogg', y, sr)
     sf.write(td / 'stems' / 'bass.ogg', y, sr)
     sf.write(td / 'stems' / 'guitar.ogg', y, sr)
 
     t = Track(
-        id=tid, name='Test', created_at=time.time(), stems={'bass': 'bass.ogg'},
+        id=tid, name='Test', created_at=time.time(), stems={'bass': 'bass.ogg', 'song': 'song.ogg'},
         model='demucs', output_format='ogg',
         artist='A', album='B', genre='G', year='2026',
     )
@@ -84,10 +85,11 @@ def fake_track(client, tmp_path):
     return tid
 
 
-def test_generate_beatmap_v2_runs_all_stages(client, fake_track):
+@pytest.mark.parametrize('stem', ['bass', 'song'])
+def test_generate_beatmap_v2_runs_all_stages(client, fake_track, stem):
     tid = fake_track
     form = {
-        'stem': 'bass',
+        'stem': stem,
         'name': 'Bass Test',
         'artist': 'A',
         'album': 'B',
@@ -123,3 +125,7 @@ def test_generate_beatmap_v2_runs_all_stages(client, fake_track):
     ini = (out / 'song.ini').read_text()
     assert 'name = Bass Test' in ini
 
+
+    from app.services.tracks import get_track
+    record = next(b for b in get_track(tid).beatmaps if b['id'] == job_id)
+    assert record['stem'] == stem

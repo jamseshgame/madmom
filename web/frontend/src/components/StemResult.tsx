@@ -1,3 +1,4 @@
+import MoveBeatmapSelect from './MoveBeatmapSelect'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import StemPlayer from './StemPlayer.tsx'
@@ -596,7 +597,7 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
   const generateSelected = () => {
     setBatchError('')
     const targets = Array.from(selectedStems).filter(
-      (stem) => stem !== 'song' && stem !== 'vocals' && !NON_AUDIO_KEYS.has(stem) && !beatmaps[stem],
+      (stem) => stem !== 'vocals' && !NON_AUDIO_KEYS.has(stem) && !beatmaps[stem],
     )
     if (targets.length === 0) return
     if (lock.owner) {
@@ -658,7 +659,7 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                 <div className="flex items-center gap-3">
                   {/* Identity: checkbox + stem label */}
                   <div className="w-24 shrink-0 flex items-center justify-center gap-2">
-                    {stem !== 'song' ? (
+                    {(
                       <input
                         type="checkbox"
                         checked={selectedStems.has(stem)}
@@ -667,8 +668,6 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                         aria-label={`Select ${label} for batch beatmap`}
                         title="Select for batch beatmap generation"
                       />
-                    ) : (
-                      <div className="h-4 w-4 shrink-0" />
                     )}
                     <span className={`text-sm font-semibold ${color}`}>{label}</span>
                   </div>
@@ -710,14 +709,7 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
 
                   {stem !== 'vocals' && (
                     <div className="flex items-stretch gap-1">
-                      {stem === 'song' ? (
-                        <a
-                          href={`/api/stems/${jobId}/download/${stem}`}
-                          className="flex-1 px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-200 rounded text-xs font-medium transition-colors text-center"
-                        >
-                          Download
-                        </a>
-                      ) : (
+                      {(
                         !bm && (
                           <>
                             <button
@@ -745,7 +737,7 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                     </div>
                   )}
 
-                  {stem !== 'vocals' && stem !== 'song' && !bm && activePresets.length > 0 &&
+                  {stem !== 'vocals' && !bm && activePresets.length > 0 &&
                     !(activePresets.length === 1 && activePresets[0] === 'v1') && (
                     <span
                       className="self-center text-[10px] text-gray-500 italic mt-0.5"
@@ -758,7 +750,7 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                   {/* Skip beat detection — open the editor with an empty chart.
                       Requires the track to have been saved to the library
                       (track_id present), which the Create flow does. */}
-                  {stem !== 'song' && stem !== 'vocals' && trackId && !bm && (
+                  {stem !== 'vocals' && trackId && !bm && (
                     <button
                       type="button"
                       onClick={async () => {
@@ -872,10 +864,8 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                     <div className="text-xs text-red-400 mt-1">Failed</div>
                   )}
 
-                  {/* Pre-existing beatmaps for this stem — open in editor or
-                      view stats. Rendered for non-vocals only; vocals uses
-                      vocal_notes.json via VocalmapButtons, not this list. */}
-                  {stem !== 'vocals' && trackId && existingBeatmaps
+                  {/* Saved charts, including charts moved to vocals. */}
+                  {trackId && existingBeatmaps
                     .filter((b) => b.stem === stem)
                     .sort((a, b) => b.generated_at - a.generated_at)
                     .map((b) => {
@@ -935,6 +925,8 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
                               </span>
                             )}
                           </button>
+                          <MoveBeatmapSelect trackId={trackId} beatmapId={b.id}
+                            stem={b.stem} stems={stems} onMoved={refetchBeatmaps} />
                           <button
                             onClick={() => navigate(`/edit/${trackId}/${b.id}`)}
                             className="shrink-0 px-2 py-0.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-600 rounded text-[10px] text-gray-300 hover:text-gray-100 transition-colors"
