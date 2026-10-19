@@ -22,6 +22,11 @@ router = APIRouter(prefix='/api/generation-presets', tags=['generation-presets']
 
 
 _STAGE_KEYS = ('onsets', 'pitches', 'quantized', 'lanes_expert', 'lanes_filtered')
+# Optional stage keys. `grid` selects the track-level tempo-grid engine
+# (absent = reuse whatever grid is active, else librosa-beat); `difficulty`
+# selects the Hard/Medium/Easy reduction engine (absent = metric-weight).
+# Presets that pre-date these keys keep working unchanged.
+_OPTIONAL_STAGE_KEYS = ('grid', 'difficulty')
 
 
 def _presets_path() -> Path:
@@ -213,6 +218,83 @@ BUILTIN_PRESETS: list[dict[str, Any]] = [
             'lanes_filtered': {'engine': 'identity', 'params': {}},
         },
     },
+    # ── V3 family: the "from scratch" design, shipped as presets so it can be
+    # A/B'd against v1–v11 on the same stem in the editor. Each one isolates a
+    # change: v12 = grid fix only; v13 = + transcription + DP lanes; v14 = + phrase
+    # consistency; drums-v2 = the class-aware drum column.
+    {
+        'name': 'v12 — grid only',
+        'description': 'v1 engines on a beat-anchored madmom grid — isolates the effect of the grid fix',
+        'builtin': True,
+        'generation': {
+            'grid': {'engine': 'madmom-downbeat', 'params': {}},
+            'onsets': {'engine': 'librosa-onset', 'params': {}},
+            'pitches': {'engine': 'yin', 'params': {}},
+            'quantized': {'engine': 'metric-weighted', 'params': {}},
+            'lanes_expert': {'engine': 'section-sliding', 'params': {}},
+            'lanes_filtered': {'engine': 'identity', 'params': {}},
+        },
+    },
+    {
+        'name': 'v13 — contour DP',
+        'description': 'madmom grid + Viterbi lane assignment (contour/register/hand-movement costs), '
+                       'sustains + real chords from basic-pitch, importance-score difficulty',
+        'builtin': True,
+        'generation': {
+            'grid': {'engine': 'madmom-downbeat', 'params': {}},
+            'onsets': {'engine': 'basic-pitch', 'params': {}},
+            'pitches': {'engine': 'basic-pitch', 'params': {}},
+            'quantized': {'engine': 'metric-weighted', 'params': {}},
+            'lanes_expert': {'engine': 'contour-dp', 'params': {}},
+            'lanes_filtered': {'engine': 'identity', 'params': {}},
+            'difficulty': {'engine': 'importance-score', 'params': {}},
+        },
+    },
+    {
+        'name': 'v13 — contour DP (pyin)',
+        'description': 'v13 with the lightweight pyin pitch engine (no basic-pitch install needed; '
+                       'no chords or sustains)',
+        'builtin': True,
+        'generation': {
+            'grid': {'engine': 'madmom-downbeat', 'params': {}},
+            'onsets': {'engine': 'librosa-onset', 'params': {'min_gap_ms': 60}},
+            'pitches': {'engine': 'yin', 'params': {}},
+            'quantized': {'engine': 'metric-weighted', 'params': {}},
+            'lanes_expert': {'engine': 'contour-dp', 'params': {}},
+            'lanes_filtered': {'engine': 'identity', 'params': {}},
+            'difficulty': {'engine': 'importance-score', 'params': {}},
+        },
+    },
+    {
+        'name': 'v14 — contour DP + phrase consistency',
+        'description': 'v13 plus repeated phrases copying the lanes of their first occurrence',
+        'builtin': True,
+        'generation': {
+            'grid': {'engine': 'madmom-downbeat', 'params': {}},
+            'onsets': {'engine': 'basic-pitch', 'params': {}},
+            'pitches': {'engine': 'basic-pitch', 'params': {}},
+            'quantized': {'engine': 'metric-weighted', 'params': {}},
+            'lanes_expert': {'engine': 'contour-dp', 'params': {}},
+            'lanes_filtered': {'engine': 'phrase-consistency', 'params': {}},
+            'difficulty': {'engine': 'importance-score', 'params': {}},
+        },
+    },
+    {
+        'name': 'drums-v2',
+        'description': 'Class-aware drums: band-split kick/snare/hat/tom/cymbal → fixed pads + cymbal flags, '
+                       'difficulty by class removal',
+        'builtin': True,
+        'stems': ['drums'],
+        'generation': {
+            'grid': {'engine': 'madmom-downbeat', 'params': {}},
+            'onsets': {'engine': 'drum-bandsplit', 'params': {}},
+            'pitches': {'engine': 'drum-class', 'params': {}},
+            'quantized': {'engine': 'metric-weighted', 'params': {}},
+            'lanes_expert': {'engine': 'drum-gm', 'params': {}},
+            'lanes_filtered': {'engine': 'identity', 'params': {}},
+            'difficulty': {'engine': 'drum-class-removal', 'params': {}},
+        },
+    },
 ]
 
 
@@ -224,6 +306,16 @@ def _validate_generation(payload: Any) -> dict[str, Any]:
         stage = payload.get(key)
         if not isinstance(stage, dict) or 'engine' not in stage:
             raise HTTPException(400, f'generation.{key} must be {{engine, params}}')
+        out[key] = {
+            'engine': str(stage['engine']),
+            'params': stage.get('params') or {},
+        }
+    for key in _OPTIONAL_STAGE_KEYS:
+        stage = payload.get(key)
+        if stage is None:
+            continue
+        if not isinstance(stage, dict) or 'engine' not in stage:
+            raise HTTPException(400, f'generation.{key} must be {{engine, params}} when present')
         out[key] = {
             'engine': str(stage['engine']),
             'params': stage.get('params') or {},

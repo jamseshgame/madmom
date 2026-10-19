@@ -203,7 +203,7 @@ function PresetGroup({
               <div className="text-xs text-gray-500 mt-1">
                 {Object.entries(p.generation).map(([stage, cfg]) => (
                   <span key={stage} className="mr-3">
-                    {stage}: <code>{cfg.engine}</code>
+                    {stage}: <code>{cfg?.engine}</code>
                   </span>
                 ))}
               </div>

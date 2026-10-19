@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from . import grid_librosa, grid_manual, onsets_librosa  # noqa: F401
 
+# Beat-anchored grid engines (see ../beat_grid.py). madmom and librosa are
+# imported lazily inside the runners, so registration never fails here.
+from . import grid_librosa_anchored, grid_madmom  # noqa: F401
+
 try:
     from . import grid_allinone  # noqa: F401
 except ImportError:
@@ -41,3 +45,11 @@ from . import lanes_engines  # noqa: F401
 from . import playability_engines  # noqa: F401
 
 from . import difficulty_engines  # noqa: F401
+
+# Drum column (numpy/scipy only): drum-bandsplit / drum-class / drum-gm /
+# drum-class-removal.
+from . import drums_engines  # noqa: F401
+
+# Pitched-instrument V3 engines: contour-dp lanes, phrase-consistency filter,
+# importance-score difficulty.
+from . import difficulty_importance, lanes_contour, phrase_consistency  # noqa: F401

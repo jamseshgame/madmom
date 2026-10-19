@@ -270,3 +270,33 @@ def aggregate_for_stem(stem: str) -> list[dict[str, Any]]:
                 'notes': notes,
             })
     return out
+
+
+def scoreboard_for_stem(stem: str) -> list[dict[str, Any]]:
+    """Per-preset roll-up of the feedback `aggregate_for_stem` returns, so the
+    v1…v14 / drums-v1 vs drums-v2 A/B can be read as numbers: beatmaps rated,
+    note count, mean rating, and how often each tag was applied. Sorted by
+    mean rating (desc), then by sample size."""
+    groups = aggregate_for_stem(stem)
+    by_preset: dict[str, dict[str, Any]] = {}
+    for g in groups:
+        name = g['preset_name'] or '(custom)'
+        row = by_preset.setdefault(name, {
+            'preset_name': name, 'beatmaps': 0, 'notes': 0, 'ratings': [], 'tag_counts': {},
+        })
+        row['beatmaps'] += 1
+        for note in g['notes']:
+            row['notes'] += 1
+            rating = note.get('rating')
+            if isinstance(rating, (int, float)):
+                row['ratings'].append(float(rating))
+            for tag in note.get('tags') or []:
+                row['tag_counts'][tag] = row['tag_counts'].get(tag, 0) + 1
+    out = []
+    for row in by_preset.values():
+        ratings = row.pop('ratings')
+        row['mean_rating'] = (sum(ratings) / len(ratings)) if ratings else None
+        row['tag_counts'] = dict(sorted(row['tag_counts'].items(), key=lambda kv: -kv[1]))
+        out.append(row)
+    out.sort(key=lambda r: (-(r['mean_rating'] if r['mean_rating'] is not None else -1), -r['notes']))
+    return out

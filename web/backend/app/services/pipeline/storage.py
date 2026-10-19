@@ -163,3 +163,40 @@ def move_active_to_stale(
     dest = sdir / f'{stage.value}_{_iso_stamp()}.json'
     active.rename(dest)
     return dest
+
+
+def activate_version(
+    track_dir_: Path,
+    stage: Stage,
+    stem: str | None,
+    filename: str,
+) -> dict[str, Any]:
+    """Copy an existing snapshot over the active file and return its payload.
+
+    Used by the generate-beatmap-v2 orchestrator to switch the track-level
+    grid between engines without recomputing it (each grid engine's output
+    is kept as its own version)."""
+    snapshot = versions_dir(track_dir_, stage, stem) / filename
+    payload = json.loads(snapshot.read_text())
+    active = stage_path(track_dir_, stage, stem)
+    active.parent.mkdir(parents=True, exist_ok=True)
+    active.write_text(json.dumps(payload, indent=2))
+    return payload
+
+
+def find_version(
+    track_dir_: Path,
+    stage: Stage,
+    stem: str | None,
+    engine: str,
+    params: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Newest version entry produced by `engine` (and, if given, with exactly
+    these `params`), or None."""
+    for e in _read_meta(versions_dir(track_dir_, stage, stem)):
+        if e.get('engine') != engine:
+            continue
+        if params is not None and (e.get('params') or {}) != params:
+            continue
+        return e
+    return None

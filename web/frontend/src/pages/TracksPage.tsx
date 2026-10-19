@@ -10,6 +10,7 @@ import useInstalledVersion from '../components/useInstalledVersion'
 import { BusyProvider, useExclusiveTask } from '../components/useExclusiveTask'
 import {
   GENERATION_DEFAULTS,
+  GENERATION_STAGE_FIELD_PREFIX,
   GENERATION_STAGE_LABELS,
   type GenerationStage,
   type GenerationState,
@@ -1515,10 +1516,7 @@ function TracksPageInner() {
     }
     for (const stage of Object.keys(GENERATION_STAGE_LABELS) as GenerationStage[]) {
       const sel = item.generation[stage]
-      const fieldPrefix =
-        stage === 'lanes_expert' ? 'lanes' :
-        stage === 'lanes_filtered' ? 'playability' :
-        stage
+      const fieldPrefix = GENERATION_STAGE_FIELD_PREFIX[stage]
       fd.append(`${fieldPrefix}_engine`, sel.engine)
       fd.append(`${fieldPrefix}_params`, JSON.stringify(sel.params))
     }

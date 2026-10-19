@@ -67,8 +67,12 @@ def list_engines(stage: Stage) -> list[EngineSpec]:
 
 
 def engines_catalog() -> dict[str, list[dict[str, Any]]]:
-    """Serializable engine catalog for the meta endpoint."""
-    return {
+    """Serializable engine catalog for the meta endpoint.
+
+    Besides one entry per `Stage`, exposes a `difficulty` alias for the
+    engines registered on `lanes_hard` (the three difficulty stages share one
+    engine list) so the generate modal can render a single dropdown for it."""
+    catalog = {
         stage.value: [
             {
                 'engine_id': spec.id,
@@ -79,3 +83,5 @@ def engines_catalog() -> dict[str, list[dict[str, Any]]]:
         ]
         for stage, specs in _REGISTRY.items()
     }
+    catalog['difficulty'] = list(catalog[Stage.LANES_HARD.value])
+    return catalog

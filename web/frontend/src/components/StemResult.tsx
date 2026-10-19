@@ -9,6 +9,7 @@ import useInstalledVersion from './useInstalledVersion'
 import { useExclusiveTask } from './useExclusiveTask'
 import StemGenerationModal from './StemGenerationModal'
 import {
+  GENERATION_STAGE_FIELD_PREFIX,
   GENERATION_STAGE_LABELS,
   type GenerationStage,
   type GenerationState,
@@ -482,10 +483,7 @@ export default function StemResult({ jobId, metadata }: StemResultProps) {
     }
     for (const stage of Object.keys(GENERATION_STAGE_LABELS) as GenerationStage[]) {
       const sel = item.generation[stage]
-      const fieldPrefix =
-        stage === 'lanes_expert' ? 'lanes' :
-        stage === 'lanes_filtered' ? 'playability' :
-        stage
+      const fieldPrefix = GENERATION_STAGE_FIELD_PREFIX[stage]
       formData.append(`${fieldPrefix}_engine`, sel.engine)
       formData.append(`${fieldPrefix}_params`, JSON.stringify(sel.params))
     }

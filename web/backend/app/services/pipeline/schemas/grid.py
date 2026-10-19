@@ -10,7 +10,8 @@ from ..types import StageOutputBase
 
 class TempoSegment(BaseModel):
     tick_start: int = Field(ge=0)
-    micro_bpm: int = Field(ge=40_000, le=250_000)
+    # Lead-in segments before the first beat may be fast (see beat_grid).
+    micro_bpm: int = Field(ge=20_000, le=1_000_000)
     label: Optional[str] = None
 
 
@@ -55,15 +56,21 @@ class SongGrid(StageOutputBase):
         return v
 
     @model_validator(mode='after')
-    def _segments_align_to_downbeats(self):
+    def _segments_align_to_beats(self):
+        """Tempo changes must sit on a downbeat or on a beat line.
+
+        The constant-tempo engines only ever change tempo on downbeats; the
+        beat-anchored engines (beat_grid) emit one segment per run of
+        near-constant tempo, which may start on any beat."""
         if not self.downbeats:
             return self
         downbeat_set = set(self.downbeats)
         for seg in self.tempo_segments:
             if seg.tick_start == 0:
                 continue
-            if seg.tick_start not in downbeat_set:
-                raise ValueError(
-                    f'tempo_segment tick_start={seg.tick_start} is not on a downbeat'
-                )
+            if seg.tick_start in downbeat_set or seg.tick_start % self.resolution == 0:
+                continue
+            raise ValueError(
+                f'tempo_segment tick_start={seg.tick_start} is not on a beat or downbeat'
+            )
         return self
