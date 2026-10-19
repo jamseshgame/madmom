@@ -59,7 +59,12 @@ def run_basic_pitch_pitches(
             'dominant_midi': int(leader['pitch_midi']),
             'dominant_confidence': float(min(1.0, leader['amplitude'])),
             'polyphony': len(active),
-            'all_pitches_midi': [int(n['pitch_midi']) for n in active],
+            'all_pitches_midi': sorted(int(n['pitch_midi']) for n in active),
+            # Longest active note → sustains; loudest → velocity. Both are
+            # optional fields that the contour-dp lanes / importance-score
+            # difficulty engines use and older engines ignore.
+            'duration_s': float(max(0.0, max(n['offset_s'] for n in active) - t)),
+            'velocity': float(min(1.0, leader['amplitude'])),
         })
 
     on_progress('done', 100, f'{len(per_onset)} per-onset entries')

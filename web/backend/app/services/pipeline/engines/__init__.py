@@ -49,3 +49,7 @@ from . import difficulty_engines  # noqa: F401
 # Drum column (numpy/scipy only): drum-bandsplit / drum-class / drum-gm /
 # drum-class-removal.
 from . import drums_engines  # noqa: F401
+
+# Pitched-instrument V3 engines: contour-dp lanes, phrase-consistency filter,
+# importance-score difficulty.
+from . import difficulty_importance, lanes_contour, phrase_consistency  # noqa: F401

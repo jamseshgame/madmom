@@ -236,6 +236,50 @@ BUILTIN_PRESETS: list[dict[str, Any]] = [
         },
     },
     {
+        'name': 'v13 — contour DP',
+        'description': 'madmom grid + Viterbi lane assignment (contour/register/hand-movement costs), '
+                       'sustains + real chords from basic-pitch, importance-score difficulty',
+        'builtin': True,
+        'generation': {
+            'grid': {'engine': 'madmom-downbeat', 'params': {}},
+            'onsets': {'engine': 'basic-pitch', 'params': {}},
+            'pitches': {'engine': 'basic-pitch', 'params': {}},
+            'quantized': {'engine': 'metric-weighted', 'params': {}},
+            'lanes_expert': {'engine': 'contour-dp', 'params': {}},
+            'lanes_filtered': {'engine': 'identity', 'params': {}},
+            'difficulty': {'engine': 'importance-score', 'params': {}},
+        },
+    },
+    {
+        'name': 'v13 — contour DP (pyin)',
+        'description': 'v13 with the lightweight pyin pitch engine (no basic-pitch install needed; '
+                       'no chords or sustains)',
+        'builtin': True,
+        'generation': {
+            'grid': {'engine': 'madmom-downbeat', 'params': {}},
+            'onsets': {'engine': 'librosa-onset', 'params': {'min_gap_ms': 60}},
+            'pitches': {'engine': 'yin', 'params': {}},
+            'quantized': {'engine': 'metric-weighted', 'params': {}},
+            'lanes_expert': {'engine': 'contour-dp', 'params': {}},
+            'lanes_filtered': {'engine': 'identity', 'params': {}},
+            'difficulty': {'engine': 'importance-score', 'params': {}},
+        },
+    },
+    {
+        'name': 'v14 — contour DP + phrase consistency',
+        'description': 'v13 plus repeated phrases copying the lanes of their first occurrence',
+        'builtin': True,
+        'generation': {
+            'grid': {'engine': 'madmom-downbeat', 'params': {}},
+            'onsets': {'engine': 'basic-pitch', 'params': {}},
+            'pitches': {'engine': 'basic-pitch', 'params': {}},
+            'quantized': {'engine': 'metric-weighted', 'params': {}},
+            'lanes_expert': {'engine': 'contour-dp', 'params': {}},
+            'lanes_filtered': {'engine': 'phrase-consistency', 'params': {}},
+            'difficulty': {'engine': 'importance-score', 'params': {}},
+        },
+    },
+    {
         'name': 'drums-v2',
         'description': 'Class-aware drums: band-split kick/snare/hat/tom/cymbal → fixed pads + cymbal flags, '
                        'difficulty by class removal',
