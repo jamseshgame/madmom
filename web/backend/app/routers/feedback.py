@@ -81,3 +81,10 @@ async def remove_note(track_id: str, beatmap_id: str, note_id: str,
 @router.get('/aggregate')
 async def aggregate(stem: str, _admin: dict = Depends(require_admin)) -> list[dict]:
     return feedback_service.aggregate_for_stem(stem)
+
+
+@router.get('/scoreboard')
+async def scoreboard(stem: str, _admin: dict = Depends(require_admin)) -> list[dict]:
+    """Per-preset mean rating / tag counts for a stem — the reviewer-side
+    half of the A/B ladder (the objective half is `pipeline.evaluate`)."""
+    return feedback_service.scoreboard_for_stem(stem)

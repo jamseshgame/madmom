@@ -10,6 +10,21 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.18.0',
+    date: '2026-10-19',
+    summary:
+      'Pipeline V3 engines, shipped as new presets (v12, v13, v14, drums-v2) so they can be generated side by side with v1–v11 and drums-v1 and reviewed in the same editor before anything is retired. The headline fix is the tempo grid: the old grid engines kept only a BPM number anchored at t=0, so detected beats never landed on tick lines, metric weights were close to random (near-empty Easy/Medium, growing drift) and every downstream engine was being judged on a broken foundation. Drums get a class-aware column and real Pro Drums output; guitar gets lane assignment as an optimisation instead of percentile bins.',
+    entries: [
+      { kind: 'added', text: 'Beat-anchored tempo grids. New grid engines madmom-downbeat (this repo\'s RNN+DBN downbeat tracker — bar positions, so downbeats and time signature come from the model), librosa-anchored and all-in-one-anchored build a piecewise tempo map where every detected beat sits on a tick multiple. Preset v12 — grid only runs the v1 engines on the new grid to isolate its effect.' },
+      { kind: 'added', text: 'Generate modal: Tempo grid and Difficulty reduction dropdowns. Presets may carry optional grid / difficulty stages; a chosen grid engine\'s version is activated (computed once, then reused) before the stem stages run. Grid is track-level, so switching engines marks other stems stale — expected during an A/B.' },
+      { kind: 'added', text: 'drums-v2: band-split kick/snare/hat/tom/cymbal detection (simultaneous hits become separate events), classes carried as General MIDI drum numbers, fixed pad lanes, and difficulty by class removal (Easy = kick/snare on beats, Medium = + 8th hats, Hard = everything but 16th hats). Serializer writes Pro Drums notation with the 66/68 cymbal modifiers — without them the game rendered V2 hi-hats and crashes as toms (the editor self-migrated, the game did not) — and keeps kick + at most two pads per tick.' },
+      { kind: 'added', text: 'v13 — contour DP: Viterbi lane assignment (up means up, repeated pitches keep their lane, hands don\'t leap on fast notes, slow register window for cross-song consistency, open notes for far-below pitches), adjacent-pair chords from real polyphony, sustains from note durations, and importance-score difficulty (notes-per-second target per 4 bars by metric weight, loudness, sustain, chord and bar start). A pyin variant exists for installs without basic-pitch.' },
+      { kind: 'added', text: 'v14 — phrase consistency: repeated phrases (same intervals + rhythm) copy the lanes of their first occurrence, with edits recorded like the other playability filters.' },
+      { kind: 'added', text: 'Objective eval harness: web/backend/scripts/eval_chart.py REF.chart CAND.chart… scores onset F1 (±50 ms), per-lane drum F1, contour agreement, bar self-consistency, density and chord/sustain rates against a reference chart. GET /api/feedback/scoreboard?stem= rolls reviewer ratings and tags up per preset.' },
+      { kind: 'changed', text: 'Quantizer forwards all_pitches_midi, duration_s, velocity and confidence from the pitch stage; basic-pitch pitches emit note durations. Audio loading falls back to soundfile/ffmpeg when librosa is absent.' },
+    ],
+  },
+  {
     version: '1.17.0',
     date: '2026-09-10',
     summary:

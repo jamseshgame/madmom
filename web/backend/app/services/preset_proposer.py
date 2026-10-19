@@ -38,7 +38,9 @@ Return JSON with this exact shape:
         "pitches":        {"engine": "...", "params": {...}},
         "quantized":      {"engine": "...", "params": {...}},
         "lanes_expert":   {"engine": "...", "params": {...}},
-        "lanes_filtered": {"engine": "...", "params": {...}}
+        "lanes_filtered": {"engine": "...", "params": {...}},
+        "grid":           {"engine": "...", "params": {...}},   // optional — track-level tempo grid
+        "difficulty":     {"engine": "...", "params": {...}}    // optional — Hard/Medium/Easy reduction
       },
       "rationale": "<paragraph citing specific feedback by (track_name, preset_name) and explaining why this preset addresses it>"
     }
@@ -103,7 +105,10 @@ def _build_system_prompt(stem: str) -> list[dict]:
     prefix = (
         f"You are an audio engineering assistant proposing new chart-generation presets "
         f"for the Jamsesh rhythm game. Each preset configures five pipeline stages "
-        f"(onsets, pitches, quantized, lanes_expert, lanes_filtered). You will be given "
+        f"(onsets, pitches, quantized, lanes_expert, lanes_filtered) plus two optional ones "
+        f"(grid — the track-level tempo grid; difficulty — the Hard/Medium/Easy reduction). "
+        f"Drum stems need the drum-specific engines (drum-bandsplit / drum-class / drum-gm / "
+        f"drum-class-removal); pitched stems should prefer a beat-anchored grid engine. You will be given "
         f"player feedback on charts generated with the existing presets for the **{stem}** "
         f"stem; your job is to propose up to N new presets that address recurring complaints "
         f"and aren't already covered.\n\n"
