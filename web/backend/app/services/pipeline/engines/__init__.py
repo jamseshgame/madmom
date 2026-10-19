@@ -45,3 +45,7 @@ from . import lanes_engines  # noqa: F401
 from . import playability_engines  # noqa: F401
 
 from . import difficulty_engines  # noqa: F401
+
+# Drum column (numpy/scipy only): drum-bandsplit / drum-class / drum-gm /
+# drum-class-removal.
+from . import drums_engines  # noqa: F401

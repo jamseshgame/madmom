@@ -218,6 +218,39 @@ BUILTIN_PRESETS: list[dict[str, Any]] = [
             'lanes_filtered': {'engine': 'identity', 'params': {}},
         },
     },
+    # ── V3 family: the "from scratch" design, shipped as presets so it can be
+    # A/B'd against v1–v11 on the same stem in the editor. Each one isolates a
+    # change: v12 = grid fix only; v13 = + transcription + DP lanes; v14 = + phrase
+    # consistency; drums-v2 = the class-aware drum column.
+    {
+        'name': 'v12 — grid only',
+        'description': 'v1 engines on a beat-anchored madmom grid — isolates the effect of the grid fix',
+        'builtin': True,
+        'generation': {
+            'grid': {'engine': 'madmom-downbeat', 'params': {}},
+            'onsets': {'engine': 'librosa-onset', 'params': {}},
+            'pitches': {'engine': 'yin', 'params': {}},
+            'quantized': {'engine': 'metric-weighted', 'params': {}},
+            'lanes_expert': {'engine': 'section-sliding', 'params': {}},
+            'lanes_filtered': {'engine': 'identity', 'params': {}},
+        },
+    },
+    {
+        'name': 'drums-v2',
+        'description': 'Class-aware drums: band-split kick/snare/hat/tom/cymbal → fixed pads + cymbal flags, '
+                       'difficulty by class removal',
+        'builtin': True,
+        'stems': ['drums'],
+        'generation': {
+            'grid': {'engine': 'madmom-downbeat', 'params': {}},
+            'onsets': {'engine': 'drum-bandsplit', 'params': {}},
+            'pitches': {'engine': 'drum-class', 'params': {}},
+            'quantized': {'engine': 'metric-weighted', 'params': {}},
+            'lanes_expert': {'engine': 'drum-gm', 'params': {}},
+            'lanes_filtered': {'engine': 'identity', 'params': {}},
+            'difficulty': {'engine': 'drum-class-removal', 'params': {}},
+        },
+    },
 ]
 
 
