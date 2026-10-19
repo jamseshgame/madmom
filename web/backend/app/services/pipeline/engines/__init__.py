@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from . import grid_librosa, grid_manual, onsets_librosa  # noqa: F401
 
+# Beat-anchored grid engines (see ../beat_grid.py). madmom and librosa are
+# imported lazily inside the runners, so registration never fails here.
+from . import grid_librosa_anchored, grid_madmom  # noqa: F401
+
 try:
     from . import grid_allinone  # noqa: F401
 except ImportError:

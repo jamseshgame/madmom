@@ -45,7 +45,7 @@ def test_rejects_decreasing_tempo_segments():
 
 def test_rejects_micro_bpm_out_of_range():
     p = _valid_payload()
-    p['tempo_segments'][0]['micro_bpm'] = 39_999
+    p['tempo_segments'][0]['micro_bpm'] = 19_999
     with pytest.raises(ValueError, match='micro_bpm'):
         SongGrid(**p)
 
