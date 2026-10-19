@@ -17,6 +17,11 @@ class QuantizedEvent(BaseModel):
     dominant_midi: Optional[int] = None
     polyphony: int = Field(default=1, ge=1)
     dropped: bool = False
+    # Optional S3 pass-through fields (see quantized_engines._PASSTHROUGH_KEYS).
+    all_pitches_midi: list[int] = Field(default_factory=list)
+    duration_s: Optional[float] = Field(default=None, ge=0)
+    dominant_confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    velocity: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 
 
 class QuantizedEvents(StageOutputBase):

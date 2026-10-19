@@ -20,6 +20,10 @@ _NEAREST_PARAMS = {
 }
 
 
+# S3 per-onset fields forwarded onto each quantized event when present.
+_PASSTHROUGH_KEYS = ('all_pitches_midi', 'duration_s', 'dominant_confidence', 'velocity')
+
+
 def _grid_to_segments(grid_payload: dict) -> tuple[list[dict], int]:
     markers = [{'tick': t['tick_start'], 'micro_bpm': t['micro_bpm']}
                for t in grid_payload['tempo_segments']]
@@ -76,7 +80,7 @@ def _run_quant(engine_id: str, upstream, params, on_progress, scorer=None) -> di
             dist_ms = abs(t_post - t_pre) * 1000.0
         dropped = dist_ms > max_snap_ms
         weight = _compute_metric_weight(tick, grid_payload) if not dropped else 0
-        events.append({
+        ev = {
             'tick': int(tick),
             'time_s_pre': t_pre,
             'time_s_post': t_post,
@@ -85,7 +89,14 @@ def _run_quant(engine_id: str, upstream, params, on_progress, scorer=None) -> di
             'dominant_midi': entry.get('dominant_midi'),
             'polyphony': int(entry.get('polyphony', 1)),
             'dropped': dropped,
-        })
+        }
+        # Pass richer S3 fields through untouched so downstream engines that
+        # understand them (drum classes, chord intervals, sustains, velocity)
+        # can use them. Older lane engines ignore the extra keys.
+        for key in _PASSTHROUGH_KEYS:
+            if entry.get(key) is not None:
+                ev[key] = entry[key]
+        events.append(ev)
 
     on_progress('done', 100, f'{len(events)} events ({sum(1 for e in events if e["dropped"])} dropped)')
     return {

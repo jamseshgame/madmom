@@ -64,3 +64,23 @@ def test_metric_weight_assignment():
     )
     weights = [e['metric_weight'] for e in out['events']]
     assert weights == [4, 3, 2, 1]
+
+
+def test_quantizer_passes_rich_s3_fields_through():
+    from app.services.pipeline.engines.quantized_engines import run_nearest_grid
+    grid = {
+        'resolution': 192,
+        'tempo_segments': [{'tick_start': 0, 'micro_bpm': 120000}],
+        'downbeats': [0, 768],
+    }
+    pitches = {'per_onset': [
+        {'time_s': 0.0, 'dominant_midi': 36, 'polyphony': 2,
+         'all_pitches_midi': [36, 42], 'duration_s': 0.4, 'velocity': 0.8},
+        {'time_s': 0.5, 'dominant_midi': None, 'polyphony': 1, 'all_pitches_midi': []},
+    ]}
+    out = run_nearest_grid(None, {'grid': grid, 'pitches': pitches}, {}, lambda *a: None)
+    ev0, ev1 = out['events']
+    assert ev0['all_pitches_midi'] == [36, 42]
+    assert ev0['duration_s'] == 0.4
+    assert ev0['velocity'] == 0.8
+    assert 'duration_s' not in ev1

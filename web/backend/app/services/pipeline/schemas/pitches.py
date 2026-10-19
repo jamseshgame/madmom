@@ -14,6 +14,9 @@ class PerOnset(BaseModel):
     dominant_confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     polyphony: int = Field(ge=1)
     all_pitches_midi: list[int] = Field(default_factory=list)
+    # Optional: note duration (for sustains) and normalised loudness.
+    duration_s: Optional[float] = Field(default=None, ge=0)
+    velocity: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 
 
 class PitchList(StageOutputBase):

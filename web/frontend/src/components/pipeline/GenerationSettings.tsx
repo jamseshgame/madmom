@@ -401,7 +401,11 @@ export default function GenerationSettings(props: GenerationSettingsProps) {
       {showCards ? (
         <div className="space-y-3">
           {(Object.keys(GENERATION_STAGE_LABELS) as GenerationStage[]).map((stage) => {
-            const stageEngines = engines[stage] || []
+            // The grid stage offers an extra "Auto" choice (engine '') that
+            // keeps the legacy behaviour: reuse the active grid, else librosa.
+            const stageEngines = stage === 'grid'
+              ? [{ engine_id: '', display_name: 'Auto — reuse active grid (legacy)', params_schema: {} }, ...(engines[stage] || [])]
+              : (engines[stage] || [])
             const stageSelection = generation[stage]
             const spec = stageEngines.find((e) => e.engine_id === stageSelection.engine)
             return (

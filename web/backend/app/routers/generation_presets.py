@@ -22,6 +22,11 @@ router = APIRouter(prefix='/api/generation-presets', tags=['generation-presets']
 
 
 _STAGE_KEYS = ('onsets', 'pitches', 'quantized', 'lanes_expert', 'lanes_filtered')
+# Optional stage keys. `grid` selects the track-level tempo-grid engine
+# (absent = reuse whatever grid is active, else librosa-beat); `difficulty`
+# selects the Hard/Medium/Easy reduction engine (absent = metric-weight).
+# Presets that pre-date these keys keep working unchanged.
+_OPTIONAL_STAGE_KEYS = ('grid', 'difficulty')
 
 
 def _presets_path() -> Path:
@@ -224,6 +229,16 @@ def _validate_generation(payload: Any) -> dict[str, Any]:
         stage = payload.get(key)
         if not isinstance(stage, dict) or 'engine' not in stage:
             raise HTTPException(400, f'generation.{key} must be {{engine, params}}')
+        out[key] = {
+            'engine': str(stage['engine']),
+            'params': stage.get('params') or {},
+        }
+    for key in _OPTIONAL_STAGE_KEYS:
+        stage = payload.get(key)
+        if stage is None:
+            continue
+        if not isinstance(stage, dict) or 'engine' not in stage:
+            raise HTTPException(400, f'generation.{key} must be {{engine, params}} when present')
         out[key] = {
             'engine': str(stage['engine']),
             'params': stage.get('params') or {},

@@ -67,8 +67,48 @@ def _clamp_frets(frets: list[int], collapse_wide: bool = True) -> list[int]:
     return sorted(set(frets))
 
 
+# ── Drum lane semantics ───────────────────────────────────────────────────
+# Mirrors the editor's DRUM_LANE_EMIT in web/frontend/src/chart/chartio.ts and
+# the game's Pro Drums parser: lanes are 0 Kick, 1 Snare, 2 Hi-hat, 3 Tom,
+# 4 Cymbal (crash/ride), 5 Floor Tom. Lanes 2 and 4 are pads that only read
+# as cymbals when a same-tick modifier note (66 yellow / 68 green) is present;
+# without it the game renders them as toms. Lane 5 rides the bare green pad.
+DRUM_LANE_EMIT: dict[int, tuple[int, int | None]] = {
+    0: (0, None),
+    1: (1, None),
+    2: (2, 66),
+    3: (3, None),
+    4: (4, 68),
+    5: (4, None),
+}
+# When more than two pads land on one tick, drop in this order (most
+# expendable first). Hi-hat is quasi-continuous so it goes first; the kick is
+# never dropped because the editor's rule is "max 2 pads *plus* kick".
+_DRUM_PAD_DROP_ORDER = (2, 5, 3, 4, 1)
+_DRUM_MAX_PADS = 2
+
+
+def _clamp_drum_lanes(lanes: list[int]) -> list[int]:
+    """Reduce a tick's drum lanes to kick + at most two pads."""
+    lanes_set = {l for l in lanes if l in DRUM_LANE_EMIT}
+    pads = [l for l in lanes_set if l != 0]
+    # Floor tom (5) and cymbal (4) share the green pad — they cannot coexist on
+    # a tick, and the cymbal carries more information.
+    if 4 in pads and 5 in pads:
+        pads.remove(5)
+    for drop in _DRUM_PAD_DROP_ORDER:
+        if len(pads) <= _DRUM_MAX_PADS:
+            break
+        if drop in pads:
+            pads.remove(drop)
+    out = sorted(pads)
+    if 0 in lanes_set:
+        out.insert(0, 0)
+    return out
+
+
 def _serialize_difficulty(section_name: str, lanes_payload: dict[str, Any],
-                          collapse_wide: bool = True) -> str:
+                          collapse_wide: bool = True, drums: bool = False) -> str:
     lanes = lanes_payload.get('lanes', [])
     # Merge every event on a tick before emitting: polyphonic presets stack
     # several events on one tick, and only the union tells us the true chord.
@@ -82,6 +122,14 @@ def _serialize_difficulty(section_name: str, lanes_payload: dict[str, Any],
     rows = []
     for tick, frets in frets_by_tick.items():
         sustain = sustain_by_tick[tick]
+        if drums:
+            # Drums never sustain; emit pad + cymbal modifier per lane.
+            for lane in _clamp_drum_lanes(list(frets)):
+                pad, modifier = DRUM_LANE_EMIT[lane]
+                rows.append((tick, pad, f'N {pad} 0'))
+                if modifier is not None:
+                    rows.append((tick, modifier, f'N {modifier} 0'))
+            continue
         for fret in _clamp_frets(list(frets), collapse_wide):
             rows.append((tick, fret, f'N {fret} {sustain}'))
     rows.sort()
@@ -95,10 +143,18 @@ def serialize_chart(
     song_name: str,
     resolution: int,
     collapse_wide: bool = True,
+    drums: bool = False,
 ) -> str:
-    """Serialize lanes to a .chart. ``collapse_wide`` enforces adjacent-only
-    chords (guitar); pass False for drums, whose simultaneous kick+cymbal hits
-    are real non-adjacent chords, not artifacts to collapse."""
+    """Serialize lanes to a .chart.
+
+    ``collapse_wide`` enforces adjacent-only chords (guitar). ``drums`` switches
+    to Pro Drums semantics: lanes are fixed pads (see ``DRUM_LANE_EMIT``), the
+    hi-hat and cymbal lanes get their 66/68 modifier notes so the game reads
+    them as cymbals rather than toms, sustains are dropped, and a tick keeps the
+    kick plus at most two pads (the editor's drum R1 rule). ``drums=True``
+    implies ``collapse_wide=False``; the older ``collapse_wide=False`` alone is
+    kept for callers that pre-date drum mode.
+    """
     parts = [
         _serialize_song(song_name, resolution),
         _serialize_synctrack(grid),
@@ -106,5 +162,8 @@ def serialize_chart(
     ]
     for section in ('ExpertSingle', 'HardSingle', 'MediumSingle', 'EasySingle'):
         if section in lanes_per_difficulty:
-            parts.append(_serialize_difficulty(section, lanes_per_difficulty[section], collapse_wide))
+            parts.append(_serialize_difficulty(
+                section, lanes_per_difficulty[section],
+                collapse_wide=collapse_wide and not drums, drums=drums,
+            ))
     return ''.join(parts)

@@ -701,6 +701,15 @@ async def generate_beatmap_v2(
     lanes_params: str = Form('{}'),
     playability_engine: str = Form('identity'),
     playability_params: str = Form('{}'),
+    # Track-level grid engine. Empty = legacy behaviour (reuse the active grid
+    # if one exists, else compute one with librosa-beat). When set, the grid
+    # version produced by that engine is activated (computed on first use, then
+    # reused) before the stem stages run — so presets can A/B grid engines.
+    grid_engine: str = Form(''),
+    grid_params: str = Form('{}'),
+    # Difficulty-reduction engine (lanes_hard/medium/easy).
+    difficulty_engine: str = Form('metric-weight'),
+    difficulty_params: str = Form('{}'),
     # Optional preset name — recorded on the beatmap so the picker badges it
     preset: str = Form(''),
 ):
@@ -738,6 +747,9 @@ async def generate_beatmap_v2(
         'lanes_expert': (lanes_engine, _parse('lanes_params', lanes_params)),
         'lanes_filtered': (playability_engine, _parse('playability_params', playability_params)),
     }
+    grid_sel = (grid_engine.strip(), _parse('grid_params', grid_params))
+    difficulty_sel = (difficulty_engine.strip() or 'metric-weight',
+                      _parse('difficulty_params', difficulty_params))
 
     song_name = name or f'{track.name} ({stem})'
     song_artist = artist or track.artist or 'Unknown'
@@ -779,7 +791,7 @@ async def generate_beatmap_v2(
     async def _run():
         from ..services.pipeline.registry import Stage
         from ..services.pipeline.runner import run_stage
-        from ..services.pipeline.storage import stage_path
+        from ..services.pipeline.storage import activate_version, find_version, stage_path
         from ..services.pipeline.serialize import serialize_chart
         from ..services.audio import convert_to_ogg
         from ..services.chart_generator import write_chart_song_ini
@@ -797,9 +809,23 @@ async def generate_beatmap_v2(
         try:
             td = tracks_mod.TRACKS_DIR / track_id
 
-            # S1: Grid (track-level) — reuse if active.json exists
+            # S1: Grid (track-level). With an explicit grid engine, activate
+            # the matching version if one exists (so repeated A/B runs don't
+            # recompute) or compute it; otherwise keep the legacy behaviour.
             grid_p = stage_path(td, Stage.GRID, None)
-            if not grid_p.exists():
+            g_eng, g_params = grid_sel
+            if g_eng:
+                existing = find_version(td, Stage.GRID, None, g_eng, g_params)
+                if existing is not None:
+                    await job.send('grid', 2, f'Activating {g_eng} grid…')
+                    activate_version(td, Stage.GRID, None, existing['filename'])
+                else:
+                    await job.send('grid', 2, f'Computing tempo grid ({g_eng})…')
+                    await loop.run_in_executor(None, lambda: run_stage(
+                        Stage.GRID, td, None, g_eng, g_params,
+                        make_on_progress(2, 10),
+                    ))
+            elif not grid_p.exists():
                 await job.send('grid', 2, 'Computing tempo grid…')
                 await loop.run_in_executor(None, lambda: run_stage(
                     Stage.GRID, td, None, 'librosa-beat', {},
@@ -820,10 +846,11 @@ async def generate_beatmap_v2(
                     st, td, stem, eng, p, make_on_progress(lo, hi),
                 ))
 
-            # S7: difficulties — defaults, run once (writes all three sub-stages)
-            await job.send('lanes_hard', 78, 'Building Hard/Medium/Easy…')
+            # S7: difficulties — run once (writes all three sub-stages)
+            d_eng, d_params = difficulty_sel
+            await job.send('lanes_hard', 78, f'Building Hard/Medium/Easy ({d_eng})…')
             await loop.run_in_executor(None, lambda: run_stage(
-                Stage.LANES_HARD, td, stem, 'metric-weight', {},
+                Stage.LANES_HARD, td, stem, d_eng, d_params,
                 make_on_progress(78, 90),
             ))
 
@@ -848,7 +875,7 @@ async def generate_beatmap_v2(
             chart_text = serialize_chart(
                 grid=grid, lanes_per_difficulty=lanes_per_difficulty,
                 song_name=song_name, resolution=int(grid['resolution']),
-                collapse_wide=(stem != 'drums'),
+                collapse_wide=(stem != 'drums'), drums=(stem == 'drums'),
             )
             output_dir.mkdir(parents=True, exist_ok=True)
             chart_path = str(output_dir / 'notes.chart')

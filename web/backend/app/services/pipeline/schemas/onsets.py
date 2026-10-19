@@ -12,6 +12,7 @@ class Onset(BaseModel):
     time_s: float = Field(ge=0)
     confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     source_note_id: Optional[int] = None
+    duration_s: Optional[float] = Field(default=None, ge=0)
 
 
 class OnsetList(StageOutputBase):
