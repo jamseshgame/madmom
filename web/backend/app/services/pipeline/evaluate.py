@@ -88,7 +88,10 @@ def parse_chart(text: str) -> Chart:
 
 
 def _is_note_section(name: str) -> bool:
-    return any(name.startswith(d) for d in DIFFICULTIES) and any(name.endswith(s) or name.rstrip('0123456789').endswith(s) for s in _INSTRUMENT_SUFFIXES)
+    if not any(name.startswith(d) for d in DIFFICULTIES):
+        return False
+    base = name.rstrip('0123456789')  # [ExpertDrums2] → ExpertDrums
+    return any(base.endswith(s) for s in _INSTRUMENT_SUFFIXES)
 
 
 def is_drum_section(name: str) -> bool:
@@ -238,13 +241,16 @@ def evaluate_section(ref: Chart, cand: Chart, ref_name: str, cand_name: str, tol
             out['exact_lane_accuracy'] = round(same / len(pairs), 4)
         out['self_consistency'] = self_consistency(
             [(t, tuple(sorted(c_lanes2[t]['frets']))) for t in c_ticks], cand.bar_ticks())
+        def _rate(lanes_map, ticks, pred) -> float:
+            return round(sum(1 for t in ticks if pred(lanes_map[t])) / len(ticks), 4) if ticks else 0.0
+
         out['chord_rate'] = {
-            'reference': round(sum(1 for t in r_ticks if len(r_lanes2[t]['frets']) > 1) / len(r_ticks), 4) if r_ticks else 0.0,
-            'candidate': round(sum(1 for t in c_ticks if len(c_lanes2[t]['frets']) > 1) / len(c_ticks), 4) if c_ticks else 0.0,
+            'reference': _rate(r_lanes2, r_ticks, lambda e: len(e['frets']) > 1),
+            'candidate': _rate(c_lanes2, c_ticks, lambda e: len(e['frets']) > 1),
         }
         out['sustain_rate'] = {
-            'reference': round(sum(1 for t in r_ticks if r_lanes2[t]['sustain'] > 0) / len(r_ticks), 4) if r_ticks else 0.0,
-            'candidate': round(sum(1 for t in c_ticks if c_lanes2[t]['sustain'] > 0) / len(c_ticks), 4) if c_ticks else 0.0,
+            'reference': _rate(r_lanes2, r_ticks, lambda e: e['sustain'] > 0),
+            'candidate': _rate(c_lanes2, c_ticks, lambda e: e['sustain'] > 0),
         }
         r_dur = max(r_t[-1] - r_t[0], 1e-6) if r_t else 1.0
         c_dur = max(c_t[-1] - c_t[0], 1e-6) if c_t else 1.0
@@ -295,13 +301,15 @@ def format_report(result: dict[str, Any]) -> str:
     lines = [f"tolerance ±{result['tolerance_ms']:.0f} ms"]
     for diff, r in result['difficulties'].items():
         o = r['onsets']
+        c, d = r['counts'], r['density_per_sec']
         lines.append(f"{diff:7s} onsets P={o['precision']:.2f} R={o['recall']:.2f} F1={o['f1']:.2f}  "
-                     f"n ref/cand/matched={r['counts']['reference']}/{r['counts']['candidate']}/{r['counts']['matched']}  "
-                     f"density ref/cand={r['density_per_sec']['reference']:.2f}/{r['density_per_sec']['candidate']:.2f}")
+                     f"n ref/cand/matched={c['reference']}/{c['candidate']}/{c['matched']}  "
+                     f"density ref/cand={d['reference']:.2f}/{d['candidate']:.2f}")
         if r['drums']:
             lanes = '  '.join(f"{k}:F1={v['f1']:.2f}({v['ref']}/{v['cand']})" for k, v in r['lanes'].items())
             lines.append(f"        lanes {lanes}")
-            lines.append(f"        lane-set acc={r.get('lane_set_accuracy')}  self-consistency={r.get('self_consistency')}")
+            lines.append(f"        lane-set acc={r.get('lane_set_accuracy')}  "
+                         f"self-consistency={r.get('self_consistency')}")
         else:
             lines.append(f"        contour={r.get('contour_agreement')}  exact-lane={r.get('exact_lane_accuracy')}  "
                          f"self-consistency={r.get('self_consistency')}  chords ref/cand="

@@ -150,7 +150,7 @@ def test_importance_score_respects_density_targets_and_floors():
 
 def test_importance_score_caps_chords_on_easy():
     lanes = [{'tick': 0, 'frets': [1, 2], 'sustain': 0}, {'tick': 768, 'frets': [2, 3], 'sustain': 0}]
-    out = run_importance_score(None, {'grid': _GRID, 'lanes_filtered': {'lanes': lanes, 'metric_weights': {'0': 4, '768': 4}}},
-                               {}, _noop)
+    upstream = {'grid': _GRID, 'lanes_filtered': {'lanes': lanes, 'metric_weights': {'0': 4, '768': 4}}}
+    out = run_importance_score(None, upstream, {}, _noop)
     assert all(len(e['frets']) == 1 for e in out['by_difficulty']['easy']['lanes'])
     assert all(len(e['frets']) == 2 for e in out['by_difficulty']['hard']['lanes'])

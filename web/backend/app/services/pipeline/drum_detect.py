@@ -232,7 +232,8 @@ def detect_drum_hits(
     # ── hihat vs cymbal (high band): decay + loudness, with snare-bleed and
     #    post-cymbal-decay suppression
     high_strengths = np.asarray([s for _f, s in peaks['high']]) if peaks['high'] else np.asarray([])
-    loud_cut = float(np.percentile(high_strengths, float(p['cymbal_velocity_pct']))) if len(high_strengths) > 3 else np.inf
+    loud_cut = (float(np.percentile(high_strengths, float(p['cymbal_velocity_pct'])))
+                if len(high_strengths) > 3 else np.inf)
     f15 = max(1, int(round(0.015 / hop_s)))
     f150 = max(1, int(round(0.150 / hop_s)))
     coinc = max(1, int(round(0.020 / hop_s)))

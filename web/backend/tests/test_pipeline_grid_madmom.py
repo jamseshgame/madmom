@@ -24,7 +24,8 @@ def fake_tracker(monkeypatch):
     arr = np.column_stack([times, positions]).astype(np.float64)
     monkeypatch.setattr(grid_madmom, 'track_beats_madmom', lambda *a, **k: arr)
     monkeypatch.setattr(grid_madmom, 'audio_duration_s', lambda p: 12.0)
-    monkeypatch.setattr(grid_madmom, 'optional_structure', lambda p, n, want_key=True: ([0.0, 4.8], {'tonic': 'A', 'mode': 'minor', 'confidence': 0.7}))
+    monkeypatch.setattr(grid_madmom, 'optional_structure',
+                        lambda p, n, want_key=True: ([0.0, 4.8], {'tonic': 'A', 'mode': 'minor', 'confidence': 0.7}))
     return arr
 
 

@@ -38,11 +38,13 @@ _PARAMS = {
     'easy': {'type': 'enum', 'options': [], 'default': DEFAULT_TARGETS['easy'], 'label': 'Easy targets'},
     'window_bars': {'type': 'number', 'min': 1, 'max': 16, 'step': 1, 'default': 4,
                     'label': 'Density window (bars)'},
-    'w_metric': {'type': 'number', 'min': 0, 'max': 5, 'step': 0.25, 'default': 1.0, 'label': 'Weight: metric position'},
+    'w_metric': {'type': 'number', 'min': 0, 'max': 5, 'step': 0.25, 'default': 1.0,
+                 'label': 'Weight: metric position'},
     'w_velocity': {'type': 'number', 'min': 0, 'max': 5, 'step': 0.25, 'default': 1.5, 'label': 'Weight: loudness'},
     'w_sustain': {'type': 'number', 'min': 0, 'max': 5, 'step': 0.25, 'default': 1.0, 'label': 'Bonus: sustained note'},
     'w_chord': {'type': 'number', 'min': 0, 'max': 5, 'step': 0.25, 'default': 0.5, 'label': 'Bonus: chord'},
-    'w_bar_start': {'type': 'number', 'min': 0, 'max': 5, 'step': 0.25, 'default': 1.0, 'label': 'Bonus: first note in bar'},
+    'w_bar_start': {'type': 'number', 'min': 0, 'max': 5, 'step': 0.25, 'default': 1.0,
+                    'label': 'Bonus: first note in bar'},
 }
 
 
