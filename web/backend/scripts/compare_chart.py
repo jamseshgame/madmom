@@ -46,10 +46,16 @@ def _load_auto(path: Path, workdir: Path) -> tuple[str, Path | None]:
             zf.extractall(folder)
     else:
         folder = path
-    chart = next(folder.rglob('notes.chart'), None)
+    # Accept hand-packed zips: 'notes (1).chart', nested folders, macOS
+    # resource forks ('__MACOSX/._notes.chart') excluded.
+    charts = [p for p in folder.rglob('*.chart')
+              if p.is_file() and not p.name.startswith('._') and '__MACOSX' not in p.parts]
+    charts.sort(key=lambda p: (p.name.lower() != 'notes.chart', len(p.parts)))
+    chart = charts[0] if charts else None
     if chart is None:
-        raise SystemExit(f'{path}: no notes.chart found')
-    audio = next((p for p in chart.parent.iterdir() if p.suffix.lower() in AUDIO_EXTS), None)
+        raise SystemExit(f'{path}: no .chart found')
+    audio = next((p for p in sorted(chart.parent.iterdir())
+                  if p.suffix.lower() in AUDIO_EXTS and not p.name.startswith('._')), None)
     return chart.read_text(encoding='utf-8', errors='replace'), audio
 
 

@@ -73,7 +73,7 @@ def test_drum_class_attaches_gm_numbers():
 def test_gm_to_lane_mapping():
     assert gm_to_lane(36) == 0 and gm_to_lane(38) == 1 and gm_to_lane(42) == 2
     assert gm_to_lane(45) == 3 and gm_to_lane(49) == 4 and gm_to_lane(51) == 4
-    assert gm_to_lane(41) == 3 and gm_to_lane(41, floor_tom_lane5=True) == 5
+    assert gm_to_lane(41) == 5 and gm_to_lane(41, floor_tom_lane5=False) == 3  # floor tom → green pad
     assert gm_to_lane(60) is None
 
 
@@ -111,9 +111,57 @@ def test_drum_class_removal_steps_down_like_a_human_chart():
     easy = [(e['tick'], e['frets'][0]) for e in bd['easy']['lanes']]
     medium = [(e['tick'], e['frets'][0]) for e in bd['medium']['lanes']]
     hard = [(e['tick'], e['frets'][0]) for e in bd['hard']['lanes']]
-    assert easy == [(0, 0), (0, 4), (192, 1), (384, 0), (576, 1)][:len(easy)] and len(easy) >= 4
-    assert all(lane != 2 for _, lane in easy)
-    # Medium: hats only on beats (weight ≥ 3), max 2 pads per tick.
-    assert (96, 2) not in medium and (0, 2) in medium
-    assert len(hard) == len(lanes)
-    assert DEFAULT_DRUM_DIFFICULTY['easy']['2'] is None
+    # Harmonix-derived policy: Easy keeps snare + hats + crash on beats, kick
+    # only on downbeats; Medium keeps beat-position notes of every class;
+    # Hard keeps 8ths but drops 16ths.
+    assert (0, 0) in easy and (384, 0) not in easy          # kick: downbeat only
+    assert (192, 1) in easy and (576, 1) in easy            # snares on beats
+    assert (0, 2) in easy and (96, 2) not in easy           # hats on beats, not 8ths
+    assert (0, 4) in easy                                   # crash on the downbeat
+    assert (96, 2) not in medium and (0, 2) in medium and (384, 0) in medium
+    assert len(hard) == len(lanes)                          # nothing here is a 16th
+    assert DEFAULT_DRUM_DIFFICULTY['easy']['2'] == 3 and DEFAULT_DRUM_DIFFICULTY['hard']['0'] == 2
+
+
+def test_hard_drops_sixteenths():
+    lanes = [{'tick': 0, 'frets': [2], 'sustain': 0}, {'tick': 48, 'frets': [2], 'sustain': 0},
+             {'tick': 96, 'frets': [2], 'sustain': 0}]
+    weights = {'0': 4, '48': 1, '96': 2}
+    out = run_drum_class_removal(None, {'lanes_filtered': {'lanes': lanes, 'metric_weights': weights}}, {}, _noop)
+    assert [e['tick'] for e in out['by_difficulty']['hard']['lanes']] == [0, 96]
+    assert [e['tick'] for e in out['by_difficulty']['medium']['lanes']] == [0]
+
+
+def test_tom_fundamentals_and_floor_split():
+    from app.services.pipeline.engines.drums_engines import split_floor_toms, tom_fundamentals
+    sr = 22050
+    y = np.zeros(sr * 2, dtype=np.float32)
+    hits = [(0.2, 80.0), (0.6, 80.0), (1.0, 180.0), (1.4, 180.0)]
+    for t, f in hits:
+        n = int(0.25 * sr)
+        i = int(t * sr)
+        y[i:i + n] += (0.8 * np.sin(2 * np.pi * f * np.arange(n) / sr) * np.exp(-np.arange(n) / (0.12 * sr))).astype(np.float32)
+    f0s = tom_fundamentals(y, sr, [t for t, _ in hits] + [1.9])
+    assert f0s[4] is None  # silence
+    for (_, f), got in zip(hits, f0s):
+        assert abs(got - f) < 6
+    assert split_floor_toms(f0s[:4], 115) == [True, True, False, False]
+    # Adaptive: a bimodal set is split between the modes even with an off threshold.
+    many = [78.0, 82.0, 80.0, 79.0, 81.0, 83.0] * 2 + [170.0, 175.0, 180.0, 172.0, 178.0, 176.0] * 2
+    assert split_floor_toms(many, 250) == [True] * 12 + [False] * 12
+
+
+def test_drum_class_assigns_floor_tom_gm(tmp_path, monkeypatch):
+    from app.services.pipeline.engines import drums_engines
+    monkeypatch.setattr(drums_engines, 'load_audio', lambda p, target_sr=22050, mono=True: (np.zeros(10), 22050))
+    monkeypatch.setattr(drums_engines, 'tom_fundamentals', lambda y, sr, times: [80.0, 190.0])
+    onsets = {'onsets': [{'time_s': 1.0}, {'time_s': 2.0}],
+              'drum_classes': {'tom': [{'time_s': 1.0, 'velocity': 1}, {'time_s': 2.0, 'velocity': 1}],
+                               'kick': [], 'snare': [], 'hihat': [], 'cymbal': []}}
+    out = run_drum_class(Path('drums.ogg'), {'onsets': onsets}, {}, _noop)
+    assert out['per_onset'][0]['all_pitches_midi'] == [41]   # floor tom
+    assert out['per_onset'][1]['all_pitches_midi'] == [45]   # rack tom
+    quant = {'events': [{'tick': 0, 'metric_weight': 3, 'all_pitches_midi': [41], 'dropped': False},
+                        {'tick': 192, 'metric_weight': 3, 'all_pitches_midi': [45], 'dropped': False}]}
+    lanes = run_drum_gm_lanes(None, {'quantized': quant}, {}, _noop)['lanes']
+    assert [e['frets'][0] for e in lanes] == [5, 3]
