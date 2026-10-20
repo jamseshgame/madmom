@@ -206,8 +206,17 @@ def is_noise_line(line: str) -> bool:
 
 
 async def _convert_to_ogg(src: Path, dst: Path, progress_callback=None) -> Path:
-    """Convert an audio file to OGG Vorbis using ffmpeg."""
-    cmd = ['ffmpeg', '-y', '-i', str(src), '-c:a', 'libvorbis', '-q:a', '6', str(dst)]
+    """Convert an audio file to OGG Vorbis using ffmpeg.
+
+    ``-vn`` matters: a master with embedded cover art (mp3/m4a APIC) or a
+    video stream (YouTube pulls) otherwise gets a Theora stream muxed into the
+    .ogg. ffmpeg, browsers and the game play that, but libsndfile — which
+    librosa/soundfile use in the chart pipeline — rejects any Ogg whose first
+    logical stream isn't audio with "File contains data in an unimplemented
+    format". ``-map_metadata -1`` keeps the stems free of the source's tags.
+    """
+    cmd = ['ffmpeg', '-y', '-i', str(src), '-vn', '-sn', '-dn', '-map_metadata', '-1',
+           '-c:a', 'libvorbis', '-q:a', '6', str(dst)]
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
