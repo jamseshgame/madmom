@@ -40,16 +40,29 @@ def optional_structure(
 
 
 def audio_duration_s(audio_path: Path) -> float:
-    """Duration without decoding the whole file when possible."""
+    """Duration without decoding the whole file when possible.
+
+    ffprobe first: it reads the container header and copes with files
+    libsndfile rejects (see audio_io). soundfile second, full decode last."""
+    import shutil
+    import subprocess
+    ffprobe = shutil.which('ffprobe')
+    if ffprobe:
+        try:
+            out = subprocess.run(
+                [ffprobe, '-v', 'error', '-select_streams', 'a:0', '-show_entries',
+                 'stream=duration:format=duration', '-of', 'default=nw=1:nk=1', str(audio_path)],
+                capture_output=True, text=True, timeout=30,
+            ).stdout.split()
+            vals = [float(v) for v in out if v not in ('N/A', '')]
+            if vals and vals[0] > 0:
+                return float(vals[0])
+        except Exception:  # noqa: BLE001
+            pass
     try:
         import soundfile as sf
         info = sf.info(str(audio_path))
         return float(info.frames) / float(info.samplerate)
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        import librosa
-        return float(librosa.get_duration(path=str(audio_path)))
     except Exception:  # noqa: BLE001
         pass
     from .audio_io import load_audio

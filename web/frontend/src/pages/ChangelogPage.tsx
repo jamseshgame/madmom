@@ -22,6 +22,7 @@ const RELEASES: Release[] = [
       { kind: 'added', text: 'v14 — phrase consistency: repeated phrases (same intervals + rhythm) copy the lanes of their first occurrence, with edits recorded like the other playability filters.' },
       { kind: 'added', text: 'Objective eval harness: web/backend/scripts/eval_chart.py REF.chart CAND.chart… scores onset F1 (±50 ms), per-lane drum F1, contour agreement, bar self-consistency, density and chord/sustain rates against a reference chart. GET /api/feedback/scoreboard?stem= rolls reviewer ratings and tags up per preset.' },
       { kind: 'changed', text: 'Quantizer forwards all_pitches_midi, duration_s, velocity and confidence from the pitch stage; basic-pitch pitches emit note durations. Audio loading falls back to soundfile/ffmpeg when librosa is absent.' },
+      { kind: 'fixed', text: 'Beatmap generation failed with "File contains data in an unimplemented format" on tracks whose master had embedded cover art or a video stream (mp3 APIC, YouTube pulls): the stem-side OGG converter ran without -vn, so a Theora stream was muxed ahead of the Vorbis audio and libsndfile refused the file. The converter now strips video/artwork, the pipeline loader falls back to ffmpeg for anything libsndfile rejects, and scripts/repair_ogg_video_streams.py rewrites already-affected files in place.' },
     ],
   },
   {
