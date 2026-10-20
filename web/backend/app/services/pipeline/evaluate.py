@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+
+import numpy as np
 from typing import Any
 
 from .tempo_math import build_tempo_segments, tick_to_seconds
@@ -315,4 +317,139 @@ def format_report(result: dict[str, Any]) -> str:
                          f"self-consistency={r.get('self_consistency')}  chords ref/cand="
                          f"{r['chord_rate']['reference']:.2f}/{r['chord_rate']['candidate']:.2f}  sustains ref/cand="
                          f"{r['sustain_rate']['reference']:.2f}/{r['sustain_rate']['candidate']:.2f}")
+    return '\n'.join(lines)
+
+
+# ── pad-level drum comparison on a shared clock ──────────────────────────
+# Used by `compare_drums` when the reference is a 4-lane (pre-Pro-Drums)
+# MIDI, where tom-vs-cymbal is not authored and only the pad is comparable.
+# Also the right view for the confusion matrix: it says *which pad* the
+# detector chose, which is what a player sees.
+
+PAD_NAMES = {0: 'kick', 1: 'snare', 2: 'yellow', 3: 'blue', 4: 'green'}
+
+
+def _pads_by_time(chart: Chart, section: str, to_seconds) -> dict[float, set[int]]:
+    by: dict[float, set[int]] = defaultdict(set)
+    for tick, note, _s in chart.sections.get(section, []):
+        if note in PAD_NAMES:
+            by[round(float(to_seconds(tick)), 4)].add(note)
+    return dict(sorted(by.items()))
+
+
+def evaluate_drum_pads(ref: Chart, cand: Chart, ref_section: str, cand_section: str,
+                       cand_to_ref_seconds, tol_s: float = 0.05) -> dict[str, Any]:
+    """Pad-level scoring of `cand_section` against `ref_section`.
+
+    ``cand_to_ref_seconds(tick) -> seconds on the reference clock`` lets a
+    chart made from a different master (speed/lag) be compared."""
+    r = _pads_by_time(ref, ref_section, ref.seconds)
+    c = _pads_by_time(cand, cand_section, cand_to_ref_seconds)
+    rt, ct = list(r), list(c)
+    pairs = match_times(rt, ct, tol_s)
+    out: dict[str, Any] = {
+        'reference_section': ref_section, 'candidate_section': cand_section,
+        'onsets': _prf(len(pairs), len(rt), len(ct)),
+        'counts': {'reference': len(rt), 'candidate': len(ct), 'matched': len(pairs)},
+    }
+    if pairs:
+        errs = [(ct[j] - rt[i]) * 1000 for i, j in pairs]
+        out['timing_ms'] = {'median': round(float(np.median(errs)), 1),
+                            'p90_abs': round(float(np.percentile(np.abs(errs), 90)), 1)}
+        out['exact_pad_set'] = round(sum(1 for i, j in pairs if r[rt[i]] == c[ct[j]]) / len(pairs), 4)
+    pads: dict[str, Any] = {}
+    for pad, name in PAD_NAMES.items():
+        rh = [t for t in rt if pad in r[t]]
+        ch = [t for t in ct if pad in c[t]]
+        m = match_times(rh, ch, tol_s)
+        pads[name] = {**_prf(len(m), len(rh), len(ch)), 'ref': len(rh), 'cand': len(ch)}
+    out['pads'] = pads
+    # Confusion: for each reference pad on a matched onset, what the
+    # candidate had instead when it missed that pad.
+    conf: dict[str, dict[str, int]] = {n: defaultdict(int) for n in PAD_NAMES.values()}
+    for i, j in pairs:
+        for pad in r[rt[i]]:
+            if pad in c[ct[j]]:
+                conf[PAD_NAMES[pad]][PAD_NAMES[pad]] += 1
+            else:
+                others = c[ct[j]] - r[rt[i]]
+                key = '+'.join(PAD_NAMES[o] for o in sorted(others)) or 'missing'
+                conf[PAD_NAMES[pad]][key] += 1
+    out['confusion'] = {k: dict(sorted(v.items(), key=lambda kv: -kv[1])) for k, v in conf.items()}
+    if rt and ct:
+        out['density_per_sec'] = {'reference': round(len(rt) / max(rt[-1] - rt[0], 1e-6), 3),
+                                  'candidate': round(len(ct) / max(ct[-1] - ct[0], 1e-6), 3)}
+    return out
+
+
+def tempo_grid_agreement(ref: Chart, cand: Chart, cand_to_ref_seconds, last_ref_tick: int,
+                         last_cand_tick: int, tol_s: float = 0.08) -> dict[str, Any]:
+    """How well the candidate's beat grid lines up with the reference's."""
+    br = [ref.seconds(t) for t in range(0, last_ref_tick, ref.resolution)]
+    bc = [cand_to_ref_seconds(t) for t in range(0, last_cand_tick, cand.resolution)]
+    pairs = match_times(br, bc, tol_s)
+    if not pairs:
+        return {'matched': 0, 'reference_beats': len(br)}
+    errs = np.array([bc[j] - br[i] for i, j in pairs]) * 1000
+    centred = np.abs(errs - np.median(errs))
+    return {'matched': len(pairs), 'reference_beats': len(br),
+            'median_offset_ms': round(float(np.median(errs)), 1),
+            'p50_abs_ms': round(float(np.median(centred)), 1),
+            'p90_abs_ms': round(float(np.percentile(centred, 90)), 1)}
+
+
+def compare_drums(ref_text: str, cand_text: str, cand_to_ref_seconds=None,
+                  tol_ms: float = 50.0) -> dict[str, Any]:
+    """Pad-level comparison of a drum chart against a reference drum chart
+    for every difficulty both carry, plus tempo-grid agreement.
+
+    `cand_to_ref_seconds(seconds_on_candidate_clock) -> seconds on the
+    reference clock` (identity when both charts were made from the same
+    audio)."""
+    ref, cand = parse_chart(ref_text), parse_chart(cand_text)
+    to_ref = cand_to_ref_seconds or (lambda s: s)
+
+    def cand_tick_to_ref_seconds(tick: int) -> float:
+        return to_ref(cand.seconds(tick))
+
+    result: dict[str, Any] = {'tolerance_ms': tol_ms, 'difficulties': {}}
+    for diff in DIFFICULTIES:
+        r_name = _section_for(ref, diff, True) or _section_for(ref, diff, None)
+        c_name = _section_for(cand, diff, True) or _section_for(cand, diff, None)
+        if r_name is None or c_name is None:
+            continue
+        result['difficulties'][diff] = evaluate_drum_pads(ref, cand, r_name, c_name, cand_tick_to_ref_seconds,
+                                                          tol_ms / 1000.0)
+    exp = result['difficulties'].get('Expert')
+    if exp:
+        last_r = max((t for t, _n, _s in ref.sections[exp['reference_section']]), default=0)
+        last_c = max((t for t, _n, _s in cand.sections[exp['candidate_section']]), default=0)
+        result['tempo_grid'] = tempo_grid_agreement(ref, cand, cand_tick_to_ref_seconds, last_r, last_c)
+        result['summary'] = {
+            'expert_onset_f1': exp['onsets']['f1'],
+            'expert_pad_f1': {k: v['f1'] for k, v in exp['pads'].items()},
+            'expert_exact_pad_set': exp.get('exact_pad_set'),
+        }
+    return result
+
+
+def format_drum_report(result: dict[str, Any]) -> str:
+    lines = [f"tolerance ±{result['tolerance_ms']:.0f} ms"]
+    tg = result.get('tempo_grid')
+    if tg and tg.get('matched'):
+        lines.append(f"tempo grid: {tg['matched']}/{tg['reference_beats']} beats matched, "
+                     f"offset {tg['median_offset_ms']:+.0f} ms, |err| p50 {tg['p50_abs_ms']:.0f} / p90 {tg['p90_abs_ms']:.0f} ms")
+    for diff, r in result['difficulties'].items():
+        o, cnt = r['onsets'], r['counts']
+        t = r.get('timing_ms', {})
+        lines.append(f"{diff:7s} onsets P={o['precision']:.2f} R={o['recall']:.2f} F1={o['f1']:.2f}  "
+                     f"n ref/cand/matched={cnt['reference']}/{cnt['candidate']}/{cnt['matched']}  "
+                     f"timing med {t.get('median', 0):+.0f} ms p90 {t.get('p90_abs', 0):.0f} ms  "
+                     f"exact pad-set {r.get('exact_pad_set', 0):.2f}")
+        lines.append('        ' + '  '.join(f"{n}:F1={p['f1']:.2f}({p['ref']}/{p['cand']})" for n, p in r['pads'].items()))
+        if diff == 'Expert':
+            for pad, row in r['confusion'].items():
+                tot = sum(row.values()) or 1
+                top = '  '.join(f'{k}={v} ({v / tot:.0%})' for k, v in list(row.items())[:4])
+                lines.append(f'          {pad:7s} → {top}')
     return '\n'.join(lines)

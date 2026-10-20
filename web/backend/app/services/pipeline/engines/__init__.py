@@ -50,6 +50,11 @@ from . import difficulty_engines  # noqa: F401
 # drum-class-removal.
 from . import drums_engines  # noqa: F401
 
+# Pretrained drum transcription (adtof-pytorch). Registers even when the
+# package is absent (the runner raises with the install command) so the
+# catalog shows it exists.
+from . import onsets_adtof  # noqa: F401
+
 # Pitched-instrument V3 engines: contour-dp lanes, phrase-consistency filter,
 # importance-score difficulty.
 from . import difficulty_importance, lanes_contour, phrase_consistency  # noqa: F401
