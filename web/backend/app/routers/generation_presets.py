@@ -296,6 +296,26 @@ BUILTIN_PRESETS: list[dict[str, Any]] = [
         },
     },
     {
+        'name': 'drums-v3 — ADTOF sensitive',
+        'description': 'drums-v3 with lower peak thresholds. On two Harmonix references the model\'s defaults '
+                       '(tuned for full mixes) gave precision 1.00 on a clean stem but under-detected '
+                       'cymbals and 8th-note hats; this trades a little precision for recall.',
+        'builtin': True,
+        'stems': ['drums'],
+        'generation': {
+            'grid': {'engine': 'madmom-downbeat', 'params': {}},
+            'onsets': {'engine': 'drum-adtof', 'params': {
+                'threshold_kick': 0.18, 'threshold_snare': 0.18, 'threshold_tom': 0.24,
+                'threshold_hihat': 0.15, 'threshold_cymbal': 0.18,
+            }},
+            'pitches': {'engine': 'drum-class', 'params': {}},
+            'quantized': {'engine': 'metric-weighted', 'params': {}},
+            'lanes_expert': {'engine': 'drum-gm', 'params': {}},
+            'lanes_filtered': {'engine': 'identity', 'params': {}},
+            'difficulty': {'engine': 'drum-class-removal', 'params': {}},
+        },
+    },
+    {
         'name': 'drums-v2',
         'description': 'Class-aware drums: band-split kick/snare/hat/tom/cymbal → fixed pads + cymbal flags, '
                        'difficulty by class removal',

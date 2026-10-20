@@ -85,8 +85,12 @@ def test_drum_column_end_to_end(drum_track):
     medium = json.loads(stage_path(td, Stage.LANES_MEDIUM, 'drums').read_text())['lanes']
     hard = json.loads(stage_path(td, Stage.LANES_HARD, 'drums').read_text())['lanes']
     assert len(easy) < len(medium) <= len(hard) <= len(lanes)
-    assert {e['frets'][0] for e in easy} <= {0, 1, 4}      # kick/snare (+crash) only
-    assert all(e['frets'][0] != 2 or e['tick'] % 96 == 0 for e in medium)  # 8th-note hats at most
+    assert all(e['tick'] % 192 == 0 for e in easy)          # Easy: beat positions only
+    downbeats = set(grid['downbeats'])
+    assert all(e['frets'][0] != 0 or e['tick'] in downbeats for e in easy)  # kicks on downbeats only
+    assert any(e['frets'][0] == 2 for e in easy)            # hats survive on beats
+    assert all(e['tick'] % 192 == 0 for e in medium)        # Medium: beats only
+    assert all(e['tick'] % 96 == 0 for e in hard)           # Hard: no 16ths
 
     text = serialize_chart(
         grid=grid, song_name='t', resolution=192, drums=True,

@@ -88,7 +88,57 @@ def run_drum_bandsplit(audio_path: Path | None, upstream: dict, params: dict[str
 _CLASS_PARAMS = {
     'match_window_ms': {'type': 'number', 'min': 5, 'max': 60, 'step': 1, 'default': 25,
                         'label': 'Window to attach class hits to an onset (ms)'},
+    'floor_tom_split': {'type': 'boolean', 'default': True,
+                        'label': 'Split toms by pitch: low → floor tom (GM 41, green pad)'},
+    'floor_tom_max_hz': {'type': 'number', 'min': 70, 'max': 180, 'step': 5, 'default': 115,
+                         'label': 'Tom fundamental below this (Hz) is a floor tom'},
 }
+
+GM_FLOOR_TOM = 41
+GM_RACK_TOM = 45
+
+
+def tom_fundamentals(y: np.ndarray, sr: int, times: list[float]) -> list[float | None]:
+    """Fundamental (Hz) of each tom hit: peak of a zero-padded FFT of the
+    80 ms after the attack, searched in 50–350 Hz with parabolic
+    interpolation. None when the window is silent."""
+    out: list[float | None] = []
+    n = int(0.08 * sr)
+    nfft = 1 << (n * 4 - 1).bit_length()
+    freqs = np.fft.rfftfreq(nfft, 1.0 / sr)
+    band = (freqs >= 50) & (freqs <= 350)
+    win = np.hanning(n)
+    for t in times:
+        i = int(round((t + 0.005) * sr))
+        seg = y[i:i + n]
+        if len(seg) < n or np.abs(seg).max() < 1e-4:
+            out.append(None)
+            continue
+        mag = np.abs(np.fft.rfft(seg * win, nfft))
+        k = int(np.argmax(np.where(band, mag, 0)))
+        if 0 < k < len(mag) - 1 and mag[k] > 0:
+            a, b, c = np.log(mag[k - 1] + 1e-12), np.log(mag[k] + 1e-12), np.log(mag[k + 1] + 1e-12)
+            d = 0.5 * (a - c) / (a - 2 * b + c) if (a - 2 * b + c) != 0 else 0.0
+            out.append(float(freqs[k] + d * (freqs[1] - freqs[0])))
+        else:
+            out.append(float(freqs[k]))
+    return out
+
+
+def split_floor_toms(f0s: list[float | None], max_hz: float) -> list[bool]:
+    """True for floor toms. Absolute threshold, replaced by an Otsu split of
+    log-f0 when the song's toms are clearly bimodal (≥ 5 semitones apart)."""
+    vals = np.array([f for f in f0s if f])
+    thr = float(max_hz)
+    if len(vals) >= 12:
+        lv = np.log2(vals)
+        if lv.max() - lv.min() >= 5 / 12:
+            from ..drum_detect import _otsu_threshold
+            t = _otsu_threshold(lv)
+            lo, hi = lv[lv < t], lv[lv >= t]
+            if len(lo) >= 4 and len(hi) >= 4 and (np.median(hi) - np.median(lo)) >= 4 / 12:
+                thr = float(2 ** t)
+    return [bool(f is not None and f < thr) for f in f0s]
 
 
 def _classes_near(t: float, drum_classes: dict[str, list[dict]], win_s: float) -> dict[str, float]:
@@ -119,8 +169,31 @@ def run_drum_class(audio_path: Path | None, upstream: dict, params: dict[str, An
         on_progress('detect', 20, 'Upstream onsets carry no drum classes — detecting…')
         drum_classes = {c: [h.as_dict() for h in hs] for c, hs in _detect(audio_path, params).items()}
 
+    # Floor vs rack tom: the detectors give one 'tom' class, but charts put
+    # floor toms on the green pad and rack toms on blue/yellow.
+    floor_times: set[float] = set()
+    tom_hits = drum_classes.get('tom') or []
+    if bool(params.get('floor_tom_split', True)) and tom_hits and audio_path is not None:
+        on_progress('toms', 40, f'Pitching {len(tom_hits)} tom hits…')
+        try:
+            y, sr = load_audio(audio_path, target_sr=22050, mono=True)
+            times = [float(h['time_s']) for h in tom_hits]
+            f0s = tom_fundamentals(y, sr, times)
+            for t, is_floor in zip(times, split_floor_toms(f0s, float(params.get('floor_tom_max_hz', 115)))):
+                if is_floor:
+                    floor_times.add(round(t, 4))
+        except Exception as e:  # noqa: BLE001 — pitch split is best-effort
+            on_progress('toms', 45, f'Tom pitch split skipped: {e}')
+
+    def gm_for(cls: str, t: float) -> int:
+        if cls == 'tom':
+            near = [ft for ft in floor_times if abs(ft - t) <= win_s]
+            return GM_FLOOR_TOM if near else GM_RACK_TOM
+        return GM_FOR_CLASS[cls]
+
     on_progress('classify', 60, 'Attaching classes to onsets…')
     per_onset = []
+    n_floor = 0
     for o in onsets_payload['onsets']:
         t = float(o['time_s'])
         classes = _classes_near(t, drum_classes, win_s)
@@ -129,15 +202,17 @@ def run_drum_class(audio_path: Path | None, upstream: dict, params: dict[str, An
                               'polyphony': 1, 'all_pitches_midi': []})
             continue
         lead = max(classes.items(), key=lambda kv: kv[1])
+        midis = sorted(gm_for(c, t) for c in classes)
+        n_floor += midis.count(GM_FLOOR_TOM)
         per_onset.append({
             'time_s': t,
-            'dominant_midi': GM_FOR_CLASS[lead[0]],
+            'dominant_midi': gm_for(lead[0], t),
             'dominant_confidence': float(min(1.0, lead[1])),
             'polyphony': len(classes),
-            'all_pitches_midi': sorted(GM_FOR_CLASS[c] for c in classes),
+            'all_pitches_midi': midis,
             'velocity': float(min(1.0, max(classes.values()))),
         })
-    on_progress('done', 100, f'{len(per_onset)} onsets classified')
+    on_progress('done', 100, f'{len(per_onset)} onsets classified' + (f', {n_floor} floor toms' if n_floor else ''))
     return {'engine': 'drum-class', 'params': params, 'generated_at': _now(), 'per_onset': per_onset}
 
 
@@ -146,14 +221,14 @@ def run_drum_class(audio_path: Path | None, upstream: dict, params: dict[str, An
 LANE_FOR_CLASS = {'kick': 0, 'snare': 1, 'hihat': 2, 'tom': 3, 'cymbal': 4}
 
 _GM_LANE_PARAMS = {
-    'floor_tom_lane5': {'type': 'boolean', 'default': False,
-                        'label': 'Map low toms (GM 41/43) to the Floor Tom lane (5)'},
+    'floor_tom_lane5': {'type': 'boolean', 'default': True,
+                        'label': 'Map floor toms (GM 41/43) to the Floor Tom lane (5 → green pad)'},
     'unknown_to_snare': {'type': 'boolean', 'default': False,
                          'label': 'Onsets with no class → snare (else dropped)'},
 }
 
 
-def gm_to_lane(midi: int, floor_tom_lane5: bool = False) -> int | None:
+def gm_to_lane(midi: int, floor_tom_lane5: bool = True) -> int | None:
     cls = CLASS_FOR_GM.get(int(midi))
     if cls is None:
         return None
@@ -164,7 +239,7 @@ def gm_to_lane(midi: int, floor_tom_lane5: bool = False) -> int | None:
 
 def run_drum_gm_lanes(audio_path, upstream, params, on_progress):
     quant = upstream['quantized']
-    floor5 = bool(params.get('floor_tom_lane5', False))
+    floor5 = bool(params.get('floor_tom_lane5', True))
     unknown_to_snare = bool(params.get('unknown_to_snare', False))
     lanes_out: list[dict] = []
     seen: set[tuple[int, int]] = set()
@@ -198,14 +273,22 @@ def run_drum_gm_lanes(audio_path, upstream, params, on_progress):
 # ── S7: drum-class-removal ───────────────────────────────────────────────
 # Per difficulty: the minimum metric weight (4 downbeat, 3 beat, 2 eighth,
 # 1 sixteenth, 0 off-grid) a hit of each lane must have to survive; None
-# removes the lane entirely. Mirrors how human CH drum charts step down:
-# Easy = kick/snare backbeat on beats, Medium = add 8th hats + crashes on
-# downbeats, Hard = everything but 16th-note hats and off-grid ghost notes.
+# removes the lane entirely.
+#
+# Derived from how Harmonix actually steps down (fraction of Expert notes
+# surviving at the same tick+pad, two references — Elton John / Killers):
+#   Hard:   every class keeps beats and most 8ths; 16ths gone (0 %)
+#   Medium: beat-position notes of every class (snare/hat/crash ~100 %),
+#           8ths mostly gone (kick 1–9 %, hat 0–36 %, snare 0–31 %)
+#   Easy:   snare 90–100 %, hats 65–96 %, crashes 80–100 % on beats;
+#           kicks almost gone (12–38 % even on beats, ~25 % on downbeats)
+# The earlier defaults removed hats on Easy and kept 8th kicks on Medium —
+# the opposite of this.
 
 DEFAULT_DRUM_DIFFICULTY: dict[str, dict[str, int | None]] = {
-    'hard':   {'0': 1, '1': 1, '2': 2, '3': 1, '4': 1, '5': 1},
-    'medium': {'0': 2, '1': 2, '2': 3, '3': 2, '4': 4, '5': 2},
-    'easy':   {'0': 3, '1': 3, '2': None, '3': None, '4': 4, '5': None},
+    'hard':   {'0': 2, '1': 2, '2': 2, '3': 2, '4': 2, '5': 2},
+    'medium': {'0': 3, '1': 3, '2': 3, '3': 3, '4': 3, '5': 3},
+    'easy':   {'0': 4, '1': 3, '2': 3, '3': 3, '4': 3, '5': 3},
 }
 
 _REMOVAL_PARAMS = {
@@ -215,7 +298,7 @@ _REMOVAL_PARAMS = {
                'label': 'Medium: min metric weight per lane'},
     'easy': {'type': 'enum', 'options': [], 'default': DEFAULT_DRUM_DIFFICULTY['easy'],
              'label': 'Easy: min metric weight per lane'},
-    'easy_max_pads_per_tick': {'type': 'number', 'min': 1, 'max': 3, 'step': 1, 'default': 1,
+    'easy_max_pads_per_tick': {'type': 'number', 'min': 1, 'max': 3, 'step': 1, 'default': 2,
                                'label': 'Easy: max pads per tick (kick excluded)'},
     'medium_max_pads_per_tick': {'type': 'number', 'min': 1, 'max': 3, 'step': 1, 'default': 2,
                                  'label': 'Medium: max pads per tick (kick excluded)'},
@@ -257,7 +340,7 @@ def run_drum_class_removal(audio_path, upstream, params, on_progress):
     metric_weights = inp.get('metric_weights') or {}
     caps = {'hard': None,
             'medium': int(params.get('medium_max_pads_per_tick', 2)),
-            'easy': int(params.get('easy_max_pads_per_tick', 1))}
+            'easy': int(params.get('easy_max_pads_per_tick', 2))}
     by_difficulty = {}
     for diff in ('easy', 'medium', 'hard'):
         rule = params.get(diff) or DEFAULT_DRUM_DIFFICULTY[diff]
