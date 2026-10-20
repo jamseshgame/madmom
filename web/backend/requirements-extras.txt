@@ -51,3 +51,11 @@ onnx-weekly
 #   May not install cleanly on Windows due to C/Cython native deps.
 #   Engine is guarded with try/except import; function lazy-loads aubio.
 aubio>=0.4.9
+
+# - adtof-pytorch: pretrained drum-transcription CRNN (ADTOF, Zehren et al.
+#   ISMIR 2021 — trained on ~359 h of rhythm-game charts) behind the
+#   `drum-adtof` onsets engine / `drums-v3` preset. Pure PyTorch port with
+#   bundled weights; real deps (torch, librosa, pretty_midi) are already in
+#   requirements.txt — torch is pinned there, so install --no-deps here.
+#   Model weights are CC BY-NC-SA 4.0 (same terms as madmom's models).
+adtof-pytorch @ git+https://github.com/xavriley/ADTOF-pytorch

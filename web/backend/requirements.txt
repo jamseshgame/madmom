@@ -97,3 +97,6 @@ bcrypt>=4.0
 # Audio loading via librosa (resampling, mono downmix).
 librosa>=0.10.1
 soundfile>=0.12.1
+# pretty_midi: runtime dep of adtof-pytorch (requirements-extras.txt), which is
+# installed --no-deps to protect the torch pin. Harmless on its own.
+pretty_midi>=0.2.10

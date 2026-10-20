@@ -280,6 +280,22 @@ BUILTIN_PRESETS: list[dict[str, Any]] = [
         },
     },
     {
+        'name': 'drums-v3 — ADTOF model',
+        'description': 'drums-v2 with a pretrained drum-transcription model (ADTOF, trained on rhythm-game '
+                       'charts) in place of band-split detection. Needs adtof-pytorch installed.',
+        'builtin': True,
+        'stems': ['drums'],
+        'generation': {
+            'grid': {'engine': 'madmom-downbeat', 'params': {}},
+            'onsets': {'engine': 'drum-adtof', 'params': {}},
+            'pitches': {'engine': 'drum-class', 'params': {}},
+            'quantized': {'engine': 'metric-weighted', 'params': {}},
+            'lanes_expert': {'engine': 'drum-gm', 'params': {}},
+            'lanes_filtered': {'engine': 'identity', 'params': {}},
+            'difficulty': {'engine': 'drum-class-removal', 'params': {}},
+        },
+    },
+    {
         'name': 'drums-v2',
         'description': 'Class-aware drums: band-split kick/snare/hat/tom/cymbal → fixed pads + cymbal flags, '
                        'difficulty by class removal',
