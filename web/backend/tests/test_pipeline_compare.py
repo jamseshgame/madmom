@@ -189,3 +189,54 @@ def test_compare_drums_with_clock_transform():
     assert res['difficulties']['Expert']['onsets']['f1'] == 1.0
     res_unaligned = compare_drums(ref, cand)
     assert res_unaligned['difficulties']['Expert']['onsets']['f1'] < 1.0
+
+
+# ── guitar / 5-fret path ─────────────────────────────────────────────────
+
+def write_rb_guitar_midi(path: Path) -> None:
+    """One bar at 120 BPM, div 480: G, R+Y chord held a beat, B, O short."""
+    tempo = _track([(0, _meta(3, b'tempo')), (0, _meta(0x51, (500_000).to_bytes(3, 'big'))),
+                    (0, _meta(0x58, bytes([4, 2, 24, 8])))])
+    ev = [(0, _meta(3, b'PART GUITAR'))]
+    notes = [(0, 96, 60), (480, 97, 480), (480, 98, 480), (960, 99, 60), (1440, 100, 100)]
+    for t, p, ln in notes:
+        ev += [(t, _note(p, True)), (t + ln, _note(p, False))]
+    path.write_bytes(b'MThd' + struct.pack('>IHHH', 6, 1, 2, 480) + tempo + _track(ev))
+
+
+def test_midi_frets_to_chart_sustains_and_sections(tmp_path):
+    from app.services.pipeline.reference_charts import midi_frets_to_chart
+    p = tmp_path / 'notes.mid'
+    write_rb_guitar_midi(p)
+    text = midi_frets_to_chart(p, 'guitar')
+    expert = text.split('[ExpertSingle]')[1].split('}')[0]
+    rows = [ln.strip() for ln in expert.splitlines() if '=' in ln]
+    assert '0 = N 0 0' in rows                  # 60 MIDI ticks < a 16th → no sustain
+    assert '192 = N 1 192' in rows and '192 = N 2 192' in rows   # held chord → sustain 192
+    assert '576 = N 4 0' in rows                # 100 ticks = 40 chart ticks < 48 → 0
+    assert '[EasySingle]' in text
+
+
+def test_load_reference_part_guitar(tmp_path):
+    from app.services.pipeline.reference_charts import load_reference
+    mid = tmp_path / 'notes.mid'
+    write_rb_guitar_midi(mid)
+    ref = load_reference(mid, tmp_path / 'w', part='guitar')
+    assert '[ExpertSingle]' in ref.chart_text and ref.pro_drums is None
+
+
+def test_compare_frets_metrics_and_clock_transform():
+    from app.services.pipeline.evaluate import compare_frets
+    ref = _chart(['0 = N 0 0', '192 = N 1 96', '192 = N 2 96', '384 = N 3 0', '576 = N 4 0'], section='ExpertSingle')
+    # Perfect copy on a clock that runs 2× fast: cand tick = 2 × ref tick.
+    cand = _chart(['0 = N 0 0', '384 = N 1 192', '384 = N 2 192', '768 = N 3 0', '1152 = N 4 0'], section='ExpertSingle')
+    res = compare_frets(ref, cand, cand_to_ref_seconds=lambda s: s / 2)
+    exp = res['difficulties']['Expert']
+    assert exp['onsets']['f1'] == 1.0 and exp['exact_lane_accuracy'] == 1.0 and exp['contour_agreement'] == 1.0
+    assert exp['chord_rate'] == {'reference': 0.25, 'candidate': 0.25}
+    assert exp['sustain_rate'] == {'reference': 0.25, 'candidate': 0.25}
+    assert res['summary']['expert_contour'] == 1.0
+    # Mirrored lanes: onsets still match, contour and lanes do not.
+    mirrored = _chart(['0 = N 4 0', '192 = N 3 96', '192 = N 2 96', '384 = N 1 0', '576 = N 0 0'], section='ExpertSingle')
+    exp2 = compare_frets(ref, mirrored)['difficulties']['Expert']
+    assert exp2['onsets']['f1'] == 1.0 and exp2['contour_agreement'] == 0.0 and exp2['exact_lane_accuracy'] < 0.5

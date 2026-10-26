@@ -280,6 +280,22 @@ BUILTIN_PRESETS: list[dict[str, Any]] = [
         },
     },
     {
+        'name': 'v15 — madmom onsets + contour DP',
+        'description': 'v14 with note timing from madmom\'s CNN onset detector instead of basic-pitch note starts. '
+                       'On four Harmonix guitar references v14 was a wall of 16ths (74 % of gaps one 16th, '
+                       '1.1–1.8× the note count); basic-pitch now only answers *what* sounds at each onset.',
+        'builtin': True,
+        'generation': {
+            'grid': {'engine': 'madmom-downbeat', 'params': {}},
+            'onsets': {'engine': 'madmom-onset', 'params': {}},
+            'pitches': {'engine': 'basic-pitch', 'params': {}},
+            'quantized': {'engine': 'metric-weighted', 'params': {}},
+            'lanes_expert': {'engine': 'contour-dp', 'params': {}},
+            'lanes_filtered': {'engine': 'phrase-consistency', 'params': {}},
+            'difficulty': {'engine': 'importance-score', 'params': {}},
+        },
+    },
+    {
         'name': 'drums-v3 — ADTOF model',
         'description': 'drums-v2 with a pretrained drum-transcription model (ADTOF, trained on rhythm-game '
                        'charts) in place of band-split detection. Needs adtof-pytorch installed.',

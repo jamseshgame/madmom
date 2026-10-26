@@ -11,7 +11,11 @@ from ..registry import EngineSpec, Stage, register_engine
 
 
 _PARAMS_SCHEMA = {
-    'polyphony_window_ms': {'type': 'number', 'min': 5, 'max': 100, 'step': 1, 'default': 30,
+    # Window (total width) around each onset in which basic-pitch note starts
+    # count as "this onset". 30 ms suits onsets that *came from* basic-pitch;
+    # independent onsets (madmom-onset) need ~80 ms since the transcriber's
+    # note starts lag or lead the attack by a few frames.
+    'polyphony_window_ms': {'type': 'number', 'min': 5, 'max': 200, 'step': 1, 'default': 80,
                             'label': 'Polyphony detection window (ms)'},
     'pitch_confidence_threshold': {'type': 'number', 'min': 0.1, 'max': 0.9, 'step': 0.05, 'default': 0.3,
                                    'label': 'Pitch confidence threshold'},
@@ -35,7 +39,7 @@ def run_basic_pitch_pitches(
     bp_params['pitch_confidence_threshold'] = params.get('pitch_confidence_threshold', 0.3)
     result = run_basic_pitch(audio_path, bp_params)
 
-    poly_window_s = float(params.get('polyphony_window_ms', 30)) / 1000.0
+    poly_window_s = float(params.get('polyphony_window_ms', 80)) / 1000.0
 
     per_onset = []
     for onset in onsets_payload['onsets']:
