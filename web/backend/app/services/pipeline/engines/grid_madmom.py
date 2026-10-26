@@ -21,7 +21,7 @@ from typing import Any, Callable
 import numpy as np
 
 from ..beat_grid import beats_to_grid, positions_to_downbeat_indices
-from ..grid_support import audio_duration_s, optional_structure
+from ..grid_support import audio_duration_s, calibrate_beats, optional_structure
 from ..registry import EngineSpec, Stage, register_engine
 
 
@@ -38,6 +38,10 @@ _PARAMS_SCHEMA = {
                 'label': 'Min tempo (BPM)'},
     'max_bpm': {'type': 'number', 'min': 120, 'max': 300, 'step': 1, 'default': 215,
                 'label': 'Max tempo (BPM)'},
+    'snap_to_transients': {'type': 'boolean', 'default': True,
+                           'label': 'Shift grid to drum transients (beat trackers run ~25 ms early)'},
+    'beat_offset_ms': {'type': 'number', 'min': -100, 'max': 100, 'step': 1, 'default': 0,
+                       'label': 'Extra manual grid offset (ms, + = later)'},
 }
 
 
@@ -85,8 +89,9 @@ def run_madmom_grid(
     duration = audio_duration_s(audio_path)
     if len(beats) == 0:
         raise ValueError('madmom found no beats in the audio')
-    beat_times = beats[:, 0]
     db_idx = positions_to_downbeat_indices(beats[:, 1])
+    on_progress('calibrate', 55, 'Calibrating grid to transients…')
+    beat_times, calib = calibrate_beats(beats[:, 0], audio_path, params, on_progress)
 
     on_progress('structure', 60, 'Detecting sections/key…')
     section_times, key = optional_structure(audio_path, max_sections)
@@ -103,6 +108,7 @@ def run_madmom_grid(
         'generated_at': dt.datetime.now(dt.UTC).isoformat().replace('+00:00', 'Z'),
         'detected_key': key,
         'beat_times_s': [float(t) for t in beat_times],
+        'calibration': calib,
         **core,
     }
     n_seg = len(core['tempo_segments'])
