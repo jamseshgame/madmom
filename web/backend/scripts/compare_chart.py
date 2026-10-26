@@ -31,7 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services.pipeline.align import align_audio  # noqa: E402
-from app.services.pipeline.evaluate import compare_drums, format_drum_report  # noqa: E402
+from app.services.pipeline.evaluate import compare_drums, compare_frets, format_drum_report, format_fret_report  # noqa: E402
 from app.services.pipeline.reference_charts import AUDIO_EXTS, load_reference  # noqa: E402
 
 
@@ -66,13 +66,15 @@ def main() -> int:
     ap.add_argument('--tol-ms', type=float, default=50.0)
     ap.add_argument('--no-align', action='store_true', help='assume both charts share one clock')
     ap.add_argument('--json', type=Path, help='write full results here')
+    ap.add_argument('--part', choices=['drums', 'guitar', 'bass', 'keys'], default='drums',
+                    help='which part to compare (reference MIDI track + stem; default drums)')
     args = ap.parse_args()
 
     workdir = Path(tempfile.mkdtemp(prefix='compare_chart_'))
-    ref = load_reference(Path(args.reference), workdir)
+    ref = load_reference(Path(args.reference), workdir, part=args.part)
     title = ref.meta.get('name') or Path(args.reference).stem
-    print(f'reference: {title}  ({ref.source})')
-    if ref.pro_drums is False:
+    print(f'reference: {title}  [{args.part}]  ({ref.source})')
+    if args.part == 'drums' and ref.pro_drums is False:
         print('  note: 4-lane MIDI without tom markers — compared at pad level (kick/snare/yellow/blue/green)')
     ref_audio = ref.drum_stems or ref.audio_path
 
@@ -90,20 +92,30 @@ def main() -> int:
             to_ref = al.to_ref
         else:
             print(f'\n== {auto_path}\nalignment: none (same clock assumed)')
-        res = compare_drums(ref.chart_text, text, to_ref, tol_ms=args.tol_ms)
+        if args.part == 'drums':
+            res = compare_drums(ref.chart_text, text, to_ref, tol_ms=args.tol_ms)
+            report = format_drum_report(res)
+        else:
+            res = compare_frets(ref.chart_text, text, to_ref, tol_ms=args.tol_ms)
+            report = format_fret_report(res)
         res['alignment'] = align_info
         results[str(auto_path)] = res
-        print(format_drum_report(res))
+        print(report)
 
     if len(results) > 1:
         print('\nranking (Expert):')
         rows = sorted(results.items(), key=lambda kv: -kv[1].get('summary', {}).get('expert_onset_f1', 0))
         for name, r in rows:
             s = r.get('summary', {})
-            pads = s.get('expert_pad_f1', {})
-            print(f"  {Path(name).name[:40]:40s} onset F1 {s.get('expert_onset_f1', 0):.2f}  "
-                  + '  '.join(f'{k[:2]} {v:.2f}' for k, v in pads.items())
-                  + f"  exact {s.get('expert_exact_pad_set') or 0:.2f}")
+            if args.part == 'drums':
+                pads = s.get('expert_pad_f1', {})
+                print(f"  {Path(name).name[:40]:40s} onset F1 {s.get('expert_onset_f1', 0):.2f}  "
+                      + '  '.join(f'{k[:2]} {v:.2f}' for k, v in pads.items())
+                      + f"  exact {s.get('expert_exact_pad_set') or 0:.2f}")
+            else:
+                print(f"  {Path(name).name[:40]:40s} onset F1 {s.get('expert_onset_f1', 0):.2f}  "
+                      f"contour {s.get('expert_contour') or 0:.2f}  exact-lane {s.get('expert_exact_lane') or 0:.2f}  "
+                      f"self-consistency {s.get('expert_self_consistency') or 0:.2f}")
     if args.json:
         args.json.write_text(json.dumps({'reference': ref.source, 'title': title, 'results': results}, indent=1))
         print(f'\nwrote {args.json}')

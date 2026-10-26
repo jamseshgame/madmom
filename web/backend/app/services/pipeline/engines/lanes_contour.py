@@ -55,7 +55,9 @@ _PARAMS = {
                              'label': 'Open note when pitch is this far below the window'},
     'chord_polyphony_threshold': {'type': 'number', 'min': 2, 'max': 6, 'step': 1, 'default': 2,
                                   'label': 'Polyphony required for a chord'},
-    'min_sustain_beats': {'type': 'number', 'min': 0.5, 'max': 4, 'step': 0.25, 'default': 1.0,
+    # Rock Band's own cutoff is a 16th; four Harmonix guitar charts carry
+    # 5–47 % sustains, and a one-beat minimum produced none at all.
+    'min_sustain_beats': {'type': 'number', 'min': 0.25, 'max': 4, 'step': 0.25, 'default': 0.5,
                           'label': 'Min note length for a sustain (beats)'},
     'sustain_gap_ticks': {'type': 'number', 'min': 0, 'max': 192, 'step': 8, 'default': 48,
                           'label': 'Gap kept before the next note (ticks)'},
@@ -239,7 +241,7 @@ def run_contour_dp(audio_path, upstream, params, on_progress):
         [{'tick': t['tick_start'], 'micro_bpm': t['micro_bpm']} for t in grid['tempo_segments']], resolution,
     )
     chord_thr = int(params.get('chord_polyphony_threshold', 2))
-    min_sus = float(params.get('min_sustain_beats', 1.0))
+    min_sus = float(params.get('min_sustain_beats', 0.5))
     gap = int(params.get('sustain_gap_ticks', 48))
 
     notes = _group_by_tick(quant['events'])

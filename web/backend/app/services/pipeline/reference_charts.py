@@ -161,6 +161,52 @@ def parse_midi(path: Path) -> tuple[int, list[dict[str, Any]]]:
     return div, tracks
 
 
+# Rock Band 5-fret parts: same per-difficulty bases as drums; +0 green … +4
+# orange. Sustains are the note length (RB cuts anything under a 16th to 0).
+MIDI_FRET_TRACKS = {'guitar': 'PART GUITAR', 'bass': 'PART BASS', 'keys': 'PART KEYS', 'rhythm': 'PART RHYTHM'}
+# Chart section suffix for each part (what the Jamsesh editor/publisher uses).
+CHART_SUFFIX = {'drums': 'Drums', 'guitar': 'Single', 'bass': 'DoubleBass', 'keys': 'Keyboard', 'rhythm': 'DoubleRhythm'}
+
+
+def _synctrack_text(div: int, tracks: list[dict[str, Any]], resolution: int) -> str:
+    scale = resolution / div
+    tempos = tracks[0]['tempos'] or [(0, 500_000)]
+    tss = tracks[0]['time_sigs'] or [(0, 4, 4)]
+    rows = [(int(round(t * scale)), f'TS {n}' if d == 4 else f'TS {n} {d.bit_length() - 1}') for t, n, d in tss]
+    rows += [(int(round(t * scale)), f'B {int(round(60_000_000_000 / us))}') for t, us in tempos]
+    rows.sort(key=lambda r: (r[0], 0 if r[1].startswith('TS') else 1))
+    return (f'[Song]\n{{\n  Resolution = {resolution}\n}}\n[SyncTrack]\n{{\n'
+            + ''.join(f'  {t} = {x}\n' for t, x in rows) + '}\n[Events]\n{\n}\n')
+
+
+def midi_frets_to_chart(path: Path, part: str = 'guitar', resolution: int = 192) -> str:
+    """Convert a Rock Band 5-fret part (PART GUITAR/BASS/KEYS) to .chart text
+    with [Expert<Suffix>]…[Easy<Suffix>] sections. Sustain = note length in
+    ticks when ≥ a 16th, else 0 (RB's own cutoff). Open notes (CH note 7)
+    don't exist in RB MIDI."""
+    div, tracks = parse_midi(path)
+    scale = resolution / div
+    name = MIDI_FRET_TRACKS[part]
+    tr = next((t for t in tracks if t['name'].strip().upper() == name), None)
+    if tr is None:
+        raise ValueError(f'MIDI has no {name} track')
+    min_sustain = resolution // 4
+    out = [_synctrack_text(div, tracks, resolution)]
+    suffix = CHART_SUFFIX[part]
+    for diff, base in MIDI_DRUM_BASE.items():
+        lines = []
+        for s, e, pch in tr['notes']:
+            if not base <= pch <= base + 4:
+                continue
+            tick = int(round(s * scale))
+            length = int(round(e * scale)) - tick
+            sustain = length if length >= min_sustain else 0
+            lines.append((tick, pch - base, f'N {pch - base} {sustain}'))
+        lines.sort()
+        out.append(f'[{diff}{suffix}]\n{{\n' + ''.join(f'  {t} = {x}\n' for t, _, x in lines) + '}\n')
+    return ''.join(out)
+
+
 def midi_drums_to_chart(path: Path, resolution: int = 192) -> tuple[str, bool]:
     """Convert PART DRUMS of a Rock Band style MIDI to .chart text with
     [ExpertDrums]…[EasyDrums] sections in Pro Drums notation.
@@ -220,9 +266,11 @@ def _find(dirpath: Path, names: tuple[str, ...]) -> Path | None:
     return None
 
 
-def load_reference(path: Path, workdir: Path | None = None) -> ReferenceSong:
+def load_reference(path: Path, workdir: Path | None = None, part: str = 'drums') -> ReferenceSong:
     """Load a reference song from a .sng, a .zip, a folder, a .chart or a
-    .mid. Extracted files go under `workdir` (a temp dir by default)."""
+    .mid. Extracted files go under `workdir` (a temp dir by default).
+    `part` selects which MIDI part to convert ('drums', 'guitar', 'bass',
+    'keys'); a .chart reference is used as-is."""
     path = Path(path)
     workdir = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix='refsong_'))
     if path.is_dir():
@@ -245,7 +293,10 @@ def load_reference(path: Path, workdir: Path | None = None) -> ReferenceSong:
         raise ValueError(f'no notes.chart / notes.mid under {folder}')
     pro: bool | None = None
     if chart_file.suffix.lower() in ('.mid', '.midi'):
-        text, pro = midi_drums_to_chart(chart_file)
+        if part == 'drums':
+            text, pro = midi_drums_to_chart(chart_file)
+        else:
+            text = midi_frets_to_chart(chart_file, part)
     else:
         text = chart_file.read_text(encoding='utf-8', errors='replace')
 
@@ -258,8 +309,9 @@ def load_reference(path: Path, workdir: Path | None = None) -> ReferenceSong:
                 break
         if audio:
             break
+    stem_prefix = 'drums' if part == 'drums' else part
     drum_stems = sorted(p for p in folder.rglob('*') if p.is_file() and p.suffix.lower() in AUDIO_EXTS
-                        and p.stem.lower().startswith('drums'))
+                        and p.stem.lower().startswith(stem_prefix))
     meta: dict[str, str] = {}
     ini = _find(folder, ('song.ini',))
     if ini:

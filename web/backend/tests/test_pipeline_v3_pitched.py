@@ -84,7 +84,7 @@ def test_chords_from_polyphony_and_sustains_from_duration():
     assert len(ev0['frets']) == 2 and ev0['frets'][1] - ev0['frets'][0] == 1
     assert ev0['sustain'] >= 192          # ≥ 1 beat
     assert ev1['sustain'] == 0            # too short
-    assert ev2['sustain'] == 0            # would need ≥ 1 beat but only 192 - gap(48) available
+    assert ev2['sustain'] == 192 - 48     # held note: truncated before the next note, ≥ the 0.5-beat minimum
     assert ev3['sustain'] == 0
     LaneEvents(**{'engine': 'x', 'params': {}, 'generated_at': 'now', 'lanes': out['lanes']})
 

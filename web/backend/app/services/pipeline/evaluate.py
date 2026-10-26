@@ -453,3 +453,129 @@ def format_drum_report(result: dict[str, Any]) -> str:
                 top = '  '.join(f'{k}={v} ({v / tot:.0%})' for k, v in list(row.items())[:4])
                 lines.append(f'          {pad:7s} → {top}')
     return '\n'.join(lines)
+
+
+# ── pitched (5-fret) comparison on a shared clock ────────────────────────
+
+def _frets_by_time(chart: Chart, section: str, to_seconds) -> dict[float, dict[str, Any]]:
+    by: dict[float, dict[str, Any]] = {}
+    for tick, note, sustain in chart.sections.get(section, []):
+        if note in (0, 1, 2, 3, 4, 7):
+            key = round(float(to_seconds(tick)), 4)
+            e = by.setdefault(key, {'frets': set(), 'sustain': 0, 'tick': tick})
+            e['frets'].add(note)
+            e['sustain'] = max(e['sustain'], sustain)
+    return dict(sorted(by.items()))
+
+
+def evaluate_frets(ref: Chart, cand: Chart, ref_section: str, cand_section: str,
+                   cand_to_ref_seconds, tol_s: float = 0.05) -> dict[str, Any]:
+    """Onsets, contour, lane and chord/sustain agreement for a 5-fret part,
+    with the candidate re-timed onto the reference clock."""
+    r = _frets_by_time(ref, ref_section, ref.seconds)
+    c = _frets_by_time(cand, cand_section, cand_to_ref_seconds)
+    rt, ct = list(r), list(c)
+    pairs = match_times(rt, ct, tol_s)
+    out: dict[str, Any] = {
+        'reference_section': ref_section, 'candidate_section': cand_section, 'drums': False,
+        'onsets': _prf(len(pairs), len(rt), len(ct)),
+        'counts': {'reference': len(rt), 'candidate': len(ct), 'matched': len(pairs)},
+    }
+    if pairs:
+        errs = [(ct[j] - rt[i]) * 1000 for i, j in pairs]
+        out['timing_ms'] = {'median': round(float(np.median(errs)), 1),
+                            'p90_abs': round(float(np.percentile(np.abs(errs), 90)), 1)}
+
+    def anchor(frets: set[int]) -> int:
+        gems = sorted(f for f in frets if f != 7)
+        return gems[0] if gems else -1
+
+    agree = total = 0
+    for (i0, j0), (i1, j1) in zip(pairs, pairs[1:]):
+        if j1 != j0 + 1 or i1 != i0 + 1:
+            continue  # only consecutive-in-both pairs say anything about contour
+        dr = anchor(r[rt[i1]]['frets']) - anchor(r[rt[i0]]['frets'])
+        dc = anchor(c[ct[j1]]['frets']) - anchor(c[ct[j0]]['frets'])
+        total += 1
+        if (dr > 0) == (dc > 0) and (dr < 0) == (dc < 0):
+            agree += 1
+    out['contour_agreement'] = round(agree / total, 4) if total else None
+    if pairs:
+        out['exact_lane_accuracy'] = round(sum(1 for i, j in pairs if r[rt[i]]['frets'] == c[ct[j]]['frets']) / len(pairs), 4)
+        out['anchor_lane_accuracy'] = round(sum(1 for i, j in pairs if anchor(r[rt[i]]['frets']) == anchor(c[ct[j]]['frets'])) / len(pairs), 4)
+        # Lane histogram (how the fretboard is used) — a chart that never
+        # leaves two lanes scores badly here even if the contour is right.
+        def hist(m, ts):
+            h = [0] * 6
+            for t in ts:
+                for f in m[t]['frets']:
+                    h[5 if f == 7 else f] += 1
+            n = sum(h) or 1
+            return [round(x / n, 3) for x in h]
+        out['lane_usage'] = {'reference': hist(r, rt), 'candidate': hist(c, ct)}
+    out['self_consistency'] = self_consistency([(c[t]['tick'], tuple(sorted(c[t]['frets']))) for t in ct], cand.bar_ticks())
+    out['reference_self_consistency'] = self_consistency([(r[t]['tick'], tuple(sorted(r[t]['frets']))) for t in rt], ref.bar_ticks())
+
+    def rate(m, ts, pred):
+        return round(sum(1 for t in ts if pred(m[t])) / len(ts), 4) if ts else 0.0
+    out['chord_rate'] = {'reference': rate(r, rt, lambda e: len(e['frets']) > 1), 'candidate': rate(c, ct, lambda e: len(e['frets']) > 1)}
+    out['sustain_rate'] = {'reference': rate(r, rt, lambda e: e['sustain'] > 0), 'candidate': rate(c, ct, lambda e: e['sustain'] > 0)}
+    if rt and ct:
+        out['density_per_sec'] = {'reference': round(len(rt) / max(rt[-1] - rt[0], 1e-6), 3),
+                                  'candidate': round(len(ct) / max(ct[-1] - ct[0], 1e-6), 3)}
+    return out
+
+
+def compare_frets(ref_text: str, cand_text: str, cand_to_ref_seconds=None, tol_ms: float = 50.0,
+                  ref_suffix: str | None = None) -> dict[str, Any]:
+    """Five-fret comparison for every difficulty both charts carry.
+    `ref_suffix` picks the reference section family ('Single', 'DoubleBass',
+    …); default: the first non-drum family present."""
+    ref, cand = parse_chart(ref_text), parse_chart(cand_text)
+    to_ref = cand_to_ref_seconds or (lambda s: s)
+
+    def tick_to_ref(tick: int) -> float:
+        return to_ref(cand.seconds(tick))
+
+    def pick(chart: Chart, diff: str, suffix: str | None) -> str | None:
+        for name in chart.sections:
+            if name.startswith(diff) and not is_drum_section(name) and (suffix is None or name[len(diff):].rstrip('0123456789') == suffix):
+                return name
+        return None
+
+    result: dict[str, Any] = {'tolerance_ms': tol_ms, 'difficulties': {}}
+    for diff in DIFFICULTIES:
+        r_name, c_name = pick(ref, diff, ref_suffix), pick(cand, diff, None)
+        if r_name is None or c_name is None:
+            continue
+        result['difficulties'][diff] = evaluate_frets(ref, cand, r_name, c_name, tick_to_ref, tol_ms / 1000.0)
+    exp = result['difficulties'].get('Expert')
+    if exp:
+        last_r = max((t for t, _n, _s in ref.sections[exp['reference_section']]), default=0)
+        last_c = max((t for t, _n, _s in cand.sections[exp['candidate_section']]), default=0)
+        result['tempo_grid'] = tempo_grid_agreement(ref, cand, tick_to_ref, last_r, last_c)
+        result['summary'] = {'expert_onset_f1': exp['onsets']['f1'], 'expert_contour': exp.get('contour_agreement'),
+                             'expert_exact_lane': exp.get('exact_lane_accuracy'),
+                             'expert_self_consistency': exp.get('self_consistency')}
+    return result
+
+
+def format_fret_report(result: dict[str, Any]) -> str:
+    lines = [f"tolerance ±{result['tolerance_ms']:.0f} ms"]
+    tg = result.get('tempo_grid')
+    if tg and tg.get('matched'):
+        lines.append(f"tempo grid: {tg['matched']}/{tg['reference_beats']} beats matched, offset {tg['median_offset_ms']:+.0f} ms, "
+                     f"|err| p50 {tg['p50_abs_ms']:.0f} / p90 {tg['p90_abs_ms']:.0f} ms")
+    for diff, r in result['difficulties'].items():
+        o, cnt, t = r['onsets'], r['counts'], r.get('timing_ms', {})
+        lines.append(f"{diff:7s} onsets P={o['precision']:.2f} R={o['recall']:.2f} F1={o['f1']:.2f}  "
+                     f"n ref/cand/matched={cnt['reference']}/{cnt['candidate']}/{cnt['matched']}  "
+                     f"timing med {t.get('median', 0):+.0f} ms p90 {t.get('p90_abs', 0):.0f} ms  "
+                     f"density ref/cand={r.get('density_per_sec', {}).get('reference', 0):.2f}/{r.get('density_per_sec', {}).get('candidate', 0):.2f}")
+        lu = r.get('lane_usage', {})
+        lines.append(f"        contour={r.get('contour_agreement')}  exact-lane={r.get('exact_lane_accuracy')}  anchor-lane={r.get('anchor_lane_accuracy')}  "
+                     f"self-consistency cand/ref={r.get('self_consistency')}/{r.get('reference_self_consistency')}")
+        lines.append(f"        chords ref/cand={r['chord_rate']['reference']:.2f}/{r['chord_rate']['candidate']:.2f}  "
+                     f"sustains ref/cand={r['sustain_rate']['reference']:.2f}/{r['sustain_rate']['candidate']:.2f}  "
+                     f"lane use G/R/Y/B/O/open ref={lu.get('reference')} cand={lu.get('candidate')}")
+    return '\n'.join(lines)
