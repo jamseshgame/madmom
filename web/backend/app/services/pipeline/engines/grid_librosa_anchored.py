@@ -16,6 +16,7 @@ import numpy as np
 
 from ..audio_io import load_audio
 from ..beat_grid import beats_to_grid
+from ..grid_support import calibrate_beats
 from ..registry import EngineSpec, Stage, register_engine
 from .grid_librosa import _detect_key, _detect_sections
 
@@ -33,6 +34,10 @@ _PARAMS_SCHEMA = {
                      'label': 'Tempo-map merge tolerance (ms)'},
     'max_sections': {'type': 'number', 'min': 0, 'max': 16, 'step': 1, 'default': 8,
                      'label': 'Max structural sections (0 = none)'},
+    'snap_to_transients': {'type': 'boolean', 'default': True,
+                           'label': 'Shift grid to drum transients'},
+    'beat_offset_ms': {'type': 'number', 'min': -100, 'max': 100, 'step': 1, 'default': 0,
+                       'label': 'Extra manual grid offset (ms, + = later)'},
 }
 
 
@@ -63,6 +68,7 @@ def run_librosa_anchored_grid(
     if len(beat_times) == 0:
         raise ValueError('librosa found no beats in the audio')
     db_idx = list(range(first_db % ts_num, len(beat_times), ts_num))
+    beat_times, calib = calibrate_beats(beat_times, audio_path, params, on_progress)
 
     on_progress('sections', 60, 'Segmenting structure…')
     section_times = _detect_sections(y, sr, max_sections) if max_sections > 0 else []
@@ -81,6 +87,7 @@ def run_librosa_anchored_grid(
         'generated_at': dt.datetime.now(dt.UTC).isoformat().replace('+00:00', 'Z'),
         'detected_key': key,
         'beat_times_s': [float(t) for t in np.asarray(beat_times)],
+        'calibration': calib,
         **core,
     }
     on_progress('done', 100, f'{len(beat_times)} beats, {len(core["tempo_segments"])} tempo segments')

@@ -127,7 +127,8 @@ def test_hard_drops_sixteenths():
     lanes = [{'tick': 0, 'frets': [2], 'sustain': 0}, {'tick': 48, 'frets': [2], 'sustain': 0},
              {'tick': 96, 'frets': [2], 'sustain': 0}]
     weights = {'0': 4, '48': 1, '96': 2}
-    out = run_drum_class_removal(None, {'lanes_filtered': {'lanes': lanes, 'metric_weights': weights}}, {}, _noop)
+    out = run_drum_class_removal(None, {'lanes_filtered': {'lanes': lanes, 'metric_weights': weights}},
+                                 {'medium_min_density': 0, 'easy_min_density': 0}, _noop)
     assert [e['tick'] for e in out['by_difficulty']['hard']['lanes']] == [0, 96]
     assert [e['tick'] for e in out['by_difficulty']['medium']['lanes']] == [0]
 
@@ -165,3 +166,46 @@ def test_drum_class_assigns_floor_tom_gm(tmp_path, monkeypatch):
                         {'tick': 192, 'metric_weight': 3, 'all_pitches_midi': [45], 'dropped': False}]}
     lanes = run_drum_gm_lanes(None, {'quantized': quant}, {}, _noop)['lanes']
     assert [e['frets'][0] for e in lanes] == [5, 3]
+
+
+def _groove(bars: int, bpm_micro: int = 120000):
+    """kick 1&3, snare 2&4, hats on 8ths — `bars` bars at res 192."""
+    lanes, weights = [], {}
+    for bar in range(bars):
+        for beat in range(4):
+            tick = bar * 768 + beat * 192
+            weights[str(tick)] = 4 if beat == 0 else 3
+            weights[str(tick + 96)] = 2
+            lanes.append({'tick': tick, 'frets': [0 if beat % 2 == 0 else 1], 'sustain': 0})
+            lanes.append({'tick': tick, 'frets': [2], 'sustain': 0})
+            lanes.append({'tick': tick + 96, 'frets': [2], 'sustain': 0})
+    grid = {'resolution': 192, 'tempo_segments': [{'tick_start': 0, 'micro_bpm': bpm_micro}]}
+    return sorted(lanes, key=lambda e: e['tick']), weights, grid
+
+
+def test_density_floor_relaxes_hats_on_slow_songs():
+    # Same groove at 100 BPM: beat-only Medium would be 2 notes/beat ≈ 3.3/s
+    # … actually 8 notes per 2.4 s bar = 3.3/s — below nothing; use a
+    # sparser groove by dropping on-beat hats to show the ladder engaging.
+    lanes, weights, grid = _groove(16, bpm_micro=100000)
+    lanes = [e for e in lanes if not (e['frets'] == [2] and e['tick'] % 192 == 0)]  # hats on 8ths only
+    out = run_drum_class_removal(None, {'grid': grid, 'lanes_filtered': {'lanes': lanes, 'metric_weights': weights}},
+                                 {}, _noop)
+    med = out['by_difficulty']['medium']
+    # Beat-only rule leaves kick/snare only (≈1.7/s at 100 BPM) → floor 2.5 kicks in → hats on 8ths restored.
+    assert med['params']['relaxed'] and med['params']['relaxed'][0] == {'2': 2}
+    assert any(e['frets'] == [2] and e['tick'] % 192 == 96 for e in med['lanes'])
+    assert med['params']['density'] >= 2.5
+    # With the floor off, the plain metric rule applies.
+    out2 = run_drum_class_removal(None, {'grid': grid, 'lanes_filtered': {'lanes': lanes, 'metric_weights': weights}},
+                                  {'medium_min_density': 0}, _noop)
+    assert out2['by_difficulty']['medium']['params']['relaxed'] == []
+    assert not any(e['frets'] == [2] for e in out2['by_difficulty']['medium']['lanes'])
+
+
+def test_density_floor_not_triggered_when_dense_enough():
+    lanes, weights, grid = _groove(16, bpm_micro=140000)
+    out = run_drum_class_removal(None, {'grid': grid, 'lanes_filtered': {'lanes': lanes, 'metric_weights': weights}},
+                                 {}, _noop)
+    assert out['by_difficulty']['medium']['params']['relaxed'] == []
+    assert out['by_difficulty']['easy']['params']['relaxed'] == []

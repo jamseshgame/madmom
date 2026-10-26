@@ -30,6 +30,7 @@ import numpy as np
 from ..audio_io import load_audio
 from ..drum_detect import CLASS_FOR_GM, DEFAULT_PARAMS, DRUM_CLASSES, GM_FOR_CLASS, detect_drum_hits, merge_hits
 from ..registry import EngineSpec, Stage, register_engine
+from ..tempo_math import build_tempo_segments, tick_to_seconds
 
 
 def _now() -> str:
@@ -291,6 +292,17 @@ DEFAULT_DRUM_DIFFICULTY: dict[str, dict[str, int | None]] = {
     'easy':   {'0': 4, '1': 3, '2': 3, '3': 3, '4': 3, '5': 3},
 }
 
+# Harmonix also keeps each difficulty near a notes-per-second budget
+# (five references: Medium 2.4–3.2 /s, Easy 2.0–2.7 /s at 115–160 BPM) —
+# on a slower song the 8th-note hats survive into Medium and even Easy
+# because they are not fast. So after the metric rules, relax one step at a
+# time (hats to 8ths, then kicks) until the difficulty reaches its floor.
+DEFAULT_MIN_DENSITY = {'medium': 2.5, 'easy': 2.1}
+_RELAX_LADDER = {
+    'medium': ({'2': 2}, {'0': 2}),      # hats on 8ths, then kicks on 8ths
+    'easy': ({'2': 2}, {'0': 3}),        # hats on 8ths, then kicks on beats
+}
+
 _REMOVAL_PARAMS = {
     'hard': {'type': 'enum', 'options': [], 'default': DEFAULT_DRUM_DIFFICULTY['hard'],
              'label': 'Hard: min metric weight per lane (null = remove lane)'},
@@ -300,6 +312,10 @@ _REMOVAL_PARAMS = {
              'label': 'Easy: min metric weight per lane'},
     'easy_max_pads_per_tick': {'type': 'number', 'min': 1, 'max': 3, 'step': 1, 'default': 2,
                                'label': 'Easy: max pads per tick (kick excluded)'},
+    'medium_min_density': {'type': 'number', 'min': 0, 'max': 6, 'step': 0.1, 'default': DEFAULT_MIN_DENSITY['medium'],
+                           'label': 'Medium: relax rules until at least this many notes/sec (0 = off)'},
+    'easy_min_density': {'type': 'number', 'min': 0, 'max': 6, 'step': 0.1, 'default': DEFAULT_MIN_DENSITY['easy'],
+                         'label': 'Easy: relax rules until at least this many notes/sec (0 = off)'},
     'medium_max_pads_per_tick': {'type': 'number', 'min': 1, 'max': 3, 'step': 1, 'default': 2,
                                  'label': 'Medium: max pads per tick (kick excluded)'},
 }
@@ -333,6 +349,17 @@ def _reduce(lanes: list[dict], metric_weights: dict[str, int], rule: dict[str, i
     return out
 
 
+def _span_seconds(lanes: list[dict], grid: dict | None) -> float:
+    if not lanes:
+        return 1.0
+    resolution = int((grid or {}).get('resolution', 192))
+    tempo = (grid or {}).get('tempo_segments') or [{'tick_start': 0, 'micro_bpm': 120000}]
+    segs = build_tempo_segments([{'tick': t['tick_start'], 'micro_bpm': t['micro_bpm']} for t in tempo], resolution)
+    t0 = tick_to_seconds(int(lanes[0]['tick']), segs, resolution)
+    t1 = tick_to_seconds(int(lanes[-1]['tick']), segs, resolution)
+    return max(1.0, t1 - t0)
+
+
 def run_drum_class_removal(audio_path, upstream, params, on_progress):
     inp = upstream.get('lanes_filtered')
     if inp is None:
@@ -341,12 +368,24 @@ def run_drum_class_removal(audio_path, upstream, params, on_progress):
     caps = {'hard': None,
             'medium': int(params.get('medium_max_pads_per_tick', 2)),
             'easy': int(params.get('easy_max_pads_per_tick', 2))}
+    span = _span_seconds(inp['lanes'], upstream.get('grid'))
     by_difficulty = {}
     for diff in ('easy', 'medium', 'hard'):
-        rule = params.get(diff) or DEFAULT_DRUM_DIFFICULTY[diff]
+        rule = dict(params.get(diff) or DEFAULT_DRUM_DIFFICULTY[diff])
+        lanes = _reduce(inp['lanes'], metric_weights, rule, caps[diff])
+        floor = float(params.get(f'{diff}_min_density', DEFAULT_MIN_DENSITY.get(diff, 0)) or 0)
+        relaxed: list[dict] = []
+        for step in _RELAX_LADDER.get(diff, ()):
+            if floor <= 0 or len(lanes) / span >= floor:
+                break
+            rule.update(step)
+            relaxed.append(step)
+            lanes = _reduce(inp['lanes'], metric_weights, rule, caps[diff])
         by_difficulty[diff] = {
-            'engine': 'drum-class-removal', 'params': rule, 'generated_at': _now(),
-            'lanes': _reduce(inp['lanes'], metric_weights, rule, caps[diff]),
+            'engine': 'drum-class-removal',
+            'params': {**rule, 'min_density': floor, 'relaxed': relaxed, 'density': round(len(lanes) / span, 3)},
+            'generated_at': _now(),
+            'lanes': lanes,
         }
     on_progress('done', 100, ' / '.join(f'{d}={len(v["lanes"])}' for d, v in by_difficulty.items()))
     return {'engine': 'drum-class-removal', 'params': params, 'generated_at': _now(),
