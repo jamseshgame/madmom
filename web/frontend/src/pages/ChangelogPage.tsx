@@ -10,6 +10,16 @@ type Release = {
 
 const RELEASES: Release[] = [
   {
+    version: '1.18.1',
+    date: '2026-10-27',
+    summary:
+      'Editor fix for drums (or any beat-anchored chart) playing progressively late in the game after using Audio sync / Tap sync. The tempo fine-tune and "Apply tempo" scaled every tempo marker by target ÷ the tick-0 marker — correct on the old constant-BPM charts, wrong on V3 charts whose tick-0 marker is the lead-in segment at an arbitrary tempo. Tap sync measured a 152 BPM song correctly, the panel applied 152 ÷ 157.9 to the whole map and the song became 146 BPM: in time at the start, 6 s late by the end.',
+    entries: [
+      { kind: 'fixed', text: 'Audio sync shows and edits the chart\'s average tempo over the charted span (beats ÷ seconds) and scales all markers so the average becomes the typed value; Tap sync\'s Apply tempo does the same. A constant-tempo chart still lands on exactly the typed BPM; a multi-marker map keeps its shape. The pivot is tick 0 (the offset), as the help text now says.' },
+      { kind: 'changed', text: 'Charts already affected: re-apply Tap sync (or type the song\'s real tempo) once after this update and the map is rescaled correctly; or regenerate the beatmap.' },
+    ],
+  },
+  {
     version: '1.18.0',
     date: '2026-10-19',
     summary:
