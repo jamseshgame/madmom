@@ -178,6 +178,65 @@ def _esc(s: str) -> str:
     return s.replace('\r', '').replace('\n', ' ').replace('"', '\\"')
 
 
+_SYNC_B_RE = re.compile(r'^\s*(\d+)\s*=\s*B\s+(\d+)\s*$', re.M)
+_RESOLUTION_RE = re.compile(r'Resolution\s*=\s*(\d+)')
+_NOTE_ROW_RE = re.compile(r'^([ \t]*)(\d+)([ \t]*=[ \t]*)([NSE])([ \t]+)([^\r\n]*?)[ \t]*$', re.M)
+
+
+def _tempo_segments_from_blocks(song_block: str, sync_block: str):
+    """(segments, resolution) for tempo_math from raw [Song]/[SyncTrack] text."""
+    from .pipeline.tempo_math import build_tempo_segments
+    res_m = _RESOLUTION_RE.search(song_block or '')
+    resolution = int(res_m.group(1)) if res_m else 192
+    markers = [{'tick': int(t), 'micro_bpm': int(b)} for t, b in _SYNC_B_RE.findall(sync_block or '')]
+    markers.sort(key=lambda m: m['tick'])
+    if not markers:
+        markers = [{'tick': 0, 'micro_bpm': 120000}]
+    return build_tempo_segments(markers, resolution), resolution
+
+
+def _sync_signature(song_block: str, sync_block: str) -> tuple:
+    res_m = _RESOLUTION_RE.search(song_block or '')
+    return (int(res_m.group(1)) if res_m else 192,
+            tuple(sorted((int(t), int(b)) for t, b in _SYNC_B_RE.findall(sync_block or ''))))
+
+
+def retime_section(content: str, src_song: str, src_sync: str, dst_song: str, dst_sync: str) -> str:
+    """Rewrite every row of a difficulty section from the source chart's
+    tempo map onto the destination chart's: tick → seconds (source map) →
+    tick (destination map). Sustains are retimed as end points so a held
+    note keeps its wall-clock length. Rows the tempo maps already agree on
+    come back unchanged (same tick, same text).
+
+    Needed because the merged chart carries ONE [SyncTrack] but beatmaps
+    for a track may have been generated with different grid engines (a
+    constant-BPM librosa grid vs a beat-by-beat madmom grid): their ticks
+    are on different clocks, and replaying one under the other's map
+    drifts further and further through the song.
+    """
+    from .pipeline.tempo_math import seconds_to_tick, tick_to_seconds
+    src_segs, src_res = _tempo_segments_from_blocks(src_song, src_sync)
+    dst_segs, dst_res = _tempo_segments_from_blocks(dst_song, dst_sync)
+
+    def conv(tick: int) -> int:
+        return seconds_to_tick(tick_to_seconds(tick, src_segs, src_res), dst_segs, dst_res)
+
+    def fix(m: re.Match) -> str:
+        indent, tick_s, eq, kind, sp, rest = m.groups()
+        tick = int(tick_s)
+        new_tick = conv(tick)
+        if kind in ('N', 'S'):
+            parts = rest.split()
+            if len(parts) >= 2 and parts[1].lstrip('-').isdigit():
+                length = int(parts[1])
+                if length > 0:
+                    parts[1] = str(max(0, conv(tick + length) - new_tick))
+                rest = ' '.join(parts)
+        return f'{indent}{new_tick}{eq}{kind}{sp}{rest}'
+
+    return _NOTE_ROW_RE.sub(fix, content)
+
+
 def merge_beatmap_charts(
     chart_paths_with_meta: list[tuple[str, str, dict]],
     output_path: str,
@@ -218,6 +277,7 @@ def merge_beatmap_charts(
     sections_out: list[tuple[str, str, str, int, str]] = []
     included: list[str] = []
     skipped: list[str] = []
+    retimed_stems: list[str] = []
 
     # Parallel to sections_out — one record per beatmap that contributed
     # sections. Carries the same identifiers as the [Beatmaps] rows in the
@@ -242,19 +302,31 @@ def merge_beatmap_charts(
             skipped.append(stem)
             continue
 
-        # Capture the first chart's header blocks — those become the merged
-        # chart's [Song]/[SyncTrack]/[Events] (all beatmaps for a track
-        # share the same tempo grid via the V2 pipeline).
+        # The first chart's header blocks become the merged chart's
+        # [Song]/[SyncTrack]/[Events]. Beatmaps for one track do NOT
+        # necessarily share a tempo grid (the grid is chosen per generation —
+        # a constant-BPM librosa grid vs a beat-by-beat madmom grid), so any
+        # later chart whose [SyncTrack]/Resolution differ is retimed onto the
+        # first one's map below; otherwise its notes would drift through the
+        # song when played under the wrong tempo map.
+        sm = re.search(r'\[Song\]\s*\{([^}]*)\}', content)
+        tk = re.search(r'\[SyncTrack\]\s*\{([^}]*)\}', content)
+        this_song = sm.group(1) if sm else ''
+        this_sync = tk.group(1) if tk else ''
         if song_block is None:
-            sm = re.search(r'\[Song\]\s*\{([^}]*)\}', content)
-            tk = re.search(r'\[SyncTrack\]\s*\{([^}]*)\}', content)
             ev = re.search(r'\[Events\]\s*\{([^}]*)\}', content)
             if sm:
-                song_block = sm.group(1)
+                song_block = this_song
             if tk:
-                sync_block = tk.group(1)
+                sync_block = this_sync
             if ev:
                 events_block = ev.group(1)
+        needs_retime = (
+            song_block is not None and sync_block is not None
+            and _sync_signature(this_song, this_sync) != _sync_signature(song_block, sync_block)
+        )
+        if needs_retime:
+            retimed_stems.append(stem)
 
         candidate_n = beatmap_index_per_stem.get(stem, 0) + 1
         any_section = False
@@ -277,7 +349,10 @@ def merge_beatmap_charts(
             row_text = (
                 f'  {section_name} = preset="{preset}" name="{name_tag}" beatmap_id="{bid}"'
             )
-            sections_out.append((section_name, m.group(1), suffix, candidate_n, row_text))
+            body = m.group(1)
+            if needs_retime:
+                body = retime_section(body, this_song, this_sync, song_block, sync_block)
+            sections_out.append((section_name, body, suffix, candidate_n, row_text))
             contributed_sections.append(section_name)
             any_section = True
 
@@ -355,6 +430,7 @@ def merge_beatmap_charts(
         'included': included,
         'skipped': skipped,
         'sections_by_beatmap': beatmap_records,
+        'retimed': retimed_stems,
     }
 
 
