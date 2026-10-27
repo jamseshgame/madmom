@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from app.services.pipeline.beat_grid import beats_to_grid, positions_to_downbeat_indices
+from app.services.pipeline.beat_grid import beats_to_grid, positions_to_downbeat_indices, smooth_beat_times
 from app.services.pipeline.engines.quantized_engines import _compute_metric_weight, _snap_to_grid
 from app.services.pipeline.tempo_math import build_tempo_segments, tick_to_seconds
 
@@ -37,7 +37,13 @@ def test_realistic_librosa_beats_land_on_grid():
 
     assert all(t % 192 == 0 for t in grid['beat_ticks'])
     assert all(t % 192 == 0 for t in grid['downbeats'])
-    assert _max_beat_error_ms(grid, beats) <= 5.0 + 1e-6
+    # Jitter smoothing (default 30 ms) lands the grid on the *true* beats,
+    # closer than the frame-quantized input it was given.
+    assert _max_beat_error_ms(grid, true) <= 5.0 + 1e-6
+    assert _max_beat_error_ms(grid, beats) <= 30.0 + 1e-6
+    raw = beats_to_grid(beats, audio_duration_s=125.0, smooth_tol_ms=0)
+    assert _max_beat_error_ms(raw, beats) <= 5.0 + 1e-6
+    assert len(grid['tempo_segments']) < len(raw['tempo_segments'])
     # Lead-in: 0.35 s ≈ 1 beat at 120 BPM → first beat at tick 192.
     assert grid['lead_in_beats'] == 1
     assert grid['beat_ticks'][0] == 192
@@ -62,10 +68,14 @@ def test_tempo_ramp_tracks_each_beat():
     # Accelerando 100 → 140 BPM over 120 beats.
     bpms = np.linspace(100, 140, 120)
     beats = np.concatenate([[0.5], 0.5 + np.cumsum(60.0 / bpms[:-1])])
-    grid = beats_to_grid(beats, audio_duration_s=beats[-1] + 2, merge_tol_ms=3.0)
+    grid = beats_to_grid(beats, audio_duration_s=beats[-1] + 2, merge_tol_ms=3.0, smooth_tol_ms=0)
     assert _max_beat_error_ms(grid, beats) <= 3.0 + 1e-6
     # A ramp cannot be merged into a single segment.
     assert len(grid['tempo_segments']) > 5
+    # With smoothing the ramp is still a ramp, just approximated within tolerance.
+    smooth = beats_to_grid(beats, audio_duration_s=beats[-1] + 2, merge_tol_ms=3.0, smooth_tol_ms=30)
+    assert _max_beat_error_ms(smooth, beats) <= 30.0 + 1e-6
+    assert len(smooth['tempo_segments']) > 3
 
 
 def test_constant_tempo_merges_to_few_segments():
@@ -116,3 +126,58 @@ def test_sections_snap_to_downbeats_and_start_at_zero():
 def test_positions_to_downbeat_indices():
     assert positions_to_downbeat_indices([1, 2, 3, 4, 1, 2, 3, 4, 1]) == [0, 4, 8]
     assert positions_to_downbeat_indices([3, 4, 1, 2, 3]) == [2]
+
+
+# ── beat-tracker jitter smoothing ────────────────────────────────────────
+
+def test_smoothing_collapses_frame_jitter_to_one_tempo():
+    # Steady 146 BPM, beats reported on madmom's 10 ms frame grid plus a
+    # little per-beat noise: the raw map needs a B marker every beat or two.
+    rng = np.random.default_rng(0)
+    true = 0.4 + np.arange(400) * (60 / 146)
+    beats = np.round(true / 0.01) * 0.01 + rng.normal(0, 0.003, len(true))
+    raw = beats_to_grid(beats, audio_duration_s=170.0, smooth_tol_ms=0)
+    grid = beats_to_grid(beats, audio_duration_s=170.0)
+    assert len(raw['tempo_segments']) > 50
+    assert len(grid['tempo_segments']) <= 3          # lead-in + one song tempo
+    main = grid['tempo_segments'][-1]['micro_bpm'] / 1000
+    assert abs(main - 146.0) < 0.05
+    # And it is *closer* to the true beats than the raw map.
+    assert _max_beat_error_ms(grid, true) < _max_beat_error_ms(raw, true)
+    assert _max_beat_error_ms(grid, true) < 4.0
+    assert grid['beat_times_s'] != [float(b) for b in beats]
+
+
+def test_smoothing_keeps_a_real_tempo_change():
+    # 120 BPM for 60 beats, then a hard cut to 100 BPM — a new section.
+    a = 0.5 + np.arange(60) * 0.5
+    b = a[-1] + 0.6 + np.arange(60) * 0.6
+    true = np.concatenate([a, b])
+    beats = np.round(true / 0.01) * 0.01
+    grid = beats_to_grid(beats, audio_duration_s=80.0)
+    bpms = [round(s['micro_bpm'] / 1000) for s in grid['tempo_segments'] if s.get('label') != 'lead-in']
+    assert 120 in bpms and 100 in bpms
+    assert len(grid['tempo_segments']) <= 4
+    assert _max_beat_error_ms(grid, true) <= 8.0
+    # The change lands on the right beat.
+    change = next(s['tick_start'] for s in grid['tempo_segments'] if round(s['micro_bpm'] / 1000) == 100)
+    assert abs(change - grid['beat_ticks'][59]) <= 192
+
+
+def test_smoothing_keeps_a_ritardando():
+    steady = 0.5 + np.arange(100) * 0.5
+    rit = steady[-1] + np.cumsum([0.56, 0.63, 0.72, 0.85, 1.0])
+    true = np.concatenate([steady, rit])
+    grid = beats_to_grid(true, audio_duration_s=60.0)
+    assert _max_beat_error_ms(grid, true) <= 30.0 + 1e-6
+    # Last beats slower than the body of the song.
+    assert grid['tempo_segments'][-1]['micro_bpm'] < 90_000
+
+
+def test_smooth_beat_times_edge_cases():
+    beats = [0.5, 1.0, 1.5]
+    assert smooth_beat_times(beats, 30) == beats
+    assert smooth_beat_times([0.5, 1.01, 1.5, 2.0, 2.49], 0) == [0.5, 1.01, 1.5, 2.0, 2.49]
+    out = smooth_beat_times([0.5, 1.01, 1.5, 2.0, 2.49, 3.0, 3.51, 4.0], 30)
+    assert all(b > a for a, b in zip(out, out[1:]))
+    assert max(abs(o - r) for o, r in zip(out, [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0])) < 0.006

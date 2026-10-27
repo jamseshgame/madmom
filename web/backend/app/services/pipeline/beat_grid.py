@@ -98,6 +98,85 @@ def _merge_runs(
     return segs
 
 
+def _split_points(bt: np.ndarray, tol_s: float) -> list[int]:
+    """Douglas–Peucker on the (beat index, beat time) curve: the fewest
+    breakpoints such that linear interpolation between them stays within
+    `tol_s` of every beat. Returns sorted indices including 0 and n-1."""
+    n = len(bt)
+    keep = {0, n - 1}
+    stack = [(0, n - 1)]
+    while stack:
+        a, b = stack.pop()
+        if b - a < 2:
+            continue
+        idx = np.arange(a + 1, b)
+        line = bt[a] + (idx - a) * (bt[b] - bt[a]) / (b - a)
+        err = np.abs(bt[a + 1:b] - line)
+        k = int(np.argmax(err))
+        if err[k] > tol_s:
+            m = a + 1 + k
+            keep.add(m)
+            stack.append((a, m))
+            stack.append((m, b))
+    return sorted(keep)
+
+
+def smooth_beat_times(beat_times: Sequence[float], tol_ms: float = 30.0) -> list[float]:
+    """Replace beat-tracker frame jitter with a piecewise-linear beat list.
+
+    Beat trackers report beats on a frame grid (madmom: 10 ms), so on a
+    steady song the beat-to-beat period wobbles by ±10 ms even though the
+    band is playing one tempo — encoded faithfully that becomes a `B`
+    marker every one or two beats (196 on a 2:45 song at a constant 146
+    BPM). The wobble is measurement error, not music, and a tempo map that
+    dense is both ugly in the editor and a hazard for any consumer that
+    accumulates error over hundreds of tempo changes.
+
+    The beat curve is simplified to the fewest straight runs that keep
+    every raw beat within `tol_ms` (Douglas–Peucker); each breakpoint is
+    then re-estimated by least squares over the adjacent runs so the
+    retained beats aren't themselves jittered samples. Genuine tempo
+    changes (a ritardando, a new section at a new tempo, a live band's
+    drift) exceed the tolerance and survive as breakpoints; a click-tracked
+    song collapses to one run. ``tol_ms <= 0`` returns the input unchanged.
+    """
+    bt = np.asarray([float(t) for t in beat_times], dtype=np.float64)
+    n = len(bt)
+    if tol_ms <= 0 or n < 4:
+        return [float(t) for t in bt]
+    bp = _split_points(bt, tol_ms / 1000.0)
+    idx = np.arange(n, dtype=np.float64)
+
+    def fit_at(a: int, b: int, at: int) -> float | None:
+        # Least-squares line over beats a..b (inclusive), evaluated at `at`.
+        if b - a < 2:
+            return None
+        x, y = idx[a:b + 1], bt[a:b + 1]
+        slope, intercept = np.polyfit(x, y, 1)
+        return float(slope * at + intercept)
+
+    new_times = []
+    for j, k in enumerate(bp):
+        ests = []
+        if j > 0:
+            e = fit_at(bp[j - 1], k, k)
+            if e is not None:
+                ests.append(e)
+        if j + 1 < len(bp):
+            e = fit_at(k, bp[j + 1], k)
+            if e is not None:
+                ests.append(e)
+        t = float(np.mean(ests)) if ests else float(bt[k])
+        # Never let the smoothed breakpoint leave the tolerance band itself.
+        t = float(np.clip(t, bt[k] - tol_ms / 1000.0, bt[k] + tol_ms / 1000.0))
+        new_times.append(t)
+    out = np.interp(idx, np.asarray(bp, dtype=np.float64), np.asarray(new_times))
+    # Keep strict monotonicity (a fit can't invert a sane beat list, but
+    # the clip above could in a degenerate 3-beat run).
+    out = np.maximum.accumulate(out + np.arange(n) * 1e-9)
+    return [float(t) for t in out]
+
+
 def beats_to_grid(
     beat_times: Sequence[float],
     *,
@@ -106,6 +185,7 @@ def beats_to_grid(
     downbeat_indices: Sequence[int] | None = None,
     beats_per_bar: int = 4,
     merge_tol_ms: float = 5.0,
+    smooth_tol_ms: float = 30.0,
     section_times: Sequence[float] | None = None,
     section_labels: Sequence[str] | None = None,
 ) -> dict[str, Any]:
@@ -121,6 +201,10 @@ def beats_to_grid(
     merge_tol_ms
         Max timing error allowed for any beat when merging adjacent tempo
         segments. Lower = more `B` markers, tighter fit.
+    smooth_tol_ms
+        If > 0, first run `smooth_beat_times` so tracker frame jitter does
+        not turn into a `B` marker per beat; 15 ms absorbs madmom's 10 ms
+        frames while keeping real tempo changes.
     section_times / section_labels
         Optional structural boundaries in seconds; snapped to the nearest
         downbeat tick.
@@ -132,6 +216,8 @@ def beats_to_grid(
     bt = bt[bt >= 0]
     if len(bt) == 0:
         bt = np.array([0.0])
+    if smooth_tol_ms > 0:
+        bt = np.asarray(smooth_beat_times(bt, smooth_tol_ms), dtype=np.float64)
     period = _median_period(bt)
     merge_tol_s = merge_tol_ms / 1000.0
 
@@ -237,6 +323,7 @@ def beats_to_grid(
         'downbeats': downbeat_ticks,
         'sections': sections,
         'beat_ticks': [int(t) for t in beat_ticks],
+        'beat_times_s': [float(t) for t in bt],   # post-smoothing, so it matches the map
         'lead_in_beats': int(lead_in),
     }
 

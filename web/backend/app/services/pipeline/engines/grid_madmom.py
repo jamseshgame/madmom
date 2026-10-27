@@ -32,6 +32,8 @@ _PARAMS_SCHEMA = {
                    'label': 'Tick resolution'},
     'merge_tol_ms': {'type': 'number', 'min': 1, 'max': 30, 'step': 1, 'default': 5,
                      'label': 'Tempo-map merge tolerance (ms)'},
+    'smooth_tol_ms': {'type': 'number', 'min': 0, 'max': 60, 'step': 1, 'default': 30,
+                      'label': 'Smooth beat-tracker jitter (ms, 0 = raw beats, one B marker per beat)'},
     'max_sections': {'type': 'number', 'min': 0, 'max': 16, 'step': 1, 'default': 8,
                      'label': 'Max structural sections (0 = none)'},
     'min_bpm': {'type': 'number', 'min': 40, 'max': 150, 'step': 1, 'default': 55,
@@ -79,6 +81,7 @@ def run_madmom_grid(
         raise ValueError('madmom-downbeat requires a full-mix audio file')
     resolution = int(params.get('resolution') or 192)
     merge_tol_ms = float(params.get('merge_tol_ms') or 5)
+    smooth_tol_ms = float(params['smooth_tol_ms']) if params.get('smooth_tol_ms') is not None else 30.0
     max_sections = int(params.get('max_sections') if params.get('max_sections') is not None else 8)
     bpb = _parse_bpb(params.get('beats_per_bar', '3,4'))
     min_bpm = float(params.get('min_bpm') or 55)
@@ -100,7 +103,7 @@ def run_madmom_grid(
     core = beats_to_grid(
         beat_times, resolution=resolution, audio_duration_s=duration,
         downbeat_indices=db_idx or None, beats_per_bar=bpb[-1],
-        merge_tol_ms=merge_tol_ms, section_times=section_times or None,
+        merge_tol_ms=merge_tol_ms, smooth_tol_ms=smooth_tol_ms, section_times=section_times or None,
     )
     payload = {
         'engine': 'madmom-downbeat',
