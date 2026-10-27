@@ -20,6 +20,7 @@ import { materializeSequence, normalizeSequence } from '../chart/sequences'
 import { marqueeHitIds, rangeSelectIds, type MarqueeRect } from '../chart/selection'
 import { checkNoteRules, autoCleanNotes, ruleRemovalCount } from '../chart/noteRules'
 import { fitTapTempoBpm } from '../chart/tapsync'
+import { averageBpm, scaleTempoMarkersToAverage } from '../chart/tempoScale'
 
 // .chart parsing ------------------------------------------------------------
 
@@ -321,6 +322,15 @@ function secToTick(segs: TempoSegment[], resolution: number, sec: number): numbe
 // Write the audio offset back into the [Song] block's `Offset = …` line so it
 // round-trips. Replaces an existing Offset, inserts one after Resolution if the
 // block has none, and is a no-op if there's no [Song] block to write into.
+// Tick span the Audio-sync tempo number is averaged over: the last note of
+// the active section, or the last tempo marker when there are no notes.
+function chartEndTick(c: Pick<ChartState, 'notes' | 'tempoMarkers' | 'resolution'>): number {
+  let end = 0
+  for (const n of c.notes) if (n.tick + (n.sustain || 0) > end) end = n.tick + (n.sustain || 0)
+  for (const m of c.tempoMarkers) if (m.tick > end) end = m.tick
+  return Math.max(c.resolution, end)
+}
+
 function applyOffsetToFullText(fullText: string, offsetSec: number): string {
   // Trim trailing zeros but keep it a plain decimal (CH parsers dislike "1e-1").
   const val = Number.isInteger(offsetSec) ? String(offsetSec) : String(Number(offsetSec.toFixed(6)))
@@ -8572,7 +8582,7 @@ export default function BeatmapEditor() {
             title="Audio sync (offset + tempo)"
             right={
               <span className="text-[11px] font-mono text-gray-500 tabular-nums">
-                {Math.round((chart?.audioOffsetSec ?? 0) * 1000)} ms · {(chart?.bpm ?? 0).toFixed(2)} BPM
+                {Math.round((chart?.audioOffsetSec ?? 0) * 1000)} ms · {(chart ? averageBpm(chart.tempoMarkers, chart.resolution, chartEndTick(chart)) : 0).toFixed(2)} BPM
               </span>
             }
           >
@@ -8627,28 +8637,26 @@ export default function BeatmapEditor() {
                     on the beat. Saved as <span className="font-mono">[Song] Offset</span>.
                   </p>
 
-                  {/* Tempo fine-tune. Edits the tick-0 BPM marker; notes + beat
-                      lines both render through this so they stay locked and
-                      track the audio. Use after offset: offset anchors beat 1,
-                      BPM kills the drift over the rest of the song. */}
+                  {/* Tempo fine-tune. Shows and edits the chart's AVERAGE tempo
+                      over the charted span and scales every marker by the same
+                      ratio, so the map keeps its shape and the song as a whole
+                      speeds up or slows down. It must not be keyed off the
+                      tick-0 marker: on beat-anchored (V3) charts that marker
+                      is the lead-in segment at an arbitrary tempo, and scaling
+                      by target / lead-in used to drag a 152 BPM song down to
+                      146 — notes progressively late through the song. */}
                   {(() => {
-                    const bpm = chart?.bpm ?? 0
+                    const bpm = chart ? averageBpm(chart.tempoMarkers, chart.resolution, chartEndTick(chart)) : 0
                     const markerCount = chart?.tempoMarkers.length ?? 0
-                    // Scale EVERY tempo marker by the same ratio so a global
-                    // tempo correction applies across the whole song — editing
-                    // only the tick-0 marker would leave later segments (and
-                    // therefore the click track in them) at the old tempo.
                     const setBpm = (next: number) =>
                       setChart((prev) => {
                         if (!prev) return prev
-                        const cur0 = prev.tempoMarkers[0]?.microBpm ?? 120000
-                        const target = Math.max(1000, Math.round(next * 1000))
-                        const ratio = target / cur0
-                        const markers = prev.tempoMarkers.map((m, i) =>
-                          i === 0 ? { ...m, microBpm: target } : { ...m, microBpm: Math.max(1000, Math.round(m.microBpm * ratio)) },
+                        const markers = scaleTempoMarkersToAverage(
+                          prev.tempoMarkers, prev.resolution, chartEndTick(prev), next,
                         )
                         setDirty(true)
-                        return { ...prev, tempoMarkers: markers, bpm: target / 1000, bpmRaw: target }
+                        const bpmRaw = markers[0]?.microBpm ?? prev.bpmRaw
+                        return { ...prev, tempoMarkers: markers, bpm: bpmRaw / 1000, bpmRaw }
                       })
                     const nudge = (d: number) => setBpm(Math.round((bpm + d) * 1000) / 1000)
                     const multiMarker = markerCount > 1
@@ -8684,11 +8692,12 @@ export default function BeatmapEditor() {
                         </div>
                         <p className="text-[11px] text-gray-600 mt-1">
                           Fixes drift after the offset lines up the start. Pivots around
-                          beat&nbsp;1, so set the offset first, then nudge BPM until a late
-                          beat re-aligns.{' '}
+                          tick&nbsp;0 (the offset), so set the offset first, then nudge BPM
+                          until a late beat re-aligns.{' '}
                           {multiMarker && (
                             <span className="text-amber-600/80">
-                              This chart has {markerCount} tempo markers — all are scaled together by the same ratio.
+                              This chart has {markerCount} tempo markers; the number shown is the
+                              average over the song and all markers are scaled together by the same ratio.
                             </span>
                           )}
                         </p>
@@ -8732,20 +8741,16 @@ export default function BeatmapEditor() {
               const applyTempo = () =>
                 setChart((prev) => {
                   if (!prev || bpmFit === null) return prev
-                  // Scale all markers by the ratio (matches the BPM panel) so a
-                  // multi-tempo chart's whole map shifts, not just tick 0.
-                  const cur0 = prev.tempoMarkers[0]?.microBpm ?? 120000
-                  const target = Math.max(1000, Math.round(bpmFit * 1000))
-                  const ratio = target / cur0
+                  // The tapped tempo is the song's AVERAGE tempo, so scale the
+                  // whole map to that average (same as the BPM panel). Scaling
+                  // by tapped / tick-0 marker was wrong on beat-anchored charts,
+                  // whose tick-0 marker is the lead-in segment.
+                  const markers = scaleTempoMarkersToAverage(
+                    prev.tempoMarkers, prev.resolution, chartEndTick(prev), bpmFit,
+                  )
                   setDirty(true)
-                  return {
-                    ...prev,
-                    tempoMarkers: prev.tempoMarkers.map((m, i) =>
-                      i === 0 ? { ...m, microBpm: target } : { ...m, microBpm: Math.max(1000, Math.round(m.microBpm * ratio)) },
-                    ),
-                    bpm: target / 1000,
-                    bpmRaw: target,
-                  }
+                  const bpmRaw = markers[0]?.microBpm ?? prev.bpmRaw
+                  return { ...prev, tempoMarkers: markers, bpm: bpmRaw / 1000, bpmRaw }
                 })
               return (
                 <>
@@ -8791,7 +8796,7 @@ export default function BeatmapEditor() {
                         {bpmFit === null ? '—' : `${bpmFit.toFixed(2)}`}
                       </div>
                       <div className="text-[10px] text-gray-600 tabular-nums">
-                        {bpmFit === null || !chart ? ' ' : `now ${chart.bpm.toFixed(2)}`}
+                        {bpmFit === null || !chart ? ' ' : `now ${averageBpm(chart.tempoMarkers, chart.resolution, chartEndTick(chart)).toFixed(2)} avg`}
                       </div>
                     </div>
                   </div>
