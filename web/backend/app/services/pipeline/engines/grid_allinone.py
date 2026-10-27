@@ -113,6 +113,7 @@ def run_allinone_anchored_grid(
 
     resolution = int(params.get('resolution') or 192)
     merge_tol_ms = float(params.get('merge_tol_ms') or 5)
+    smooth_tol_ms = float(params['smooth_tol_ms']) if params.get('smooth_tol_ms') is not None else 30.0
 
     on_progress('load', 5, 'Loading audio…')
     y, sr = load_audio(audio_path, target_sr=44100, mono=False)
@@ -132,7 +133,7 @@ def run_allinone_anchored_grid(
     on_progress('derive', 70, 'Building beat-anchored tempo map…')
     core = beats_to_grid(
         beats, resolution=resolution, audio_duration_s=duration,
-        downbeat_indices=db_idx, merge_tol_ms=merge_tol_ms,
+        downbeat_indices=db_idx, merge_tol_ms=merge_tol_ms, smooth_tol_ms=smooth_tol_ms,
         section_times=[float(s.start) for s in raw_segments] or None,
         section_labels=[str(getattr(s, 'label', 'section')) for s in raw_segments] or None,
     )
@@ -155,6 +156,8 @@ register_engine(Stage.GRID, EngineSpec(
         'resolution': _PARAMS_SCHEMA['resolution'],
         'merge_tol_ms': {'type': 'number', 'min': 1, 'max': 30, 'step': 1, 'default': 5,
                          'label': 'Tempo-map merge tolerance (ms)'},
+        'smooth_tol_ms': {'type': 'number', 'min': 0, 'max': 60, 'step': 1, 'default': 30,
+                          'label': 'Smooth beat-tracker jitter (ms, 0 = raw beats, one B marker per beat)'},
     },
     runner=run_allinone_anchored_grid,
 ))
